@@ -192,6 +192,79 @@ fn jit_constructor_creation_cache_deopts_on_prototype_changes() {
         ),
         "9:false"
     );
+    // An inherited writable data property still makes OrdinarySet create an own property. This
+    // shape is common in prototype-style constructors; changing it to a setter must invalidate
+    // the creation proof before the next store.
+    assert_eq!(
+        run_jit(
+            "function C(v){this.x=v;}
+             C.prototype.x=0;
+             var last;
+             for(var i=0;i<1000;i++) last=new C(i);
+             var hits=0;
+             Object.defineProperty(C.prototype,'x',
+               {set:function(v){hits+=v;},configurable:true});
+             var changed=new C(9);
+             last.x+':'+Object.hasOwn(last,'x')+':'+hits+':'+Object.hasOwn(changed,'x')"
+        ),
+        "999:true:9:false"
+    );
+    // Activation-requiring forwarding constructors learn the initialized size dynamically. Their
+    // reserved storage must not weaken the same live prototype/descriptor guards.
+    assert_eq!(
+        run_jit(
+            "function C(){
+               this.ctor=(arguments.callee===C);
+               this.argc=arguments.length;
+               this.initialize.apply(this,arguments);
+             }
+             C.prototype.x=0;
+             C.prototype.initialize=function(v){this.x=v;this.y=v+1;};
+             var last;
+             for(var i=0;i<1000;i++) last=new C(i);
+             var hits=0;
+             Object.defineProperty(C.prototype,'x',
+               {set:function(v){hits+=v;},configurable:true});
+             var changed=new C(9);
+             [last.ctor,last.argc,last.x,last.y,Object.hasOwn(last,'x'),hits,
+              changed.ctor,changed.argc,Object.hasOwn(changed,'x'),changed.y].join(':')"
+        ),
+        "true:1:999:1000:true:9:true:1:false:10"
+    );
+    // The activation-aware construct entry must still honor an explicit object return.
+    assert_eq!(
+        run_jit(
+            "function R(){arguments;return {argc:arguments.length};}
+             var r;
+             for(var i=0;i<1000;i++) r=new R(1,2,3);
+             (r instanceof R)+':'+r.argc"
+        ),
+        "false:3"
+    );
+    // One base initializer can run against several subclass prototypes. Creation feedback is
+    // polymorphic in prototype identity even when every fresh receiver has the same empty shape;
+    // mutating one prototype must invalidate all ways before the next assignment.
+    assert_eq!(
+        run_jit(
+            "function Base(v){this.x=v;}
+             function A(v){Base.call(this,v)} function B(v){Base.call(this,v)}
+             function C(v){Base.call(this,v)} function D(v){Base.call(this,v)}
+             A.prototype=Object.create(Base.prototype);
+             B.prototype=Object.create(Base.prototype);
+             C.prototype=Object.create(Base.prototype);
+             D.prototype=Object.create(Base.prototype);
+             var cs=[A,B,C,D], last=[];
+             for(var i=0;i<1200;i++){var k=i&3;last[k]=new cs[k](i);}
+             var seen=0;
+             Object.defineProperty(B.prototype,'x',{
+               configurable:true,set:function(v){seen+=v;}
+             });
+             var changed=new B(7), normal=new C(8);
+             [last[0].x,last[1].x,last[2].x,last[3].x,seen,
+              Object.hasOwn(changed,'x'),normal.x].join(':')"
+        ),
+        "1196:1197:1198:1199:7:false:8"
+    );
 }
 
 #[test]
@@ -1549,6 +1622,5664 @@ fn packed_dense_numeric_array_semantics() {
 }
 
 #[test]
+fn small_holey_arrays_keep_absence_and_prototype_setter_semantics() {
+    assert_eq!(
+        run("var a=new Array(4); [a.length,0 in a,Object.hasOwn(a,0),Object.keys(a).length,a[0]].join('|')"),
+        "4|false|false|0|"
+    );
+    assert_eq!(
+        run("var seen=0; Object.defineProperty(Array.prototype,'0',{set(v){seen=v},configurable:true}); var a=new Array(4); a[0]=7; var out=[seen,Object.hasOwn(a,0),a.length].join('|'); delete Array.prototype[0]; out"),
+        "7|false|4"
+    );
+    assert_eq!(
+        run("var a=new Array(4); a[3]=9; a[0]=2; delete a[3]; [a.length,a[0],3 in a,Object.keys(a).join(',')].join('|')"),
+        "4|2|false|0"
+    );
+    assert_eq!(
+        run("var a=new Array(4); a.length=2; a.length=4; [2 in a,3 in a,a.length].join('|')"),
+        "false|false|4"
+    );
+    assert_eq!(
+        run("var a=new Array(4); Object.preventExtensions(a); a[0]=1; [Object.hasOwn(a,0),a.length].join('|')"),
+        "false|4"
+    );
+}
+
+#[test]
+fn packed_elements_do_not_duplicate_far_index_entries() {
+    assert_eq!(
+        run("var a=[0,1,2,3,4,5,6,7]; a[300]=1; for(var i=8;i<300;i++)a[i]=i; a[300]=2; delete a[300]; var keys=Reflect.ownKeys(a).filter(k=>k==='300').length; [300 in a,keys,a.length].join('|')"),
+        "false|0|301"
+    );
+}
+
+#[test]
+fn jit_linked_scan_preserves_loose_htmldda_null_semantics() {
+    assert_eq!(
+        run_jit(
+            "function loose(next){var peek;while((peek=next.link)!=null)next=peek;return [next,peek]}
+             function strict(next){var peek;while((peek=next.link)!==null)next=peek;return [next,peek]}
+             for(var i=0;i<600;i++){var tail={link:null},head={link:tail};loose(head);strict(head)}
+             var dda=$262.IsHTMLDDA;dda.link=null;var head={link:dda};var a=loose(head),b=strict(head);
+             [a[0]===head,a[1]===dda,b[0]===dda,b[1]===null].join('|')"
+        ),
+        "true|true|true|true"
+    );
+}
+
+#[test]
+fn jit_numeric_diamond_fills_small_holey_arrays_and_deopts_for_setters() {
+    assert_eq!(
+        run_jit(
+            "var LIMIT=4;
+             function Worker(){this.v=0}
+             Worker.prototype.fill=function(packet){var i=0;while(i<LIMIT){this.v++;if(this.v>26)this.v=1;packet.a[i]=this.v;i++}return packet.a.join(',')};
+             var w=new Worker,last;for(var n=0;n<600;n++)last=w.fill({a:new Array(4)});
+             var seen=0;Object.defineProperty(Array.prototype,'0',{set(v){seen=v},configurable:true});
+             var p={a:new Array(4)},out=w.fill(p);delete Array.prototype[0];
+             [last,seen,Object.hasOwn(p.a,0),p.a[1],p.a.length,out].join('|')"
+        ),
+        "5,6,7,8|9|false|10|4|,10,11,12"
+    );
+}
+
+#[test]
+fn jit_scheduler_shell_guards_methods_globals_and_value_types() {
+    assert_eq!(
+        run_jit(
+            "var HELD=4,SUSPENDED=2;
+             function Tcb(link,state,id){this.link=link;this.state=state;this.id=id}
+             var originalHeld=Tcb.prototype.held=function(){return (this.state&HELD)!=0||(this.state==SUSPENDED)};
+             function Scheduler(list){this.list=list;this.current=null;this.seen=0}
+             Scheduler.prototype.schedule=function(){
+               this.current=this.list;
+               while(this.current!=null){
+                 if(this.current.held())this.current=this.current.link;
+                 else{this.seen=this.current.id;this.current=null}
+               }
+               return this.seen
+             };
+             function warmSchedule(s,n){var out=0;for(var i=0;i<n;i++)out=s.schedule();return out}
+             var active=new Tcb(null,0,7),held=new Tcb(active,4,3),s=new Scheduler(held);
+             var warm=warmSchedule(s,600);
+             Tcb.prototype.held=function(){return false};
+             s.list=held;var methodChanged=s.schedule();
+             Tcb.prototype.held=originalHeld;HELD=0;
+             s.list=held;var globalChanged=s.schedule();
+             HELD=4;held.state='4';
+             s.list=held;var stateChanged=s.schedule();
+             held.state=4;Object.setPrototypeOf(held,{held:function(){return false}});
+             s.list=held;var protoChanged=s.schedule();
+             [warm,methodChanged,globalChanged,stateChanged,protoChanged,s.current===null].join('|')"
+        ),
+        "7|3|3|7|3|true"
+    );
+}
+
+#[test]
+fn jit_scheduler_active_prefix_materializes_and_deopts_transactionally() {
+    assert_eq!(
+        run_jit(
+            "var HELD=4,SUSPENDED=2,SR=3,RUNNING=0,RUNNABLE=1;
+             function Task(){this.last=99}
+             Task.prototype.run=function(packet){this.last=packet==null?-1:packet.id;return null};
+             function Tcb(link,state,queue,task,id){
+               this.link=link;this.state=state;this.queue=queue;this.task=task;this.id=id
+             }
+             Tcb.prototype.held=function(){return (this.state&HELD)!=0||(this.state==SUSPENDED)};
+             var originalRun=Tcb.prototype.run=function(){
+               if(this.state==SR){
+                 var packet=this.queue;this.queue=packet.link;
+                 if(this.queue==null)this.state=RUNNING;else this.state=RUNNABLE
+               }else packet=null;
+               return this.task.run(packet)
+             };
+             function Scheduler(list){this.list=list;this.current=null;this.currentId=-1}
+             Scheduler.prototype.schedule=function(){
+               this.current=this.list;
+               while(this.current!=null){
+                 if(this.current.held())this.current=this.current.link;
+                 else{this.currentId=this.current.id;this.current=this.current.run()}
+               }
+             };
+             function hot(s,t,p,tail,n){
+               for(var i=0;i<n;i++){p.link=(i&1)?null:tail;t.state=SR;t.queue=p;s.schedule()}
+             }
+             var task=new Task(),p={link:null,id:5},tail={link:null,id:7};
+             var t=new Tcb(null,SR,p,task,42),gate=new Tcb(t,HELD,null,task,9);
+             var s=new Scheduler(gate);hot(s,t,p,tail,600);
+             var warm=[task.last,t.state,s.currentId,s.current===null];
+             p.link=tail;t.state=SR;t.queue=p;s.schedule();
+             var objectLink=[t.queue===tail,t.state,task.last];
+             p.link=p;t.state=SR;t.queue=p;s.schedule();
+             var selfLink=[t.queue===p,t.state,task.last];
+             p.link=undefined;t.state=SR;t.queue=p;s.schedule();
+             var undefinedLink=[t.queue===undefined,t.state,task.last];
+             var dda=$262.IsHTMLDDA;p.link=dda;t.state=SR;t.queue=p;s.schedule();
+             var ddaLink=[t.queue===dda,t.state,task.last];
+             p.link=null;SR=99;t.state=3;t.queue=p;s.schedule();
+             var globalChanged=[task.last,t.state];
+             SR=3;Tcb.prototype.run=function(){this.state=77;return null};
+             t.state=SR;t.queue=p;s.schedule();var methodChanged=t.state;
+             Tcb.prototype.run=originalRun;var gets=0,sets=0,stored=1;
+             Object.defineProperty(t,'queue',{get(){gets++;return p},set(v){sets++;stored=v},configurable:true});
+             t.state=SR;p.link=null;s.schedule();
+             [warm,objectLink,selfLink,undefinedLink,ddaLink,globalChanged,methodChanged,
+              gets,sets,stored===null,t.state,task.last].flat().join('|')"
+        ),
+        "5|0|42|true|true|1|5|true|1|5|true|0|5|true|0|5|-1|3|77|2|1|true|1|5"
+    );
+}
+
+#[test]
+fn jit_scheduler_active_inline_null_materialization_preserves_stale_owner_aliases() {
+    assert_eq!(
+        run_jit(
+            "var HELD=4,SUSPENDED=2,SR=3,RUNNING=0,RUNNABLE=1;
+             function Task(next){this.next=next;this.last=-2}
+             Task.prototype.run=function(packet){this.last=packet==null?-1:packet.id;return this.next};
+             function Tcb(link,state,queue,task,id){
+               this.link=link;this.state=state;this.queue=queue;this.task=task;this.id=id
+             }
+             Tcb.prototype.held=function(){return (this.state&HELD)!=0||(this.state==SUSPENDED)};
+             Tcb.prototype.run=function(){
+               if(this.state==SR){
+                 var packet=this.queue;this.queue=packet.link;
+                 if(this.queue==null)this.state=RUNNING;else this.state=RUNNABLE
+               }else packet=null;
+               return this.task.run(packet)
+             };
+             function Scheduler(list){this.list=list;this.current=null;this.currentId=-1}
+             Scheduler.prototype.schedule=function(){
+               this.current=this.list;
+               while(this.current!=null){
+                 if(this.current.held())this.current=this.current.link;
+                 else{this.currentId=this.current.id;this.current=this.current.run()}
+               }
+             };
+             var tailTask=new Task(null),tail=new Tcb(null,RUNNING,null,tailTask,2);
+             var aliasTask=new Task(tail),alias=new Tcb(null,SR,null,aliasTask,1);
+             alias.queue=alias;
+             var s=new Scheduler(alias);
+             for(var i=0;i<600;i++){
+               alias.state=SR;alias.queue=alias;aliasTask.next=tail;
+               tail.state=RUNNING;tailTask.next=null;s.schedule()
+             }
+             var aliasResult=[aliasTask.last,tailTask.last,s.currentId,s.current===null];
+             var loneTask=new Task(tail),lone=new Tcb(null,SR,{link:null,id:17},loneTask,3);
+             tail.state=RUNNING;tailTask.next=null;s.list=lone;s.schedule();
+             var lastOwnerResult=[loneTask.last,tailTask.last,lone.state,s.currentId,s.current===null];
+             [aliasResult,lastOwnerResult].flat().join('|')"
+        ),
+        "1|-1|2|true|17|-1|0|2|true"
+    );
+}
+
+#[test]
+fn jit_scheduler_active_null_dispatches_all_richards_roles_and_owners() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'active null roles: ' + message;
+        }
+
+        // Device's buffered packet moves to a lower-priority held target. Returning the current
+        // TCB makes the following null iteration suspend it, while the target retains the owner.
+        var deviceScheduler = new Scheduler();
+        var deviceTask = new DeviceTask(deviceScheduler);
+        var devicePacket = new Packet(null, ID_WORKER, KIND_DEVICE);
+        devicePacket.a1 = 91;
+        deviceTask.v1 = devicePacket;
+        var deviceTarget = new TaskControlBlock(null, ID_WORKER, 1, null, {
+          run: function() { throw 'device target ran'; }
+        });
+        deviceTarget.state = STATE_SUSPENDED | STATE_HELD;
+        var device = new TaskControlBlock(
+            null, ID_DEVICE_A, 2, null, deviceTask);
+        device.state = STATE_RUNNING;
+        deviceScheduler.blocks[ID_WORKER] = deviceTarget;
+        deviceScheduler.list = device;
+        deviceScheduler.schedule();
+        check(deviceTask.v1 === null && deviceTarget.queue === devicePacket,
+              'Device packet owner moved');
+        check(devicePacket.link === null && devicePacket.id === ID_DEVICE_A &&
+              devicePacket.a1 === 91 && deviceScheduler.queueCount === 1,
+              'Device queue writes');
+        check(device.state === STATE_SUSPENDED &&
+              deviceTarget.state === (STATE_SUSPENDED | STATE_HELD | STATE_RUNNABLE) &&
+              deviceScheduler.currentId === ID_DEVICE_A &&
+              deviceScheduler.currentTcb === null,
+              'Device completion');
+
+        // HandlerTask and WorkerTask deliberately have the same three own fields in the same
+        // order. A completed Handler work packet must take its queue arm, not Worker's null arm.
+        var handlerScheduler = new Scheduler();
+        var handlerTask = new HandlerTask(handlerScheduler);
+        var handlerWork = new Packet(null, ID_WORKER, KIND_WORK);
+        handlerWork.a1 = DATA_SIZE;
+        handlerWork.a2[0] = 92;
+        handlerTask.v1 = handlerWork;
+        var handlerTarget = new TaskControlBlock(null, ID_WORKER, 1, null, {
+          run: function() { throw 'handler target ran'; }
+        });
+        handlerTarget.state = STATE_SUSPENDED | STATE_HELD;
+        var handler = new TaskControlBlock(
+            null, ID_HANDLER_A, 2, null, handlerTask);
+        handler.state = STATE_RUNNING;
+        handlerScheduler.blocks[ID_WORKER] = handlerTarget;
+        handlerScheduler.list = handler;
+        handlerScheduler.schedule();
+        check(handlerTask.v1 === null && handlerTarget.queue === handlerWork,
+              'Handler work owner moved');
+        check(handlerWork.link === null && handlerWork.id === ID_HANDLER_A &&
+              handlerWork.a1 === DATA_SIZE && handlerScheduler.queueCount === 1,
+              'Handler queue writes');
+        check(handler.state === STATE_SUSPENDED &&
+              handlerTarget.state === (STATE_SUSPENDED | STATE_HELD | STATE_RUNNABLE) &&
+              handlerScheduler.currentId === ID_HANDLER_A &&
+              handlerScheduler.currentTcb === null,
+              'Handler completion');
+
+        var workerScheduler = new Scheduler();
+        var workerTask = new WorkerTask(workerScheduler, ID_HANDLER_A, 17);
+        var worker = new TaskControlBlock(
+            null, ID_WORKER, 2, null, workerTask);
+        worker.state = STATE_RUNNING;
+        workerScheduler.list = worker;
+        workerScheduler.schedule();
+        check(Object.keys(handlerTask).join('|') ===
+              Object.keys(workerTask).join('|') &&
+              Object.getPrototypeOf(handlerTask) !== Object.getPrototypeOf(workerTask),
+              'Handler and Worker own layouts match');
+        check(workerTask.v1 === ID_HANDLER_A && workerTask.v2 === 17,
+              'Worker fields untouched');
+        check(worker.state === STATE_SUSPENDED &&
+              workerScheduler.currentId === ID_WORKER &&
+              workerScheduler.currentTcb === null,
+              'Worker completion');
+
+        var idleScheduler = new Scheduler();
+        var idleTask = new IdleTask(idleScheduler, 23, 1);
+        var idle = new TaskControlBlock(null, ID_IDLE, 1, null, idleTask);
+        idle.state = STATE_RUNNING;
+        idleScheduler.list = idle;
+        idleScheduler.schedule();
+        check(idleTask.count === 0 && idleTask.v1 === 23,
+              'Idle numeric writes');
+        check(idle.state === STATE_HELD && idleScheduler.holdCount === 1 &&
+              idleScheduler.currentId === ID_IDLE && idleScheduler.currentTcb === null,
+              'Idle completion');
+
+        check(device.task === deviceTask && handler.task === handlerTask &&
+              worker.task === workerTask && idle.task === idleTask,
+              'TCB task owners retained');
+        check(deviceScheduler.list === device && handlerScheduler.list === handler &&
+              workerScheduler.list === worker && idleScheduler.list === idle,
+              'scheduler list owners retained');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_active_null_dispatch_replays_run_changes_and_task_accessor_once() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'active null role guards: ' + message;
+        }
+        function oneRole(role) {
+          var scheduler = new Scheduler(), task, id;
+          if (role === 'Device') {
+            task = new DeviceTask(scheduler);
+            id = ID_DEVICE_A;
+          } else if (role === 'Handler') {
+            task = new HandlerTask(scheduler);
+            id = ID_HANDLER_A;
+          } else if (role === 'Idle') {
+            task = new IdleTask(scheduler, 29, 1);
+            id = ID_IDLE;
+          } else {
+            task = new WorkerTask(scheduler, ID_HANDLER_A, 19);
+            id = ID_WORKER;
+          }
+          var tcb = new TaskControlBlock(null, id, 2, null, task);
+          tcb.state = STATE_RUNNING;
+          scheduler.blocks[id] = tcb;
+          scheduler.list = tcb;
+          return { scheduler: scheduler, task: task, tcb: tcb, id: id, role: role };
+        }
+        function checkFinished(one, label) {
+          var expectedState = one.role === 'Idle' ? STATE_HELD : STATE_SUSPENDED;
+          check(one.tcb.state === expectedState, label + ' final state');
+          check(one.scheduler.currentId === one.id &&
+                one.scheduler.currentTcb === null, label + ' scheduler completion');
+          check(one.tcb.task === one.task && one.scheduler.list === one.tcb,
+                label + ' owners retained');
+          if (one.role === 'Idle') {
+            check(one.task.count === 0 && one.scheduler.holdCount === 1,
+                  label + ' Idle effects once');
+          }
+        }
+        function changedRun(role, prototype) {
+          var one = oneRole(role);
+          var original = prototype.run, hits = 0, sawNull = false;
+          var entryState = -1, entryId = -1, wasCurrent = false;
+          prototype.run = function(packet) {
+            hits++;
+            sawNull = packet === null;
+            entryState = one.tcb.state;
+            entryId = one.scheduler.currentId;
+            wasCurrent = one.scheduler.currentTcb === one.tcb;
+            return original.call(this, packet);
+          };
+          one.scheduler.schedule();
+          prototype.run = original;
+          check(hits === 1 && sawNull && entryState === STATE_RUNNING &&
+                entryId === one.id && wasCurrent,
+                role + ' changed run source order');
+          checkFinished(one, role + ' changed run');
+        }
+
+        changedRun('Device', DeviceTask.prototype);
+        changedRun('Handler', HandlerTask.prototype);
+        changedRun('Idle', IdleTask.prototype);
+        changedRun('Worker', WorkerTask.prototype);
+
+        // Changing TCB.task into an accessor changes the receiver shape. The generic replay must
+        // publish currentId first, invoke the getter once, and tolerate a further shape mutation
+        // performed by the getter before dispatching the returned DeviceTask.
+        var accessor = oneRole('Device');
+        var storedTask = accessor.task, taskGets = 0, getterState = -1;
+        var getterId = -1, getterWasCurrent = false;
+        Object.defineProperty(accessor.tcb, 'task', {
+          configurable: true,
+          get: function() {
+            taskGets++;
+            getterState = this.state;
+            getterId = accessor.scheduler.currentId;
+            getterWasCurrent = accessor.scheduler.currentTcb === this;
+            this.afterTaskRead = 97;
+            return storedTask;
+          }
+        });
+        accessor.scheduler.schedule();
+        check(taskGets === 1 && getterState === STATE_RUNNING &&
+              getterId === ID_DEVICE_A && getterWasCurrent,
+              'task accessor source order');
+        check(accessor.tcb.afterTaskRead === 97, 'task getter shape mutation');
+        check(accessor.tcb.state === STATE_SUSPENDED &&
+              accessor.scheduler.currentTcb === null,
+              'task accessor completion');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_pc59_cold_epoch_orders_same_shape_device_and_handler_roles() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'pc59 cold roles: ' + message;
+        }
+
+        var deviceScheduler = new Scheduler();
+        var deviceTask = new DeviceTask(deviceScheduler);
+        var deviceTcb = new TaskControlBlock(
+            null, ID_DEVICE_A, 1, null, deviceTask);
+        deviceTcb.state = STATE_RUNNING;
+        deviceScheduler.list = deviceTcb;
+
+        // Construct both tasks with the exact same own properties, then change only the second
+        // task's immediate prototype. Shape alone must not select Device ahead of Handler.
+        var handlerScheduler = new Scheduler();
+        var handlerTask = new DeviceTask(handlerScheduler);
+        Object.setPrototypeOf(handlerTask, HandlerTask.prototype);
+        var handlerTcb = new TaskControlBlock(
+            null, ID_HANDLER_A, 1, null, handlerTask);
+        handlerTcb.state = STATE_RUNNING;
+        handlerScheduler.list = handlerTcb;
+        var ownLayout = Object.keys(deviceTask).join('|');
+        check(ownLayout === Object.keys(handlerTask).join('|') &&
+              Object.getPrototypeOf(deviceTask) === DeviceTask.prototype &&
+              Object.getPrototypeOf(handlerTask) === HandlerTask.prototype,
+              'same own layout, distinct role prototypes');
+
+        // Reject the scheduler shell before it establishes an epoch. pc59 must retain its full
+        // exact-method checks when x28 is zero and dispatch each same-shaped task only once.
+        var originalHeld = TaskControlBlock.prototype.isHeldOrSuspended;
+        var originalDeviceRun = DeviceTask.prototype.run;
+        var originalHandlerRun = HandlerTask.prototype.run;
+        var heldHits = 0, deviceHits = 0, handlerHits = 0;
+        var deviceSawNull = false, handlerSawNull = false;
+        var deviceState = -1, handlerState = -1;
+        var deviceCurrent = false, handlerCurrent = false;
+        var deviceId = -1, handlerId = -1;
+        TaskControlBlock.prototype.isHeldOrSuspended = function() {
+          heldHits++;
+          return originalHeld.call(this);
+        };
+        DeviceTask.prototype.run = function(packet) {
+          deviceHits++;
+          deviceSawNull = packet === null;
+          deviceState = deviceTcb.state;
+          deviceCurrent = deviceScheduler.currentTcb === deviceTcb;
+          deviceId = deviceScheduler.currentId;
+          return originalDeviceRun.call(this, packet);
+        };
+        HandlerTask.prototype.run = function(packet) {
+          handlerHits++;
+          handlerSawNull = packet === null;
+          handlerState = handlerTcb.state;
+          handlerCurrent = handlerScheduler.currentTcb === handlerTcb;
+          handlerId = handlerScheduler.currentId;
+          return originalHandlerRun.call(this, packet);
+        };
+
+        deviceScheduler.schedule();
+        handlerScheduler.schedule();
+        TaskControlBlock.prototype.isHeldOrSuspended = originalHeld;
+        DeviceTask.prototype.run = originalDeviceRun;
+        HandlerTask.prototype.run = originalHandlerRun;
+
+        check(heldHits === 4, 'cold shell method called in source order');
+        check(deviceHits === 1 && handlerHits === 1 &&
+              deviceSawNull && handlerSawNull,
+              'ordered role methods called once');
+        check(deviceState === STATE_RUNNING && deviceCurrent &&
+              deviceId === ID_DEVICE_A,
+              'Device run entry');
+        check(handlerState === STATE_RUNNING && handlerCurrent &&
+              handlerId === ID_HANDLER_A,
+              'Handler run entry');
+        check(deviceTcb.state === STATE_SUSPENDED &&
+              handlerTcb.state === STATE_SUSPENDED,
+              'both roles suspended');
+        check(deviceTcb.task === deviceTask && handlerTcb.task === handlerTask &&
+              deviceTask.scheduler === deviceScheduler &&
+              handlerTask.scheduler === handlerScheduler,
+              'task and scheduler owners retained');
+        check(deviceScheduler.list === deviceTcb &&
+              handlerScheduler.list === handlerTcb &&
+              deviceScheduler.currentTcb === null &&
+              handlerScheduler.currentTcb === null,
+              'cold dispatch completed');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_pc59_device_hold_replays_late_link_throw_and_preserves_owner() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'pc59 Device hold: ' + message;
+        }
+        function oneIncomingDevice() {
+          var scheduler = new Scheduler();
+          var device = new DeviceTask(scheduler);
+          var marker = { value: 137 };
+          var packet = new Packet(null, ID_WORKER, KIND_DEVICE);
+          packet.a2[0] = marker;
+          var current = new TaskControlBlock(
+              null, ID_DEVICE_A, 1, packet, device);
+          scheduler.blocks[ID_DEVICE_A] = current;
+          scheduler.list = current;
+          // Do not return packet: after the Active dequeue, Device.v1 must keep its only fixture
+          // owner alive across the throwing fallback.
+          return [scheduler, device, current, marker];
+        }
+
+        var one = oneIncomingDevice();
+        var scheduler = one[0], device = one[1], current = one[2], marker = one[3];
+        var originalMark = TaskControlBlock.prototype.markAsHeld;
+        var markHits = 0, markState = -1, markCount = -1;
+        var markQueueNull = false, markCurrent = false, markOwner = false;
+        var linkHits = 0, linkState = -1, linkCount = -1;
+        var linkCurrent = false, linkOwner = false;
+
+        // The changed nested method is a late precommit miss after pc59 has selected Device.
+        // Generic replay installs the observable link accessor only after Active's dequeue,
+        // Device.v1 publication, and holdCount's increment, keeping the original TCB shape hot.
+        TaskControlBlock.prototype.markAsHeld = function() {
+          markHits++;
+          markState = this.state;
+          markCount = scheduler.holdCount;
+          markQueueNull = this.queue === null;
+          markCurrent = scheduler.currentTcb === this &&
+                        scheduler.currentId === ID_DEVICE_A;
+          markOwner = device.v1 !== null && device.v1.a2[0] === marker;
+          Object.defineProperty(this, 'link', {
+            configurable: true,
+            get: function() {
+              linkHits++;
+              linkState = this.state;
+              linkCount = scheduler.holdCount;
+              linkCurrent = scheduler.currentTcb === this;
+              linkOwner = device.v1 !== null && device.v1.a2[0] === marker;
+              throw 'late link boom';
+            }
+          });
+          return originalMark.call(this);
+        };
+
+        var error = '';
+        try { scheduler.schedule(); } catch (e) { error = e; }
+        TaskControlBlock.prototype.markAsHeld = originalMark;
+        check(error === 'late link boom', 'late link throw propagated');
+        check(markHits === 1 && markState === STATE_RUNNING && markCount === 1 &&
+              markQueueNull && markCurrent && markOwner,
+              'mark entry saw prior effects once');
+        check(linkHits === 1 && linkState === STATE_HELD && linkCount === 1 &&
+              linkCurrent && linkOwner,
+              'link getter saw held effects once');
+        check(current.queue === null && current.state === STATE_HELD &&
+              scheduler.holdCount === 1,
+              'Active and hold state retained');
+        check(scheduler.currentId === ID_DEVICE_A &&
+              scheduler.currentTcb === current && scheduler.list === current,
+              'throw stopped outer current assignment');
+        check(current.task === device && device.scheduler === scheduler &&
+              device.v1 !== null && device.v1.link === null &&
+              device.v1.id === ID_WORKER && device.v1.a2[0] === marker &&
+              marker.value === 137,
+              'packet payload and owners survived');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_graph_active_device_packet_fallback_preserves_graph_and_last_owners() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'graph Active Device fallback owners: ' + message;
+        }
+        function oneHold(kind, code) {
+          var scheduler = new Scheduler();
+          scheduler.addIdleTask(ID_IDLE, 0, null, 1);
+          scheduler.addWorkerTask(ID_WORKER, 1000, null);
+          scheduler.addHandlerTask(ID_HANDLER_A, 2000, null);
+          scheduler.addHandlerTask(ID_HANDLER_B, 3000, null);
+
+          var packet = new Packet(null, ID_DEVICE_A, KIND_DEVICE);
+          packet.a1 = code;
+          packet.a2[0] = { code: code + 1000 };
+          if (kind === 'object') {
+            packet.link = new Packet(null, ID_DEVICE_B, KIND_DEVICE);
+            packet.link.a1 = code + 1;
+            packet.link.a2[0] = { code: code + 2000 };
+          } else if (kind === 'self') {
+            packet.link = packet;
+          } else if (kind === 'undefined') {
+            packet.link = undefined;
+          }
+          scheduler.addDeviceTask(ID_DEVICE_A, 4000, packet);
+          scheduler.addDeviceTask(ID_DEVICE_B, 5000, null);
+
+          // Preserve the exact six-record graph while ensuring that the single Device hold is
+          // the only runnable role. The packet, successor, and payload markers have no roots
+          // outside the TCB/task graph after this helper returns.
+          for (var id = 0; id < NUMBER_OF_IDS; id++) {
+            if (id !== ID_DEVICE_A) scheduler.blocks[id].state = STATE_HELD;
+          }
+          return [scheduler, scheduler.blocks[ID_DEVICE_A],
+                  scheduler.blocks[ID_DEVICE_A].task];
+        }
+
+        var nullCase = oneHold('null', 31);
+        nullCase[0].holdCount = 1.25;
+        nullCase[0].schedule();
+        check(nullCase[0].holdCount === 2.25 &&
+              nullCase[1].state === STATE_HELD && nullCase[1].queue === null,
+              'Null state/IEEE count/queue');
+        check(nullCase[2].v1 !== null && nullCase[2].v1.link === null &&
+              nullCase[2].v1.a1 === 31 && nullCase[2].v1.a2[0].code === 1031,
+              'Null packet last owner');
+
+        var objectCase = oneHold('object', 41);
+        objectCase[0].schedule();
+        var objectPacket = objectCase[2].v1;
+        var objectSuccessor = objectCase[1].queue;
+        check(objectCase[0].holdCount === 1 &&
+              objectCase[1].state === (STATE_RUNNABLE | STATE_HELD),
+              'object state/count');
+        check(objectPacket !== null && objectSuccessor !== null &&
+              objectPacket.link === objectSuccessor &&
+              objectSuccessor.link === null && objectSuccessor.a1 === 42,
+              'P.link and C.queue share successor');
+        check(objectPacket.a2[0].code === 1041 &&
+              objectSuccessor.a2[0].code === 2041,
+              'object packet and successor last owners');
+
+        var selfCase = oneHold('self', 51);
+        selfCase[0].schedule();
+        var selfPacket = selfCase[2].v1;
+        check(selfCase[0].holdCount === 1 &&
+              selfCase[1].state === (STATE_RUNNABLE | STATE_HELD),
+              'self state/count');
+        check(selfPacket !== null && selfCase[1].queue === selfPacket &&
+              selfPacket.link === selfPacket && selfPacket.a2[0].code === 1051,
+              'self P.link/C.queue/Device.v1 owners');
+
+        var undefinedCase = oneHold('undefined', 61);
+        undefinedCase[0].schedule();
+        check(undefinedCase[0].holdCount === 1 &&
+              undefinedCase[1].state === STATE_HELD &&
+              undefinedCase[1].queue === undefined,
+              'Undefined state/count/queue');
+        check(undefinedCase[2].v1 !== null &&
+              undefinedCase[2].v1.link === undefined &&
+              undefinedCase[2].v1.a2[0].code === 1061,
+              'Undefined packet last owner');
+
+        // Device B holds directly into Device A. This exercises Device role routing through
+        // generic packet materialization for two consecutive holds.
+        function twoHolds() {
+          var scheduler = new Scheduler();
+          scheduler.addIdleTask(ID_IDLE, 0, null, 1);
+          scheduler.addWorkerTask(ID_WORKER, 1000, null);
+          scheduler.addHandlerTask(ID_HANDLER_A, 2000, null);
+          scheduler.addHandlerTask(ID_HANDLER_B, 3000, null);
+          var packetA = new Packet(null, ID_DEVICE_A, KIND_DEVICE);
+          var packetB = new Packet(null, ID_DEVICE_B, KIND_DEVICE);
+          packetA.a1 = 91; packetB.a1 = 92;
+          packetA.a2[0] = { code: 1091 }; packetB.a2[0] = { code: 1092 };
+          scheduler.addDeviceTask(ID_DEVICE_A, 4000, packetA);
+          scheduler.addDeviceTask(ID_DEVICE_B, 5000, packetB);
+          for (var id = 0; id < ID_DEVICE_A; id++) scheduler.blocks[id].state = STATE_HELD;
+          return [scheduler, scheduler.blocks[ID_DEVICE_A],
+                  scheduler.blocks[ID_DEVICE_B],
+                  scheduler.blocks[ID_DEVICE_A].task,
+                  scheduler.blocks[ID_DEVICE_B].task];
+        }
+        var pair = twoHolds();
+        pair[0].schedule();
+        check(pair[0].holdCount === 2 && pair[0].currentId === ID_DEVICE_A &&
+              pair[0].currentTcb === null,
+              'Device B to A fast graph resume');
+        check(pair[1].state === STATE_HELD && pair[2].state === STATE_HELD &&
+              pair[1].queue === null && pair[2].queue === null,
+              'two Device Active prefixes and holds');
+        check(pair[3].v1.a1 === 91 && pair[3].v1.a2[0].code === 1091 &&
+              pair[4].v1.a1 === 92 && pair[4].v1.a2[0].code === 1092,
+              'two Device packet last owners');
+        check(pair[2].link === pair[1] &&
+              pair[1].link === pair[0].blocks[ID_HANDLER_B],
+              'two Device canonical graph links');
+
+        var cases = [nullCase, objectCase, selfCase, undefinedCase];
+        for (var n = 0; n < cases.length; n++) {
+          var scheduler = cases[n][0], current = cases[n][1], device = cases[n][2];
+          check(scheduler.currentId === ID_DEVICE_A && scheduler.currentTcb === null,
+                'current/currentId ' + n);
+          check(scheduler.list === scheduler.blocks[ID_DEVICE_B] &&
+                scheduler.blocks[ID_DEVICE_B].link === current &&
+                current.link === scheduler.blocks[ID_HANDLER_B],
+                'graph links ' + n);
+          check(current.task === device && device.scheduler === scheduler,
+                'task/scheduler owners ' + n);
+        }
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_graph_active_device_packet_fallback_replays_live_guards_once() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'graph Active Device fallback guards: ' + message;
+        }
+        function oneHold(code) {
+          var scheduler = new Scheduler();
+          scheduler.addIdleTask(ID_IDLE, 0, null, 1);
+          scheduler.addWorkerTask(ID_WORKER, 1000, null);
+          scheduler.addHandlerTask(ID_HANDLER_A, 2000, null);
+          scheduler.addHandlerTask(ID_HANDLER_B, 3000, null);
+          var packet = new Packet(null, ID_DEVICE_A, KIND_DEVICE);
+          packet.a1 = code;
+          packet.a2[0] = { code: code + 1000 };
+          scheduler.addDeviceTask(ID_DEVICE_A, 4000, packet);
+          scheduler.addDeviceTask(ID_DEVICE_B, 5000, null);
+          for (var id = 0; id < NUMBER_OF_IDS; id++) {
+            if (id !== ID_DEVICE_A) scheduler.blocks[id].state = STATE_HELD;
+          }
+          return [scheduler, scheduler.blocks[ID_DEVICE_A],
+                  scheduler.blocks[ID_DEVICE_A].task];
+        }
+
+        var originalRun = DeviceTask.prototype.run;
+        var runCase = oneHold(71), runHits = 0, runEntry = '';
+        DeviceTask.prototype.run = function(packet) {
+          runHits++;
+          runEntry = [packet.a1, runCase[1].queue === null,
+                      runCase[1].state, runCase[0].currentId,
+                      runCase[0].currentTcb === runCase[1], this.v1 === null].join('|');
+          return originalRun.call(this, packet);
+        };
+        runCase[0].schedule();
+        DeviceTask.prototype.run = originalRun;
+        check(runHits === 1 && runEntry === '71|true|0|4|true|true',
+              'changed Device.run once at source entry');
+        check(runCase[2].v1.a1 === 71 && runCase[1].state === STATE_HELD &&
+              runCase[0].holdCount === 1, 'changed Device.run result');
+
+        var originalHold = Scheduler.prototype.holdCurrent;
+        var holdCase = oneHold(72), holdHits = 0, holdEntry = '';
+        Scheduler.prototype.holdCurrent = function() {
+          holdHits++;
+          holdEntry = [holdCase[2].v1.a1, holdCase[1].queue === null,
+                       holdCase[1].state, this.holdCount,
+                       this.currentId, this.currentTcb === holdCase[1]].join('|');
+          return originalHold.call(this);
+        };
+        holdCase[0].schedule();
+        Scheduler.prototype.holdCurrent = originalHold;
+        check(holdHits === 1 && holdEntry === '72|true|0|0|4|true',
+              'changed holdCurrent once after Device.v1');
+        check(holdCase[2].v1.a1 === 72 && holdCase[1].state === STATE_HELD &&
+              holdCase[0].holdCount === 1, 'changed holdCurrent result');
+
+        var originalMark = TaskControlBlock.prototype.markAsHeld;
+        var markCase = oneHold(73), markHits = 0, markEntry = '';
+        TaskControlBlock.prototype.markAsHeld = function() {
+          markHits++;
+          markEntry = [markCase[2].v1.a1, markCase[1].queue === null,
+                       this.state, markCase[0].holdCount,
+                       markCase[0].currentId,
+                       markCase[0].currentTcb === this].join('|');
+          return originalMark.call(this);
+        };
+        markCase[0].schedule();
+        TaskControlBlock.prototype.markAsHeld = originalMark;
+        check(markHits === 1 && markEntry === '73|true|0|1|4|true',
+              'changed markAsHeld once after count');
+        check(markCase[2].v1.a1 === 73 && markCase[1].state === STATE_HELD &&
+              markCase[0].holdCount === 1, 'changed markAsHeld result');
+
+        // Observable descriptors must reject eager graph use without being invoked, then execute
+        // exactly where the source operation occurs. The stored values retain the only packet
+        // owner after each helper's locals disappear.
+        var v1Case = oneHold(74), storedV1 = null, v1Gets = 0, v1Sets = 0;
+        Object.defineProperty(v1Case[2], 'v1', {
+          configurable: true,
+          get: function() { v1Gets++; return storedV1; },
+          set: function(value) { v1Sets++; storedV1 = value; }
+        });
+        v1Case[0].schedule();
+        check(v1Gets === 0 && v1Sets === 1 && storedV1.a1 === 74 &&
+              storedV1.a2[0].code === 1074,
+              'Device.v1 descriptor once and last owner');
+
+        var linkCase = oneHold(75), storedLink = linkCase[1].link, linkGets = 0;
+        Object.defineProperty(linkCase[1], 'link', {
+          configurable: true,
+          get: function() { linkGets++; return storedLink; }
+        });
+        linkCase[0].schedule();
+        check(linkGets === 1 && linkCase[2].v1.a1 === 75 &&
+              linkCase[1].state === STATE_HELD &&
+              linkCase[0].currentTcb === null,
+              'TCB.link descriptor once after hold effects');
+
+        var countCase = oneHold(76), count = 0, countGets = 0, countSets = 0;
+        Object.defineProperty(countCase[0], 'holdCount', {
+          configurable: true,
+          get: function() { countGets++; return count; },
+          set: function(value) { countSets++; count = value; }
+        });
+        countCase[0].schedule();
+        check(countGets === 1 && countSets === 1 && count === 1 &&
+              countCase[2].v1.a1 === 76 && countCase[1].state === STATE_HELD,
+              'holdCount descriptor once');
+
+        // A pre-existing v1 alias takes the ordinary Device fallback's overwrite path.
+        var aliasCase = oneHold(78), aliasPacket = aliasCase[1].queue;
+        aliasCase[2].v1 = aliasPacket;
+        aliasCase[0].schedule();
+        check(aliasCase[2].v1 === aliasPacket && aliasPacket.a1 === 78 &&
+              aliasCase[1].state === STATE_HELD &&
+              aliasCase[0].holdCount === 1 && aliasCase[0].currentTcb === null,
+              'pre-existing Device.v1 packet alias');
+
+        // A role-local foreign scheduler preserves ordinary Device fallback semantics. Its
+        // currentTcb edge is the only fixture owner of the active TCB
+        // outside the canonical scheduler graph while holdCurrent executes.
+        var foreignCase = oneHold(77), foreign = new Scheduler();
+        foreign.currentTcb = foreignCase[1];
+        foreignCase[2].scheduler = foreign;
+        foreignCase[0].schedule();
+        check(foreign.holdCount === 1 && foreign.currentTcb === foreignCase[1] &&
+              foreignCase[0].holdCount === 0,
+              'foreign scheduler receives hold');
+        check(foreignCase[2].v1.a1 === 77 &&
+              foreignCase[1].state === STATE_HELD &&
+              foreignCase[0].currentId === ID_DEVICE_A &&
+              foreignCase[0].currentTcb === null,
+              'foreign scheduler ordinary completion');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_graph_active_packet_role_router_exact_roles() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'graph Active packet roles: ' + message;
+        }
+        function addSix(scheduler) {
+          scheduler.addIdleTask(ID_IDLE, 0, null, 1);
+          scheduler.addWorkerTask(ID_WORKER, 1000, null);
+          scheduler.addHandlerTask(ID_HANDLER_A, 2000, null);
+          scheduler.addHandlerTask(ID_HANDLER_B, 3000, null);
+          scheduler.addDeviceTask(ID_DEVICE_A, 4000, null);
+          scheduler.addDeviceTask(ID_DEVICE_B, 5000, null);
+          for (var id = 0; id < NUMBER_OF_IDS; id++) scheduler.blocks[id].state = STATE_HELD;
+        }
+
+        // Each run retains a complete canonical graph, but publishes exactly one packet-bearing
+        // role. Same-layout Worker and Handler records must still select their exact prototypes;
+        // Device must not cascade through either role before taking the generic fallback.
+        var workerScheduler = new Scheduler();
+        addSix(workerScheduler);
+        var worker = workerScheduler.blocks[ID_WORKER];
+        var workerTask = worker.task;
+        var workerPacket = new Packet(null, ID_WORKER, KIND_WORK);
+        worker.queue = workerPacket;
+        worker.state = STATE_SUSPENDED_RUNNABLE;
+        workerScheduler.blocks[ID_HANDLER_B].state = STATE_SUSPENDED | STATE_HELD;
+        workerScheduler.list = worker;
+        workerScheduler.schedule();
+        check(workerTask.v1 === ID_HANDLER_B && workerTask.v2 === DATA_SIZE &&
+              workerPacket.id === ID_WORKER && workerPacket.a1 === 0 &&
+              workerScheduler.blocks[ID_HANDLER_B].queue === workerPacket,
+              'Worker exact packet role');
+        check(worker.state === STATE_SUSPENDED && worker.queue === null &&
+              workerScheduler.queueCount === 1,
+              'Worker Active prefix, queue, and later null suspend');
+
+        var handlerScheduler = new Scheduler();
+        addSix(handlerScheduler);
+        var handler = handlerScheduler.blocks[ID_HANDLER_A];
+        var handlerTask = handler.task;
+        var handlerPacket = new Packet(null, ID_HANDLER_A, KIND_DEVICE);
+        handler.queue = handlerPacket;
+        handler.state = STATE_SUSPENDED_RUNNABLE;
+        handlerScheduler.list = handler;
+        handlerScheduler.schedule();
+        check(handlerTask.v1 === null && handlerTask.v2 === handlerPacket &&
+              handlerPacket.link === null,
+              'Handler exact incoming role');
+        check(handler.state === STATE_SUSPENDED && handler.queue === null &&
+              handlerScheduler.holdCount === 0 && handlerScheduler.queueCount === 0,
+              'Handler suspended without Worker/Device effects');
+
+        var deviceScheduler = new Scheduler();
+        addSix(deviceScheduler);
+        var device = deviceScheduler.blocks[ID_DEVICE_A];
+        var deviceTask = device.task;
+        var devicePacket = new Packet(null, ID_DEVICE_A, KIND_DEVICE);
+        device.queue = devicePacket;
+        device.state = STATE_SUSPENDED_RUNNABLE;
+        deviceScheduler.list = device;
+        deviceScheduler.schedule();
+        check(deviceTask.v1 === devicePacket && devicePacket.link === null &&
+              device.state === STATE_HELD && device.queue === null,
+              'Device exact hold role');
+        check(deviceScheduler.holdCount === 1 && deviceScheduler.queueCount === 0 &&
+              deviceScheduler.currentId === ID_DEVICE_A &&
+              deviceScheduler.currentTcb === null,
+              'Device did not cross-dispatch');
+
+        check(Object.keys(workerTask).join('|') === Object.keys(handlerTask).join('|') &&
+              Object.getPrototypeOf(workerTask) !== Object.getPrototypeOf(handlerTask) &&
+              deviceTask.scheduler === deviceScheduler,
+              'role fixture identities');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_graph_active_device_packet_fallback_parity_case() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function oneHold(kind, code) {
+          var scheduler = new Scheduler();
+          scheduler.addIdleTask(ID_IDLE, 0, null, 1);
+          scheduler.addWorkerTask(ID_WORKER, 1000, null);
+          scheduler.addHandlerTask(ID_HANDLER_A, 2000, null);
+          scheduler.addHandlerTask(ID_HANDLER_B, 3000, null);
+          var packet = new Packet(null, ID_DEVICE_A, KIND_DEVICE);
+          packet.a1 = code;
+          if (kind === 1) packet.link = new Packet(null, ID_DEVICE_B, KIND_DEVICE);
+          if (kind === 2) packet.link = packet;
+          scheduler.addDeviceTask(ID_DEVICE_A, 4000, packet);
+          scheduler.addDeviceTask(ID_DEVICE_B, 5000, null);
+          for (var id = 0; id < NUMBER_OF_IDS; id++) {
+            if (id !== ID_DEVICE_A) scheduler.blocks[id].state = STATE_HELD;
+          }
+          scheduler.schedule();
+          var current = scheduler.blocks[ID_DEVICE_A], device = current.task;
+          return [scheduler.holdCount, current.state, current.queue === null,
+                  device.v1.a1, device.v1.link === current.queue,
+                  kind === 2 ? device.v1.link === device.v1 : true,
+                  scheduler.currentId, scheduler.currentTcb === null,
+                  current.link === scheduler.blocks[ID_HANDLER_B]].join('|');
+        }
+        oneHold(0, 81) + ';' + oneHold(1, 82) + ';' + oneHold(2, 83)
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(
+        run_jit(&src),
+        "1|4|true|81|true|true|4|true|true;1|5|false|82|true|true|4|true|true;1|5|false|83|true|true|4|true|true"
+    );
+}
+
+#[test]
+fn jit_scheduler_graph_active_packet_role_router_enabled_disabled_parity() {
+    use std::process::Command;
+
+    let executable = std::env::current_exe().expect("current test executable");
+    for router_disabled in [false, true] {
+        let mut command = Command::new(&executable);
+        command
+            .arg("--exact")
+            .arg("tests::jit_scheduler_graph_active_device_packet_fallback_parity_case")
+            .arg("--nocapture")
+            .env_remove("LUMEN_JIT_NO_SCHED_ACTIVE_PACKET_ROLE_DISPATCH")
+            .env_remove("LUMEN_JIT_NO_SCHED_GRAPH_EPOCH")
+            .env_remove("LUMEN_JIT_NO_SCHED_DEVICE_DIRECT")
+            .env_remove("LUMEN_JIT_NO_SCHED_DEVICE_HOLD")
+            .env("LUMEN_JIT_REGIONLOG", "1");
+        if router_disabled {
+            command.env("LUMEN_JIT_NO_SCHED_ACTIVE_PACKET_ROLE_DISPATCH", "1");
+        }
+        let output = command.output().expect("run graph Active packet router parity child test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("running 1 test"),
+            "graph Active packet router parity child router_disabled={router_disabled} failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(&format!(
+                "active_packet_role_dispatch={}",
+                !router_disabled
+            )),
+            "graph Active packet router parity did not plan the expected gate router_disabled={router_disabled}\nstderr:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn jit_scheduler_trusted_session_rechecks_globals_and_state_after_user_code() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'scheduler trusted session: ' + message;
+        }
+
+        // The trusted constants are observations from the current schedule() call, not compile-
+        // time constants. Changing them before entry must reject the native session before it
+        // commits anything, and ordinary execution must consume the packet with the new values.
+        var beforePacket = {link: null, id: 71};
+        var beforeSeen = null;
+        var beforeTcb = new TaskControlBlock(null, ID_WORKER, 1, beforePacket, {
+          run: function(packet) { beforeSeen = packet; return null; }
+        });
+        STATE_SUSPENDED_RUNNABLE = 8;
+        STATE_RUNNING = 16;
+        STATE_RUNNABLE = 17;
+        beforeTcb.state = STATE_SUSPENDED_RUNNABLE;
+        var beforeScheduler = new Scheduler();
+        beforeScheduler.list = beforeTcb;
+        beforeScheduler.schedule();
+        check(beforeSeen === beforePacket, 'pre-entry constants replay packet');
+        check(beforeTcb.state === 16 && beforeScheduler.currentTcb === null,
+              'pre-entry constants replay state');
+
+        STATE_SUSPENDED_RUNNABLE = 3;
+        STATE_RUNNING = 0;
+        STATE_RUNNABLE = 1;
+
+        // A generic task is arbitrary user code and must end the trusted session. The following
+        // TCB therefore has to re-read all three active-state names before interpreting state 8.
+        var middlePacket = {link: null, id: 72};
+        var middleSeen = null;
+        var middleTcb = new TaskControlBlock(null, ID_WORKER, 1, middlePacket, {
+          run: function(packet) { middleSeen = packet; return null; }
+        });
+        var namesMutator = new TaskControlBlock(middleTcb, ID_WORKER, 1, null, {
+          run: function() {
+            STATE_SUSPENDED_RUNNABLE = 8;
+            STATE_RUNNING = 16;
+            STATE_RUNNABLE = 17;
+            middleTcb.state = STATE_SUSPENDED_RUNNABLE;
+            return middleTcb;
+          }
+        });
+        namesMutator.state = STATE_RUNNING;
+        var middleScheduler = new Scheduler();
+        middleScheduler.list = namesMutator;
+        middleScheduler.schedule();
+        check(middleSeen === middlePacket, 'post-call constants re-read packet');
+        check(middleTcb.state === 16 && middleScheduler.currentTcb === null,
+              'post-call constants re-read state');
+
+        STATE_SUSPENDED_RUNNABLE = 3;
+        STATE_RUNNING = 0;
+        STATE_RUNNABLE = 1;
+
+        // Trusted state is also scoped to the direct continuation. Replace the next TCB's data
+        // slot with an accessor from a generic task. Both the active and subsequent suspended
+        // iterations must execute the getter, and markAsSuspended must execute the setter once.
+        var descriptorScheduler = new Scheduler();
+        var descriptorTcb = new TaskControlBlock(
+            null, ID_DEVICE_A, 1, null, new DeviceTask(descriptorScheduler));
+        descriptorTcb.state = STATE_RUNNING;
+        var stateGets = 0, stateSets = 0, storedState = STATE_RUNNING;
+        var descriptorMutator = new TaskControlBlock(
+            descriptorTcb, ID_WORKER, 1, null, {
+              run: function() {
+                Object.defineProperty(descriptorTcb, 'state', {
+                  configurable: true,
+                  get: function() { stateGets++; return storedState; },
+                  set: function(value) { stateSets++; storedState = value; }
+                });
+                return descriptorTcb;
+              }
+            });
+        descriptorMutator.state = STATE_RUNNING;
+        descriptorScheduler.list = descriptorMutator;
+        descriptorScheduler.schedule();
+        check(stateGets === 6 && stateSets === 1,
+              'post-call state descriptor invoked exactly');
+        check(storedState === STATE_SUSPENDED && descriptorScheduler.currentTcb === null,
+              'post-call state descriptor preserved result');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_fast_loop_rechecks_after_generic_calls_and_budget() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'scheduler fast loop: ' + message;
+        }
+        function directDevice(scheduler, link, id) {
+          var task = new DeviceTask(scheduler);
+          var tcb = new TaskControlBlock(link, id, 1, null, task);
+          tcb.state = STATE_RUNNING;
+          return tcb;
+        }
+
+        // A direct Device suspend enters the internal continuation. The unknown task in the
+        // middle must clear it before user code replaces a shell method; the following Device
+        // iteration must observe that replacement through ordinary replay.
+        var scheduler = new Scheduler();
+        var tail = directDevice(scheduler, null, ID_DEVICE_B);
+        var originalHeld = TaskControlBlock.prototype.isHeldOrSuspended;
+        var heldCalls = 0;
+        var mutator = new TaskControlBlock(tail, ID_WORKER, 2, null, {
+          run: function() {
+            TaskControlBlock.prototype.isHeldOrSuspended = function() {
+              heldCalls++;
+              return originalHeld.call(this);
+            };
+            return tail;
+          }
+        });
+        mutator.state = STATE_RUNNING;
+        var head = directDevice(scheduler, mutator, ID_DEVICE_A);
+        scheduler.list = head;
+        scheduler.schedule();
+        TaskControlBlock.prototype.isHeldOrSuspended = originalHeld;
+        check(heldCalls >= 2, 'generic call invalidates cached method');
+        check(head.state === STATE_SUSPENDED && tail.state === STATE_SUSPENDED,
+              'both direct devices suspended');
+        check(scheduler.currentTcb === null, 'generic chain completed');
+
+        // More than one 1024-transition epoch forces a canonical full-shell re-guard without
+        // growing a native frame per iteration or losing any TCB owner.
+        var longScheduler = new Scheduler(), chain = null, tcbs = [];
+        for (var n = 0; n < 1100; n++) {
+          chain = directDevice(longScheduler, chain,
+                               (n & 1) ? ID_DEVICE_A : ID_DEVICE_B);
+          tcbs.push(chain);
+        }
+        longScheduler.list = chain;
+        longScheduler.schedule();
+        var suspended = 0;
+        for (var n = 0; n < tcbs.length; n++) {
+          if (tcbs[n].state === STATE_SUSPENDED) suspended++;
+        }
+        check(suspended === tcbs.length, 'budget re-entry preserves every state');
+        check(longScheduler.currentTcb === null, 'budget chain completed');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_epoch_rechecks_role_identity_and_task_shape_after_long_direct_chain() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'scheduler role epoch: ' + message;
+        }
+        function directRole(scheduler, link, ordinal) {
+          var task, id;
+          if ((ordinal % 3) === 0) {
+            task = new DeviceTask(scheduler);
+            id = ID_DEVICE_A;
+          } else if ((ordinal % 3) === 1) {
+            task = new HandlerTask(scheduler);
+            id = ID_HANDLER_A;
+          } else {
+            task = new WorkerTask(scheduler, ID_HANDLER_A, 17);
+            id = ID_WORKER;
+          }
+          var tcb = new TaskControlBlock(link, id, 1, null, task);
+          tcb.state = STATE_RUNNING;
+          return [tcb, task];
+        }
+
+        // The first 1040 active-null roles are completely direct, crossing the 1024-transition
+        // continuation budget. The next TCB has a task accessor and mutates its own shape while
+        // being read; no role fact from the earlier epoch may bypass that source-level get.
+        var scheduler = new Scheduler(), tcbs = new Array(1100);
+        var tasks = new Array(1100), link = null;
+        for (var n = 1099; n >= 0; n--) {
+          var pair = directRole(scheduler, link, n);
+          tcbs[n] = pair[0];
+          tasks[n] = pair[1];
+          link = pair[0];
+        }
+        var accessorIndex = 1040, accessorTcb = tcbs[accessorIndex];
+        var accessorTask = tasks[accessorIndex], taskGets = 0;
+        var getterState = -1, getterId = -1, getterWasCurrent = false;
+        Object.defineProperty(accessorTcb, 'task', {
+          configurable: true,
+          get: function() {
+            taskGets++;
+            getterState = this.state;
+            getterId = scheduler.currentId;
+            getterWasCurrent = scheduler.currentTcb === this;
+            this.afterTaskRead = 101;
+            return accessorTask;
+          }
+        });
+
+        // Worker and Handler have identical own layouts, so a later Worker on a distinct
+        // prototype is a precise role-prototype guard. Its replacement must run once through
+        // ordinary dispatch without affecting the normal roles that follow it.
+        var prototypeIndex = 1043, prototypeTcb = tcbs[prototypeIndex];
+        var prototypeTask = tasks[prototypeIndex];
+        check(prototypeTask instanceof WorkerTask, 'prototype fixture role');
+        var alternate = Object.create(WorkerTask.prototype);
+        var prototypeHits = 0, prototypeState = -1, prototypeId = -1;
+        var prototypeSawNull = false, prototypeWasCurrent = false;
+        alternate.run = function(packet) {
+          prototypeHits++;
+          prototypeState = prototypeTcb.state;
+          prototypeId = scheduler.currentId;
+          prototypeSawNull = packet === null;
+          prototypeWasCurrent = scheduler.currentTcb === prototypeTcb;
+          return WorkerTask.prototype.run.call(this, packet);
+        };
+        Object.setPrototypeOf(prototypeTask, alternate);
+
+        scheduler.list = tcbs[0];
+        scheduler.schedule();
+        check(taskGets === 1 && getterState === STATE_RUNNING &&
+              getterId === accessorTcb.id && getterWasCurrent,
+              'post-epoch task getter source order');
+        check(accessorTcb.afterTaskRead === 101 &&
+              accessorTcb.state === STATE_SUSPENDED,
+              'post-epoch task shape mutation');
+        check(prototypeHits === 1 && prototypeState === STATE_RUNNING &&
+              prototypeId === ID_WORKER && prototypeSawNull && prototypeWasCurrent,
+              'post-epoch alternate prototype once');
+        check(prototypeTask.v1 === ID_HANDLER_A && prototypeTask.v2 === 17 &&
+              prototypeTcb.state === STATE_SUSPENDED,
+              'post-epoch Worker result');
+
+        var suspended = 0;
+        for (var n = 0; n < tcbs.length; n++) {
+          if (tcbs[n].state === STATE_SUSPENDED) suspended++;
+        }
+        check(suspended === tcbs.length, 'every mixed role suspended once');
+        check(tcbs[1023].link === tcbs[1024] && tcbs[1099].link === null,
+              'chain owners retained');
+        check(tasks[accessorIndex] === accessorTask &&
+              tcbs[prototypeIndex].task === prototypeTask,
+              'task owners retained');
+        check(scheduler.list === tcbs[0] && scheduler.currentTcb === null &&
+              scheduler.currentId === tcbs[1099].id,
+              'long session completed');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_generic_exit_invalidates_tcb_role_and_shell_global_epoch() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'scheduler generic epoch: ' + message;
+        }
+        function directDevice(scheduler, link, id) {
+          var task = new DeviceTask(scheduler);
+          var tcb = new TaskControlBlock(link, id, 1, null, task);
+          tcb.state = STATE_RUNNING;
+          return tcb;
+        }
+
+        var scheduler = new Scheduler();
+        var tail = directDevice(scheduler, null, ID_DEVICE_B);
+        var originalTcbRun = TaskControlBlock.prototype.run;
+        var originalDeviceRun = DeviceTask.prototype.run;
+        var oldSuspended = STATE_SUSPENDED;
+        var tcbHits = 0, tcbState = -1, tcbId = -1, tcbWasCurrent = false;
+        var deviceHits = 0, deviceState = -1, deviceId = -1;
+        var deviceSawNull = false, deviceWasCurrent = false;
+
+        // This task is deliberately outside every exact role. Its call must terminate the direct
+        // session before changing a hoisted TCB method, a role method, and the shell's suspended
+        // global. The returned Device must observe all three replacements in this iteration.
+        var mutator = new TaskControlBlock(tail, ID_WORKER, 1, null, {
+          run: function() {
+            TaskControlBlock.prototype.run = function() {
+              tcbHits++;
+              tcbState = this.state;
+              tcbId = scheduler.currentId;
+              tcbWasCurrent = scheduler.currentTcb === this;
+              return originalTcbRun.call(this);
+            };
+            DeviceTask.prototype.run = function(packet) {
+              deviceHits++;
+              deviceState = tail.state;
+              deviceId = scheduler.currentId;
+              deviceSawNull = packet === null;
+              deviceWasCurrent = scheduler.currentTcb === tail;
+              return originalDeviceRun.call(this, packet);
+            };
+            STATE_SUSPENDED = 8;
+            return tail;
+          }
+        });
+        mutator.state = STATE_RUNNING;
+        var head = directDevice(scheduler, mutator, ID_DEVICE_A);
+        scheduler.list = head;
+        scheduler.schedule();
+
+        TaskControlBlock.prototype.run = originalTcbRun;
+        DeviceTask.prototype.run = originalDeviceRun;
+        STATE_SUSPENDED = oldSuspended;
+        check(head.state === oldSuspended, 'head used pre-mutation global');
+        check(tcbHits === 1 && tcbState === STATE_RUNNING &&
+              tcbId === ID_DEVICE_B && tcbWasCurrent,
+              'changed TCB.run entered once after currentId');
+        check(deviceHits === 1 && deviceState === STATE_RUNNING &&
+              deviceId === ID_DEVICE_B && deviceSawNull && deviceWasCurrent,
+              'changed Device.run entered once after TCB.run');
+        check(tail.state === 8, 'tail used changed suspended global');
+        check(scheduler.currentId === ID_DEVICE_B && scheduler.currentTcb === null,
+              'changed shell global terminated session');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_refilled_epoch_rechecks_nested_suspend_methods_after_generic_exit() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'scheduler nested epoch: ' + message;
+        }
+        function directDevice(scheduler, link, id) {
+          var task = new DeviceTask(scheduler);
+          var tcb = new TaskControlBlock(link, id, 1, null, task);
+          tcb.state = STATE_RUNNING;
+          return tcb;
+        }
+
+        var scheduler = new Scheduler();
+        var tail = directDevice(scheduler, null, ID_DEVICE_B);
+        var tailTask = tail.task;
+        var originalSuspend = Scheduler.prototype.suspendCurrent;
+        var originalMark = TaskControlBlock.prototype.markAsSuspended;
+        var suspendHits = 0, suspendState = -1, suspendId = -1;
+        var suspendThis = false, suspendCurrent = false;
+        var markHits = 0, markState = -1, markThis = false, markCurrent = false;
+
+        // This unknown task runs only after the direct prefix has crossed and refilled the 1024
+        // transition epoch. Replacing both nested methods must invalidate that refilled epoch
+        // before the returned Device reaches its null-packet suspend path.
+        var mutator = new TaskControlBlock(tail, ID_WORKER, 1, null, {
+          run: function() {
+            Scheduler.prototype.suspendCurrent = function() {
+              suspendHits++;
+              suspendState = this.currentTcb.state;
+              suspendId = this.currentId;
+              suspendThis = this === scheduler;
+              suspendCurrent = this.currentTcb === tail;
+              return originalSuspend.call(this);
+            };
+            TaskControlBlock.prototype.markAsSuspended = function() {
+              markHits++;
+              markState = this.state;
+              markThis = this === tail;
+              markCurrent = scheduler.currentTcb === this;
+              return originalMark.call(this);
+            };
+            return tail;
+          }
+        });
+        mutator.state = STATE_RUNNING;
+
+        var prefix = new Array(1050), link = mutator;
+        for (var n = 1049; n >= 0; n--) {
+          prefix[n] = directDevice(
+              scheduler, link, (n & 1) ? ID_DEVICE_A : ID_DEVICE_B);
+          link = prefix[n];
+        }
+        scheduler.list = prefix[0];
+        scheduler.schedule();
+
+        Scheduler.prototype.suspendCurrent = originalSuspend;
+        TaskControlBlock.prototype.markAsSuspended = originalMark;
+        check(suspendHits === 1 && suspendState === STATE_RUNNING &&
+              suspendId === ID_DEVICE_B && suspendThis && suspendCurrent,
+              'changed suspend entered once with live current');
+        check(markHits === 1 && markState === STATE_RUNNING &&
+              markThis && markCurrent,
+              'changed mark entered once after suspend');
+        check(tail.state === STATE_SUSPENDED && tail.task === tailTask &&
+              tailTask.scheduler === scheduler,
+              'tail state and owners');
+
+        var suspended = 0;
+        for (var n = 0; n < prefix.length; n++) {
+          if (prefix[n].state === STATE_SUSPENDED) suspended++;
+        }
+        check(suspended === prefix.length, 'direct prefix suspended once');
+        check(prefix[1023].link === prefix[1024] &&
+              prefix[1049].link === mutator && mutator.link === tail,
+              'prefix and tail links retained');
+        check(scheduler.list === prefix[0] && scheduler.currentId === ID_DEVICE_B &&
+              scheduler.currentTcb === null,
+              'refilled session completed');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_foreign_blocks_target_replays_queue_methods_once() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'scheduler foreign target: ' + message;
+        }
+
+        var scheduler = new Scheduler();
+        var deviceTask = new DeviceTask(scheduler);
+        var packet = new Packet(null, ID_WORKER, KIND_DEVICE);
+        packet.a1 = 113;
+        deviceTask.v1 = packet;
+        var source = new TaskControlBlock(
+            null, ID_DEVICE_A, 2, null, deviceTask);
+        source.state = STATE_RUNNING;
+
+        var target = new TaskControlBlock(null, ID_WORKER, 3, null, {
+          run: function() { throw 'held foreign target ran'; }
+        });
+        target.state = STATE_SUSPENDED | STATE_HELD;
+        var ordinary = new TaskControlBlock(null, ID_WORKER, 3, null, {});
+        ordinary.state = STATE_SUSPENDED | STATE_HELD;
+        var ownLayout = Object.keys(target).join('|');
+        check(ownLayout === Object.keys(ordinary).join('|'), 'same own layout fixture');
+
+        // The target comes from Scheduler.blocks and keeps the ordinary TCB own layout, but its
+        // immediate prototype overrides both queue methods. A cached standard-TCB method epoch
+        // must reject before queue/check writes and replay each foreign method exactly once.
+        var foreign = Object.create(TaskControlBlock.prototype);
+        var originalCheck = TaskControlBlock.prototype.checkPriorityAdd;
+        var originalMark = TaskControlBlock.prototype.markAsRunnable;
+        var checkHits = 0, checkTask = null, checkPacket = null;
+        var checkCount = -1, checkQueue = 1, checkState = -1, checkId = -1;
+        var markHits = 0, markQueue = null, markState = -1;
+        foreign.checkPriorityAdd = function(task, value) {
+          checkHits++;
+          checkTask = task;
+          checkPacket = value;
+          checkCount = scheduler.queueCount;
+          checkQueue = this.queue;
+          checkState = this.state;
+          checkId = value.id;
+          return originalCheck.call(this, task, value);
+        };
+        foreign.markAsRunnable = function() {
+          markHits++;
+          markQueue = this.queue;
+          markState = this.state;
+          return originalMark.call(this);
+        };
+        Object.setPrototypeOf(target, foreign);
+        check(Object.keys(target).join('|') === ownLayout &&
+              Object.getPrototypeOf(target) === foreign &&
+              target instanceof TaskControlBlock,
+              'foreign immediate prototype fixture');
+
+        scheduler.blocks[ID_WORKER] = target;
+        scheduler.list = source;
+        scheduler.schedule();
+        check(checkHits === 1 && checkTask === source && checkPacket === packet &&
+              checkCount === 1 && checkQueue === null &&
+              checkState === (STATE_SUSPENDED | STATE_HELD) &&
+              checkId === ID_DEVICE_A,
+              'foreign check saw queue prefix once');
+        check(markHits === 1 && markQueue === packet &&
+              markState === (STATE_SUSPENDED | STATE_HELD),
+              'foreign mark saw target publication once');
+        check(deviceTask.v1 === null && source.state === STATE_RUNNING &&
+              source.queue === null,
+              'source Device effects');
+        check(packet.link === null && packet.id === ID_DEVICE_A && packet.a1 === 113 &&
+              scheduler.queueCount === 1,
+              'packet queue effects');
+        check(target.queue === packet &&
+              target.state === (STATE_SUSPENDED | STATE_HELD | STATE_RUNNABLE),
+              'foreign target state');
+        check(Object.keys(target).join('|') === ownLayout &&
+              Object.getPrototypeOf(target) === foreign,
+              'foreign target identity retained');
+        check(scheduler.currentId === ID_DEVICE_A && scheduler.currentTcb === null &&
+              scheduler.list === source && scheduler.blocks[ID_WORKER] === target,
+              'scheduler owners and completion');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_graph_epoch_rebuilds_same_layout_blocks_identity_after_delayed_exit() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'scheduler graph refill: ' + message;
+        }
+
+        // Keep all six entry records canonical. Handler A consumes one TCB queue node per
+        // scheduler iteration, so the observable final packet cannot be reached until 1050
+        // completely direct active iterations have crossed the 1024-transition refill boundary.
+        var scheduler = new Scheduler();
+        scheduler.addIdleTask(ID_IDLE, 0, null, 1);
+        scheduler.addWorkerTask(ID_WORKER, 1000, null);
+
+        var special = new Packet(null, ID_DEVICE_A, KIND_DEVICE);
+        special.a1 = 131;
+        var queue = special;
+        for (var n = 0; n < 1050; n++) {
+          var work = new Packet(queue, ID_WORKER, KIND_WORK);
+          work.a1 = 0;
+          work.a2[0] = 91;
+          queue = work;
+        }
+        scheduler.addHandlerTask(ID_HANDLER_A, 2000, queue);
+        scheduler.addHandlerTask(ID_HANDLER_B, 3000, null);
+        scheduler.addDeviceTask(ID_DEVICE_A, 4000, null);
+        scheduler.addDeviceTask(ID_DEVICE_B, 5000, null);
+
+        var idle = scheduler.blocks[ID_IDLE];
+        var handlerA = scheduler.blocks[ID_HANDLER_A];
+        var handlerB = scheduler.blocks[ID_HANDLER_B];
+        var original = scheduler.blocks[ID_DEVICE_A];
+        var deviceB = scheduler.blocks[ID_DEVICE_B];
+        var foreignTask = new DeviceTask(scheduler);
+        var foreign = new TaskControlBlock(
+            original.link, ID_DEVICE_A, original.priority, null, foreignTask);
+        foreign.state = STATE_SUSPENDED | STATE_HELD;
+        check(Object.keys(foreign).join('|') === Object.keys(original).join('|') &&
+              Object.getPrototypeOf(foreign) === Object.getPrototypeOf(original) &&
+              Object.keys(foreignTask).join('|') ===
+                  Object.keys(original.task).join('|') &&
+              Object.getPrototypeOf(foreignTask) ===
+                  Object.getPrototypeOf(original.task),
+              'same-layout replacement fixture');
+
+        var kindGets = 0, getterState = -1, getterId = -1;
+        var getterWasCurrent = false, getterSawOld = false;
+        Object.defineProperty(special, 'kind', {
+          configurable: true,
+          get: function() {
+            kindGets++;
+            getterState = handlerA.state;
+            getterId = scheduler.currentId;
+            getterWasCurrent = scheduler.currentTcb === handlerA;
+            getterSawOld = scheduler.blocks[ID_DEVICE_A] === original &&
+                           deviceB.link === original;
+            // Publish a complete, still-valid six-record graph. A stale epoch pointer would
+            // enqueue `special` on the detached original Device A instead of this replacement.
+            deviceB.link = foreign;
+            scheduler.blocks[ID_DEVICE_A] = foreign;
+            return KIND_DEVICE;
+          }
+        });
+
+        scheduler.schedule();
+        check(kindGets === 1 && getterState === STATE_RUNNING &&
+              getterId === ID_HANDLER_A && getterWasCurrent && getterSawOld,
+              'delayed getter ran once at source position');
+        check(scheduler.queueCount === 1 && special.id === ID_HANDLER_A &&
+              special.link === null && special.a1 === 91,
+              'post-exit queue effects');
+        check(foreign.queue === special &&
+              foreign.state === (STATE_SUSPENDED | STATE_HELD | STATE_RUNNABLE) &&
+              foreign.task === foreignTask && foreignTask.scheduler === scheduler,
+              'replacement record received the packet');
+        check(original.queue === null && original.state === STATE_SUSPENDED &&
+              original.task.v1 === null,
+              'detached record was never reached through a stale pointer');
+        check(scheduler.blocks[ID_DEVICE_A] === foreign && deviceB.link === foreign &&
+              foreign.link === handlerB && scheduler.list === deviceB,
+              'rebuilt six-record owners');
+        check(idle.task.scheduler === scheduler && handlerA.task.scheduler === scheduler &&
+              scheduler.currentTcb === null && scheduler.currentId === ID_IDLE,
+              'refilled session completed');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_graph_epoch_rejects_observable_and_foreign_scheduler_graphs() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'scheduler graph reject: ' + message;
+        }
+        function addSix(scheduler, idleCount) {
+          scheduler.addIdleTask(ID_IDLE, 0, null, idleCount);
+          scheduler.addWorkerTask(ID_WORKER, 1000, null);
+          scheduler.addHandlerTask(ID_HANDLER_A, 2000, null);
+          scheduler.addHandlerTask(ID_HANDLER_B, 3000, null);
+          scheduler.addDeviceTask(ID_DEVICE_A, 4000, null);
+          scheduler.addDeviceTask(ID_DEVICE_B, 5000, null);
+        }
+
+        // An observable blocks property must decline eager graph validation without invoking
+        // user code. The one source-level Idle release reads it only after committing count/v1
+        // and currentId, which the getter records exactly once.
+        var observable = new Scheduler();
+        addSix(observable, 2);
+        var observableIdle = observable.blocks[ID_IDLE];
+        var observableDevice = observable.blocks[ID_DEVICE_B];
+        var storedBlocks = observable.blocks;
+        var blocksGets = 0, getterCount = -1, getterV1 = -1, getterId = -1;
+        var getterWasCurrent = false;
+        Object.defineProperty(observable, 'blocks', {
+          configurable: true,
+          get: function() {
+            blocksGets++;
+            getterCount = observableIdle.task.count;
+            getterV1 = observableIdle.task.v1;
+            getterId = this.currentId;
+            getterWasCurrent = this.currentTcb === observableIdle;
+            return storedBlocks;
+          }
+        });
+        observable.schedule();
+        check(blocksGets === 1 && getterCount === 1 && getterV1 === 0xD008 &&
+              getterId === ID_IDLE && getterWasCurrent,
+              'blocks getter ran once after Idle prefix');
+        check(observableIdle.state === STATE_HELD &&
+              observableDevice.state === STATE_SUSPENDED &&
+              observable.currentTcb === null,
+              'observable graph ordinary result');
+
+        // A role task can retain the exact own shape/prototype while its scheduler identity is
+        // foreign. Entry validation must reject before calling the foreign method. Drop every
+        // outside owner: the task.scheduler edge alone must keep both scheduler and marker alive.
+        var mismatch = new Scheduler();
+        addSix(mismatch, 1);
+        var mismatchDevice = mismatch.blocks[ID_DEVICE_B];
+        var mismatchTask = mismatchDevice.task;
+        mismatchDevice.state = STATE_RUNNING;
+        var foreign = new Scheduler();
+        var marker = { code: 223, seen: 0 };
+        foreign.marker = marker;
+        var methodHits = 0, methodId = -1, methodWasCurrent = false;
+        var methodThis = null;
+        foreign.suspendCurrent = function() {
+          methodHits++;
+          methodId = mismatch.currentId;
+          methodWasCurrent = mismatch.currentTcb === mismatchDevice;
+          methodThis = this;
+          this.marker.seen++;
+          return null;
+        };
+        mismatchTask.scheduler = foreign;
+        foreign = null;
+        marker = null;
+
+        mismatch.schedule();
+        check(methodHits === 1 && methodId === ID_DEVICE_B &&
+              methodWasCurrent && methodThis === mismatchTask.scheduler,
+              'foreign scheduler method ran once at source position');
+        check(mismatchTask.scheduler.marker.code === 223 &&
+              mismatchTask.scheduler.marker.seen === 1,
+              'last-owner scheduler and marker survived rejection');
+        check(mismatchDevice.state === STATE_RUNNING && mismatch.currentTcb === null &&
+              mismatch.currentId === ID_DEVICE_B,
+              'foreign scheduler ordinary result');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_graph_core_suspend_parity_case() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'graph core suspend: ' + message;
+        }
+        function addSix(scheduler) {
+          scheduler.addIdleTask(ID_IDLE, 0, null, 1);
+          scheduler.addWorkerTask(ID_WORKER, 1000, null);
+          scheduler.addHandlerTask(ID_HANDLER_A, 2000, null);
+          scheduler.addHandlerTask(ID_HANDLER_B, 3000, null);
+          scheduler.addDeviceTask(ID_DEVICE_A, 4000, null);
+          scheduler.addDeviceTask(ID_DEVICE_B, 5000, null);
+          for (var id = 0; id < NUMBER_OF_IDS; id++)
+            scheduler.blocks[id].state = STATE_HELD;
+        }
+
+        // One graph session reaches every CORE-backed null suspend consumer in link order:
+        // Device A -> held Handler B -> Handler A -> Worker -> held Idle.
+        var scheduler = new Scheduler();
+        addSix(scheduler);
+        var device = scheduler.blocks[ID_DEVICE_A];
+        var handler = scheduler.blocks[ID_HANDLER_A];
+        var worker = scheduler.blocks[ID_WORKER];
+        device.state = STATE_RUNNING;
+        handler.state = STATE_RUNNING;
+        worker.state = STATE_RUNNING;
+        scheduler.list = device;
+
+        scheduler.schedule();
+
+        check(device.state === STATE_SUSPENDED, 'Device suspended');
+        check(handler.state === STATE_SUSPENDED, 'Handler suspended');
+        check(worker.state === STATE_SUSPENDED, 'Worker suspended');
+        check(scheduler.currentId === ID_WORKER && scheduler.currentTcb === null,
+              'scheduler completion');
+        check(device.task.scheduler === scheduler &&
+              handler.task.scheduler === scheduler &&
+              worker.task.scheduler === scheduler,
+              'task scheduler owners');
+        check(device.link === scheduler.blocks[ID_HANDLER_B] &&
+              handler.link === worker && worker.link === scheduler.blocks[ID_IDLE],
+              'canonical links retained');
+
+        [device.state, handler.state, worker.state, scheduler.currentId,
+         scheduler.currentTcb === null, device.task.v1 === null,
+         handler.task.v1 === null && handler.task.v2 === null].join('|')
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "2|2|2|1|true|true|true");
+}
+
+#[test]
+fn jit_scheduler_graph_core_epoch_soft_rejects_foreign_task_scheduler_once() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'graph core soft reject: ' + message;
+        }
+        function addSix(scheduler) {
+          scheduler.addIdleTask(ID_IDLE, 0, null, 1);
+          scheduler.addWorkerTask(ID_WORKER, 1000, null);
+          scheduler.addHandlerTask(ID_HANDLER_A, 2000, null);
+          scheduler.addHandlerTask(ID_HANDLER_B, 3000, null);
+          scheduler.addDeviceTask(ID_DEVICE_A, 4000, null);
+          scheduler.addDeviceTask(ID_DEVICE_B, 5000, null);
+          for (var id = 0; id < NUMBER_OF_IDS; id++)
+            scheduler.blocks[id].state = STATE_HELD;
+        }
+
+        var scheduler = new Scheduler();
+        addSix(scheduler);
+        var device = scheduler.blocks[ID_DEVICE_A];
+        var handler = scheduler.blocks[ID_HANDLER_A];
+        var worker = scheduler.blocks[ID_WORKER];
+        var workerTask = worker.task;
+        device.state = STATE_RUNNING;
+        handler.state = STATE_RUNNING;
+        worker.state = STATE_RUNNING;
+        scheduler.list = device;
+
+        // Replacing the value retains WorkerTask's exact shape and prototype, so the base graph
+        // remains valid. Only CORE's all-six outer-Scheduler identity contract must decline.
+        var keys = Object.keys(workerTask).join('|');
+        var foreign = new Scheduler();
+        var gets = 0, calls = 0, callThis = null, sourceOrder = false;
+        Object.defineProperty(foreign, 'suspendCurrent', {
+          configurable: true,
+          get: function() {
+            gets++;
+            sourceOrder =
+                device.state === STATE_SUSPENDED &&
+                handler.state === STATE_SUSPENDED &&
+                worker.state === STATE_RUNNING &&
+                scheduler.currentId === ID_WORKER &&
+                scheduler.currentTcb === worker;
+            return function() {
+              calls++;
+              callThis = this;
+              return null;
+            };
+          }
+        });
+        workerTask.scheduler = foreign;
+        check(Object.keys(workerTask).join('|') === keys &&
+              Object.getPrototypeOf(workerTask) === WorkerTask.prototype,
+              'same-shape task fixture');
+
+        scheduler.schedule();
+
+        check(gets === 1 && calls === 1 && callThis === foreign,
+              'foreign accessor and call once');
+        check(sourceOrder, 'foreign accessor source position');
+        check(device.state === STATE_SUSPENDED &&
+              handler.state === STATE_SUSPENDED,
+              'base graph continued before generic fallback');
+        check(worker.state === STATE_RUNNING &&
+              scheduler.currentTcb === null &&
+              scheduler.currentId === ID_WORKER,
+              'foreign result preserved');
+        check(worker.task === workerTask && workerTask.scheduler === foreign &&
+              scheduler.blocks[ID_WORKER] === worker,
+              'foreign and graph owners retained');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_graph_core_suspend_enabled_disabled_parity() {
+    use std::process::Command;
+
+    let executable = std::env::current_exe().expect("current test executable");
+    for disabled in [false, true] {
+        let mut command = Command::new(&executable);
+        command
+            .arg("--exact")
+            .arg("tests::jit_scheduler_graph_core_suspend_parity_case")
+            .arg("--nocapture")
+            .env("LUMEN_JIT_REGIONLOG", "1")
+            .env_remove("LUMEN_JIT_NO_SCHED_GRAPH_CORE")
+            .env_remove("LUMEN_JIT_NO_SCHED_GRAPH_EPOCH")
+            .env_remove("LUMEN_JIT_NO_SCHED_METHOD_EPOCH")
+            .env_remove("LUMEN_JIT_NO_SCHED_ROLE_EPOCH")
+            .env_remove("LUMEN_JIT_NO_SCHED_ROLE_DISPATCH")
+            .env_remove("LUMEN_JIT_NO_SCHED_FAST_LOOP")
+            .env_remove("LUMEN_JIT_NO_SCHED_REGION");
+        if disabled {
+            command.env("LUMEN_JIT_NO_SCHED_GRAPH_CORE", "1");
+        }
+
+        let output = command.output().expect("run graph CORE parity child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success()
+                && stdout.contains("running 1 test")
+                && stderr.contains("graph_epoch=true")
+                && stderr.contains(&format!("graph_core={}", !disabled)),
+            "graph CORE parity child disabled={disabled} failed\n\
+             stdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn jit_scheduler_graph_core_epoch_rebuilds_task_identities_across_calls() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'graph core identity refill: ' + message;
+        }
+        function addSix(scheduler) {
+          scheduler.addIdleTask(ID_IDLE, 0, null, 1);
+          scheduler.addWorkerTask(ID_WORKER, 1000, null);
+          scheduler.addHandlerTask(ID_HANDLER_A, 2000, null);
+          scheduler.addHandlerTask(ID_HANDLER_B, 3000, null);
+          scheduler.addDeviceTask(ID_DEVICE_A, 4000, null);
+          scheduler.addDeviceTask(ID_DEVICE_B, 5000, null);
+        }
+        function newTask(scheduler, id, n) {
+          if (id === ID_WORKER)
+            return new WorkerTask(scheduler, ID_HANDLER_A, n + 11);
+          if (id === ID_HANDLER_A)
+            return new HandlerTask(scheduler);
+          return new DeviceTask(scheduler);
+        }
+
+        var scheduler = new Scheduler();
+        addSix(scheduler);
+        var roles = [ID_WORKER, ID_HANDLER_A, ID_DEVICE_A];
+
+        // Every call ends the old bounded session. Same-layout replacement records/tasks must be
+        // rediscovered on the next call; stale raw frame identities must neither retain nor touch
+        // the detached objects.
+        for (var n = 0; n < 48; n++) {
+          for (var j = 0; j < NUMBER_OF_IDS; j++)
+            scheduler.blocks[j].state = STATE_HELD;
+
+          var id = roles[n % roles.length];
+          var old = scheduler.blocks[id];
+          var oldTask = old.task;
+          var predecessor = scheduler.blocks[id + 1];
+          var task = newTask(scheduler, id, n);
+          var fresh = new TaskControlBlock(
+              old.link, id, old.priority, null, task);
+          fresh.state = STATE_RUNNING;
+
+          check(Object.keys(fresh).join('|') === Object.keys(old).join('|') &&
+                Object.getPrototypeOf(fresh) === Object.getPrototypeOf(old),
+                'same-layout TCB ' + n);
+          check(Object.keys(task).join('|') === Object.keys(oldTask).join('|') &&
+                Object.getPrototypeOf(task) === Object.getPrototypeOf(oldTask),
+                'same-layout task ' + n);
+
+          predecessor.link = fresh;
+          scheduler.blocks[id] = fresh;
+          scheduler.list = fresh;
+          scheduler.schedule();
+
+          check(fresh.state === STATE_SUSPENDED &&
+                scheduler.currentId === id && scheduler.currentTcb === null,
+                'fresh record result ' + n);
+          check(scheduler.blocks[id] === fresh && predecessor.link === fresh &&
+                fresh.task === task && task.scheduler === scheduler,
+                'fresh identities published ' + n);
+          check(old.state === STATE_HELD && old.task === oldTask &&
+                oldTask.scheduler === scheduler,
+                'detached identities untouched ' + n);
+        }
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_graph_core_incoming_suspend_parity_case() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'graph core incoming: ' + message;
+        }
+        function addSix(scheduler) {
+          scheduler.addIdleTask(ID_IDLE, 0, null, 1);
+          scheduler.addWorkerTask(ID_WORKER, 1000, null);
+          scheduler.addHandlerTask(ID_HANDLER_A, 2000, null);
+          scheduler.addHandlerTask(ID_HANDLER_B, 3000, null);
+          scheduler.addDeviceTask(ID_DEVICE_A, 4000, null);
+          scheduler.addDeviceTask(ID_DEVICE_B, 5000, null);
+          for (var id = 0; id < NUMBER_OF_IDS; id++)
+            scheduler.blocks[id].state = STATE_HELD;
+        }
+
+        // Three incoming DEVICE packets retain one complete canonical graph session while the
+        // Active successor alternates pending RUNNABLE and final RUNNING state.
+        var deviceScheduler = new Scheduler();
+        addSix(deviceScheduler);
+        var deviceCurrent = deviceScheduler.blocks[ID_HANDLER_A];
+        var deviceTask = deviceCurrent.task;
+        var d3 = new Packet(null, ID_WORKER, KIND_DEVICE);
+        var d2 = new Packet(d3, ID_WORKER, KIND_DEVICE);
+        var d1 = new Packet(d2, ID_WORKER, KIND_DEVICE);
+        deviceCurrent.queue = d1;
+        deviceCurrent.state = STATE_SUSPENDED_RUNNABLE;
+        deviceScheduler.list = deviceCurrent;
+        deviceScheduler.schedule();
+        check(deviceTask.v2 === d1 && d1.link === d2 && d2.link === d3 &&
+              d3.link === null, 'DEVICE bounded list and owners');
+        check(deviceCurrent.queue === null &&
+              deviceCurrent.state === STATE_SUSPENDED &&
+              deviceScheduler.currentId === ID_HANDLER_A &&
+              deviceScheduler.currentTcb === null,
+              'DEVICE final scheduler state');
+
+        // The second WORK packet takes the one-old-node append arm before the same CORE-backed
+        // suspend tail. All other graph records remain canonical and held.
+        var workScheduler = new Scheduler();
+        addSix(workScheduler);
+        var workCurrent = workScheduler.blocks[ID_HANDLER_A];
+        var workTask = workCurrent.task;
+        var w2 = new Packet(null, ID_HANDLER_A, KIND_WORK);
+        var w1 = new Packet(w2, ID_HANDLER_A, KIND_WORK);
+        workCurrent.queue = w1;
+        workCurrent.state = STATE_SUSPENDED_RUNNABLE;
+        workScheduler.list = workCurrent;
+        workScheduler.schedule();
+        check(workTask.v1 === w1 && w1.link === w2 && w2.link === null,
+              'WORK bounded list and owners');
+        check(workTask.v2 === null && workCurrent.queue === null &&
+              workCurrent.state === STATE_SUSPENDED &&
+              workScheduler.currentId === ID_HANDLER_A &&
+              workScheduler.currentTcb === null,
+              'WORK final scheduler state');
+        check(deviceTask.scheduler === deviceScheduler &&
+              workTask.scheduler === workScheduler &&
+              deviceCurrent.link === deviceScheduler.blocks[ID_WORKER] &&
+              workCurrent.link === workScheduler.blocks[ID_WORKER],
+              'canonical graph identities retained');
+
+        [deviceCurrent.state, deviceCurrent.queue === null,
+         deviceTask.v2 === d1 && d3.link === null,
+         deviceScheduler.currentTcb === null,
+         workCurrent.state, workCurrent.queue === null,
+         workTask.v1 === w1 && w2.link === null,
+         workScheduler.currentTcb === null].join('|')
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "2|true|true|true|2|true|true|true");
+}
+
+#[test]
+fn jit_scheduler_graph_core_incoming_suspend_enabled_disabled_parity() {
+    use std::process::Command;
+
+    let executable = std::env::current_exe().expect("current test executable");
+    for disabled in [false, true] {
+        let mut command = Command::new(&executable);
+        command
+            .arg("--exact")
+            .arg("tests::jit_scheduler_graph_core_incoming_suspend_parity_case")
+            .arg("--nocapture")
+            .env("LUMEN_JIT_REGIONLOG", "1")
+            .env_remove("LUMEN_JIT_SCHED_TRACE")
+            .env_remove("LUMEN_JIT_NO_SCHED_GRAPH_CORE_INCOMING")
+            .env_remove("LUMEN_JIT_NO_SCHED_GRAPH_CORE")
+            .env_remove("LUMEN_JIT_NO_SCHED_GRAPH_EPOCH")
+            .env_remove("LUMEN_JIT_NO_SCHED_METHOD_EPOCH")
+            .env_remove("LUMEN_JIT_NO_SCHED_ROLE_EPOCH")
+            .env_remove("LUMEN_JIT_NO_SCHED_ROLE_DISPATCH")
+            .env_remove("LUMEN_JIT_NO_SCHED_ACTIVE_PACKET_ROLE_DISPATCH")
+            .env_remove("LUMEN_JIT_NO_SCHED_HANDLER_INCOMING_SUSPEND")
+            .env_remove("LUMEN_JIT_NO_SCHED_FAST_LOOP")
+            .env_remove("LUMEN_JIT_NO_SCHED_REGION");
+        if disabled {
+            command.env("LUMEN_JIT_NO_SCHED_GRAPH_CORE_INCOMING", "1");
+        }
+
+        let output = command.output().expect("run graph CORE incoming parity child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success()
+                && stdout.contains("running 1 test")
+                && stderr.contains("graph_epoch=true")
+                && stderr.contains("graph_core=true")
+                && stderr.contains(&format!("graph_core_incoming={}", !disabled)),
+            "graph CORE incoming parity child disabled={disabled} failed\n\
+             stdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn jit_scheduler_graph_core_incoming_suspend_uses_saved_record_under_trace() {
+    use std::process::Command;
+
+    let executable = std::env::current_exe().expect("current test executable");
+    let output = Command::new(&executable)
+        .arg("--exact")
+        .arg("tests::jit_scheduler_graph_core_incoming_suspend_parity_case")
+        .arg("--nocapture")
+        .env("LUMEN_JIT_REGIONLOG", "1")
+        .env("LUMEN_JIT_SCHED_TRACE", "1")
+        .env_remove("LUMEN_JIT_NO_SCHED_GRAPH_CORE_INCOMING")
+        .env_remove("LUMEN_JIT_NO_SCHED_GRAPH_CORE")
+        .env_remove("LUMEN_JIT_NO_SCHED_GRAPH_EPOCH")
+        .env_remove("LUMEN_JIT_NO_SCHED_METHOD_EPOCH")
+        .env_remove("LUMEN_JIT_NO_SCHED_ROLE_EPOCH")
+        .env_remove("LUMEN_JIT_NO_SCHED_ROLE_DISPATCH")
+        .env_remove("LUMEN_JIT_NO_SCHED_ACTIVE_PACKET_ROLE_DISPATCH")
+        .env_remove("LUMEN_JIT_NO_SCHED_HANDLER_INCOMING_SUSPEND")
+        .env_remove("LUMEN_JIT_NO_SCHED_FAST_LOOP")
+        .env_remove("LUMEN_JIT_NO_SCHED_REGION")
+        .output()
+        .expect("run graph CORE incoming trace child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success()
+            && stdout.contains("running 1 test")
+            && stderr.contains("graph_epoch=true")
+            && stderr.contains("graph_core=true")
+            && stderr.contains("graph_core_incoming=true"),
+        "graph CORE incoming trace child failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn jit_scheduler_graph_core_incoming_soft_rejects_foreign_handler_scheduler_once() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'graph core incoming soft reject: ' + message;
+        }
+        function addSix(scheduler) {
+          scheduler.addIdleTask(ID_IDLE, 0, null, 1);
+          scheduler.addWorkerTask(ID_WORKER, 1000, null);
+          scheduler.addHandlerTask(ID_HANDLER_A, 2000, null);
+          scheduler.addHandlerTask(ID_HANDLER_B, 3000, null);
+          scheduler.addDeviceTask(ID_DEVICE_A, 4000, null);
+          scheduler.addDeviceTask(ID_DEVICE_B, 5000, null);
+          for (var id = 0; id < NUMBER_OF_IDS; id++)
+            scheduler.blocks[id].state = STATE_HELD;
+        }
+
+        var scheduler = new Scheduler();
+        addSix(scheduler);
+        var current = scheduler.blocks[ID_HANDLER_A];
+        var handler = current.task;
+        var packet = new Packet(null, ID_WORKER, KIND_DEVICE);
+        current.queue = packet;
+        current.state = STATE_SUSPENDED_RUNNABLE;
+        scheduler.list = current;
+
+        // A value-only replacement keeps HandlerTask's graph-proven shape/prototype. CORE must
+        // remain a soft miss and generic replay must expose all prior Active/addTo effects once.
+        var keys = Object.keys(handler).join('|');
+        var foreign = new Scheduler();
+        var gets = 0, calls = 0, callThis = null, sourceOrder = false;
+        Object.defineProperty(foreign, 'suspendCurrent', {
+          configurable: true,
+          get: function() {
+            gets++;
+            sourceOrder = handler.v2 === packet && packet.link === null &&
+                current.queue === null && current.state === STATE_RUNNING &&
+                scheduler.currentId === ID_HANDLER_A &&
+                scheduler.currentTcb === current;
+            return function() {
+              calls++;
+              callThis = this;
+              return null;
+            };
+          }
+        });
+        handler.scheduler = foreign;
+        check(Object.keys(handler).join('|') === keys &&
+              Object.getPrototypeOf(handler) === HandlerTask.prototype,
+              'same-shape Handler fixture');
+
+        scheduler.schedule();
+
+        check(gets === 1 && calls === 1 && callThis === foreign,
+              'foreign accessor and call once');
+        check(sourceOrder, 'foreign accessor source position');
+        check(handler.v2 === packet && packet.link === null &&
+              current.queue === null && current.state === STATE_RUNNING,
+              'generic Handler effects preserved');
+        check(scheduler.currentId === ID_HANDLER_A &&
+              scheduler.currentTcb === null &&
+              handler.scheduler === foreign &&
+              scheduler.blocks[ID_HANDLER_A] === current,
+              'scheduler and graph owners retained');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_active_idle_stitches_releases_and_replays_late_method_guard() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        // Populate all four task-run call-cache ways and warm IdleTask's second-stage body before
+        // compiling the scheduler. The cases below then enter Idle through SchedulerActive with
+        // an exact Null packet, rather than calling IdleTask.run directly.
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'active idle stitch: ' + message;
+        }
+        function oneScheduledIdle(v1, count, id) {
+          var scheduler = new Scheduler();
+          var idleTask = new IdleTask(scheduler, v1, count);
+          var idle = new TaskControlBlock(null, ID_IDLE, 1, null, idleTask);
+          idle.state = STATE_RUNNING;
+
+          // release() turns HELD into RUNNING. The higher-priority Device then proves that the
+          // returned target was published to Scheduler.currentTcb: it runs once and suspends.
+          var target = new TaskControlBlock(
+              null, id, 3, null, new DeviceTask(scheduler));
+          target.state = STATE_HELD;
+          scheduler.blocks[id] = target;
+          scheduler.list = idle;
+          return {
+            scheduler: scheduler,
+            idleTask: idleTask,
+            idle: idle,
+            target: target
+          };
+        }
+
+        var even = oneScheduledIdle(2, 2, ID_DEVICE_A);
+        even.scheduler.schedule();
+        check(even.idleTask.count === 1 && even.idleTask.v1 === 1,
+              'even release numerics');
+        check(even.target.state === STATE_SUSPENDED,
+              'even target became current and ran');
+        check(even.scheduler.currentId === ID_DEVICE_A &&
+              even.scheduler.currentTcb === null && even.scheduler.holdCount === 0,
+              'even scheduler continuation');
+
+        var odd = oneScheduledIdle(3, 2, ID_DEVICE_B);
+        odd.scheduler.schedule();
+        check(odd.idleTask.count === 1 &&
+              odd.idleTask.v1 === ((3 >> 1) ^ 0xD008),
+              'odd release numerics');
+        check(odd.target.state === STATE_SUSPENDED,
+              'odd target became current and ran');
+        check(odd.scheduler.currentId === ID_DEVICE_B &&
+              odd.scheduler.currentTcb === null && odd.scheduler.holdCount === 0,
+              'odd scheduler continuation');
+
+        // count==1 cannot use the release transaction: ordinary IdleTask.run decrements to zero,
+        // calls holdCurrent, and leaves v1 untouched.
+        var finalCase = oneScheduledIdle(9, 1, ID_DEVICE_A);
+        finalCase.scheduler.schedule();
+        check(finalCase.idleTask.count === 0 && finalCase.idleTask.v1 === 9,
+              'final iteration numerics');
+        check(finalCase.idle.state === STATE_HELD &&
+              finalCase.scheduler.holdCount === 1 &&
+              finalCase.target.state === STATE_HELD &&
+              finalCase.scheduler.currentTcb === null,
+              'final iteration replayed hold');
+
+        // This identity guard is deliberately late in the fused transaction. It must decline
+        // before any write; baseline replay then performs count, v1, and mark exactly once.
+        var originalMark = TaskControlBlock.prototype.markAsNotHeld;
+        var markCalls = 0;
+        TaskControlBlock.prototype.markAsNotHeld = function() {
+          markCalls++;
+          return originalMark.call(this);
+        };
+        var changedMark = oneScheduledIdle(2, 2, ID_DEVICE_A);
+        changedMark.scheduler.schedule();
+        TaskControlBlock.prototype.markAsNotHeld = originalMark;
+        check(markCalls === 1, 'changed mark method called once');
+        check(changedMark.idleTask.count === 1 && changedMark.idleTask.v1 === 1,
+              'changed mark replayed Idle writes once');
+        check(changedMark.target.state === STATE_SUSPENDED &&
+              changedMark.scheduler.currentTcb === null,
+              'changed mark replay preserved scheduler result');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_active_idle_replays_changed_callees_and_alias_edges_once() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        // Seed every Scheduler task-run way and compile the Idle child transaction. Each case
+        // below reaches Idle through the scheduler's exact Null-packet active dispatch.
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'active idle replay edges: ' + message;
+        }
+        function oneScheduledIdle(v1, count, id) {
+          var scheduler = new Scheduler();
+          var idleTask = new IdleTask(scheduler, v1, count);
+          var idle = new TaskControlBlock(null, ID_IDLE, 1, null, idleTask);
+          idle.state = STATE_RUNNING;
+          var target = new TaskControlBlock(
+              null, id, 3, null, new DeviceTask(scheduler));
+          target.state = STATE_HELD;
+          scheduler.blocks[id] = target;
+          scheduler.list = idle;
+          return {
+            scheduler: scheduler,
+            idleTask: idleTask,
+            idle: idle,
+            target: target
+          };
+        }
+        function checkReleased(one, count, v1, label) {
+          check(one.idleTask.count === count && one.idleTask.v1 === v1,
+                label + ' Idle writes');
+          check(one.target.state === STATE_SUSPENDED,
+                label + ' target ran once');
+          check(one.scheduler.currentId === one.target.id &&
+                one.scheduler.currentTcb === null &&
+                one.scheduler.holdCount === 0,
+                label + ' scheduler completed');
+        }
+
+        // Changing IdleTask.run must decline before count/v1 are touched. Ordinary replay then
+        // enters the replacement exactly once with the original values.
+        var originalIdleRun = IdleTask.prototype.run;
+        var runHits = 0, runCount = -1, runV1 = -1, runSawNull = false;
+        IdleTask.prototype.run = function(packet) {
+          runHits++;
+          runCount = this.count;
+          runV1 = this.v1;
+          runSawNull = packet === null;
+          return originalIdleRun.call(this, packet);
+        };
+        var changedRun = oneScheduledIdle(2, 2, ID_DEVICE_A);
+        changedRun.scheduler.schedule();
+        IdleTask.prototype.run = originalIdleRun;
+        check(runHits === 1 && runCount === 2 && runV1 === 2 && runSawNull,
+              'changed run entered once before writes');
+        checkReleased(changedRun, 1, 1, 'changed run');
+
+        // release is called after the source-level count/v1 updates. Its identity guard still
+        // has to decline before the fused transaction commits, so replay must expose exactly one
+        // already-updated call to the replacement.
+        var originalRelease = Scheduler.prototype.release;
+        var releaseHits = 0, releaseCount = -1, releaseV1 = -1;
+        Scheduler.prototype.release = function(id) {
+          releaseHits++;
+          releaseCount = this.currentTcb.task.count;
+          releaseV1 = this.currentTcb.task.v1;
+          return originalRelease.call(this, id);
+        };
+        var changedRelease = oneScheduledIdle(3, 2, ID_DEVICE_B);
+        changedRelease.scheduler.schedule();
+        Scheduler.prototype.release = originalRelease;
+        check(releaseHits === 1 && releaseCount === 1 &&
+              releaseV1 === ((3 >> 1) ^ 0xD008),
+              'changed release observed one source-ordered update');
+        checkReleased(changedRelease, 1, ((3 >> 1) ^ 0xD008),
+                      'changed release');
+
+        // An IdleTask may point at a different, shape-compatible Scheduler. The stitched path
+        // cannot substitute the outer scheduler; replay must mutate the foreign block once while
+        // the outer loop continues with the returned TCB.
+        var wrongScheduler = oneScheduledIdle(2, 2, ID_DEVICE_A);
+        var foreign = new Scheduler();
+        foreign.currentTcb = wrongScheduler.idle;
+        foreign.blocks[ID_DEVICE_A] = wrongScheduler.target;
+        wrongScheduler.idleTask.scheduler = foreign;
+        wrongScheduler.scheduler.schedule();
+        checkReleased(wrongScheduler, 1, 1, 'foreign scheduler');
+        check(foreign.currentTcb === wrongScheduler.idle &&
+              foreign.holdCount === 0 && foreign.queueCount === 0,
+              'foreign scheduler identity preserved');
+
+        // A non-writable currentTcb entry must force replay. The first assignment intentionally
+        // fails and schedules Idle a second time. markAsHeld restores writability before the
+        // count==0 fallback returns, making the exact two-iteration result observable and finite.
+        var nonWritable = oneScheduledIdle(2, 2, ID_DEVICE_A);
+        var originalMarkHeld = TaskControlBlock.prototype.markAsHeld;
+        var heldHits = 0;
+        TaskControlBlock.prototype.markAsHeld = function() {
+          if (this === nonWritable.idle) {
+            heldHits++;
+            Object.defineProperty(nonWritable.scheduler, 'currentTcb', {
+              value: nonWritable.scheduler.currentTcb,
+              writable: true,
+              configurable: true
+            });
+          }
+          return originalMarkHeld.call(this);
+        };
+        Object.defineProperty(nonWritable.scheduler, 'currentTcb', {
+          value: nonWritable.idle,
+          writable: false,
+          configurable: true
+        });
+        nonWritable.scheduler.schedule();
+        TaskControlBlock.prototype.markAsHeld = originalMarkHeld;
+        check(heldHits === 1 && nonWritable.idleTask.count === 0 &&
+              nonWritable.idleTask.v1 === 1,
+              'non-writable current replayed exactly twice');
+        check(nonWritable.idle.state === STATE_HELD &&
+              nonWritable.target.state === STATE_RUNNING &&
+              nonWritable.scheduler.holdCount === 1 &&
+              nonWritable.scheduler.currentId === ID_IDLE &&
+              nonWritable.scheduler.currentTcb === null,
+              'non-writable current preserved assignment semantics');
+
+        // release(target === current) is legal and returns current. It is not an ownership
+        // transfer, so the fused higher-priority path must replay; Idle then reaches hold once.
+        var selfTarget = oneScheduledIdle(2, 2, ID_DEVICE_A);
+        selfTarget.scheduler.blocks[ID_DEVICE_A] = selfTarget.idle;
+        selfTarget.scheduler.schedule();
+        check(selfTarget.idleTask.count === 0 && selfTarget.idleTask.v1 === 1,
+              'self target Idle writes once per source iteration');
+        check(selfTarget.idle.state === STATE_HELD &&
+              selfTarget.target.state === STATE_HELD &&
+              selfTarget.scheduler.holdCount === 1 &&
+              selfTarget.scheduler.currentId === ID_IDLE &&
+              selfTarget.scheduler.currentTcb === null,
+              'self target replay completed without owner transfer');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_active_worker_null_stitches_suspend_and_replays_method_guards() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        // Fill Scheduler's polymorphic task-run profile and trigger its second-stage compile.
+        // The custom cases below then reach WorkerTask through SchedulerActive with an exact
+        // Null packet, which is the pure bridge to suspendCurrent covered by this regression.
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'active worker stitch: ' + message;
+        }
+        function oneScheduledWorker() {
+          var scheduler = new Scheduler();
+          var task = new WorkerTask(scheduler, ID_HANDLER_A, 0);
+          var worker = new TaskControlBlock(null, ID_WORKER, 1000, null, task);
+          worker.state = STATE_RUNNING;
+          scheduler.blocks[ID_WORKER] = worker;
+          scheduler.list = worker;
+          return { scheduler: scheduler, task: task, worker: worker };
+        }
+        function checkCompleted(one, label) {
+          check(one.worker.state === STATE_SUSPENDED, label + ' suspended');
+          check(one.scheduler.currentId === ID_WORKER, label + ' current id');
+          check(one.scheduler.currentTcb === null, label + ' completed');
+        }
+
+        var direct = oneScheduledWorker();
+        direct.scheduler.schedule();
+        checkCompleted(direct, 'direct');
+
+        // A changed WorkerTask.run must decline the bridge before touching the TCB. The ordinary
+        // call observes STATE_RUNNING and executes exactly once.
+        var originalRun = WorkerTask.prototype.run;
+        var runHits = 0, runEntryState = -1, runSawNull = false;
+        WorkerTask.prototype.run = function(packet) {
+          runHits++;
+          runEntryState = this.scheduler.currentTcb.state;
+          runSawNull = packet === null;
+          return originalRun.call(this, packet);
+        };
+        var changedRun = oneScheduledWorker();
+        changedRun.scheduler.schedule();
+        WorkerTask.prototype.run = originalRun;
+        check(runHits === 1 && runEntryState === STATE_RUNNING && runSawNull,
+              'changed run replayed once before effects');
+        checkCompleted(changedRun, 'changed run');
+
+        // suspendCurrent is guarded before the shared state transaction. Its replacement must
+        // likewise see the untouched state and run once through the canonical call path.
+        var originalSuspend = Scheduler.prototype.suspendCurrent;
+        var suspendHits = 0, suspendEntryState = -1;
+        Scheduler.prototype.suspendCurrent = function() {
+          suspendHits++;
+          suspendEntryState = this.currentTcb.state;
+          return originalSuspend.call(this);
+        };
+        var changedSuspend = oneScheduledWorker();
+        changedSuspend.scheduler.schedule();
+        Scheduler.prototype.suspendCurrent = originalSuspend;
+        check(suspendHits === 1 && suspendEntryState === STATE_RUNNING,
+              'changed suspend replayed once before effects');
+        checkCompleted(changedSuspend, 'changed suspend');
+
+        // The nested method guard is deliberately late, but still precedes the state write.
+        // Observing STATE_RUNNING here rejects a partial fast update followed by generic replay.
+        var originalMark = TaskControlBlock.prototype.markAsSuspended;
+        var markHits = 0, markEntryState = -1;
+        TaskControlBlock.prototype.markAsSuspended = function() {
+          markHits++;
+          markEntryState = this.state;
+          return originalMark.call(this);
+        };
+        var changedMark = oneScheduledWorker();
+        changedMark.scheduler.schedule();
+        TaskControlBlock.prototype.markAsSuspended = originalMark;
+        check(markHits === 1 && markEntryState === STATE_RUNNING,
+              'changed mark replayed once before effects');
+        checkCompleted(changedMark, 'changed mark');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_active_worker_packet_preempts_and_preserves_owners() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'active worker packet owners: ' + message;
+        }
+        function oneWorker(link, v1, v2) {
+          var scheduler = new Scheduler();
+          var task = new WorkerTask(scheduler, v1, v2);
+          var packet = new Packet(link, ID_WORKER, KIND_WORK);
+          var worker = new TaskControlBlock(
+              null, ID_WORKER, 1000, packet, task);
+          var target = new TaskControlBlock(
+              null, ID_HANDLER_B, 2000, null, new HandlerTask(scheduler));
+          // queue() still publishes and preempts to this TCB, but the held bit keeps the
+          // following scheduler iteration finite and leaves the packet available to inspect.
+          target.state = STATE_SUSPENDED | STATE_HELD;
+          for (var id = 0; id < NUMBER_OF_IDS; id++) scheduler.blocks[id] = target;
+          scheduler.blocks[ID_WORKER] = worker;
+          scheduler.list = worker;
+          return {
+            scheduler: scheduler,
+            task: task,
+            worker: worker,
+            target: target,
+            packet: packet
+          };
+        }
+        function checkQueued(one, sourceQueue, sourceState, targetState, label) {
+          check(one.scheduler.queueCount === 1, label + ' queue count');
+          check(one.worker.queue === sourceQueue && one.worker.state === sourceState,
+                label + ' source dequeue');
+          check(one.target.queue === one.packet && one.target.state === targetState,
+                label + ' target publication');
+          check(one.packet.link === null && one.packet.id === ID_WORKER &&
+                one.packet.a1 === 0, label + ' queue prefix');
+          check(one.scheduler.currentId === ID_WORKER &&
+                one.scheduler.currentTcb === null, label + ' scheduler completion');
+        }
+
+        // Exercise the canonical toggle and the v2 wrap while retaining the packet payload and
+        // the source successor through independent owners.
+        var successor = new Packet(null, ID_DEVICE_A, KIND_DEVICE);
+        successor.a1 = 77;
+        var direct = oneWorker(successor, ID_HANDLER_A, 24);
+        var payload = direct.packet.a2;
+        direct.scheduler.schedule();
+        check(direct.task.v1 === ID_HANDLER_B && direct.task.v2 === 2,
+              'direct Worker numerics');
+        check(payload === direct.packet.a2 && payload.join(',') === '25,26,1,2',
+              'direct payload identity');
+        check(successor.a1 === 77, 'direct successor remains live');
+        checkQueued(direct, successor, STATE_RUNNABLE,
+                    STATE_SUSPENDED | STATE_HELD | STATE_RUNNABLE, 'direct');
+
+        var reverse = oneWorker(null, ID_HANDLER_B, 26);
+        reverse.scheduler.schedule();
+        check(reverse.task.v1 === ID_HANDLER_A && reverse.task.v2 === 4,
+              'reverse Worker numerics');
+        check(reverse.packet.a2.join(',') === '1,2,3,4', 'reverse payload');
+        checkQueued(reverse, null, STATE_RUNNING,
+                    STATE_SUSPENDED | STATE_HELD | STATE_RUNNABLE, 'reverse');
+
+        // The source successor can be the packet itself. queue() later clears packet.link, but
+        // both TCB queues must retain their separate owners of the packet.
+        var selfLink = oneWorker(null, ID_HANDLER_A, 0);
+        selfLink.packet.link = selfLink.packet;
+        selfLink.scheduler.schedule();
+        check(selfLink.worker.queue === selfLink.packet &&
+              selfLink.target.queue === selfLink.packet,
+              'self link aliases both queues');
+        check(selfLink.packet.link === null && selfLink.task.v2 === 4,
+              'self link queue rewrite');
+        checkQueued(selfLink, selfLink.packet, STATE_RUNNABLE,
+                    STATE_SUSPENDED | STATE_HELD | STATE_RUNNABLE, 'self link');
+
+        // Likewise, moving the current TCB itself out of packet.link must not release it before
+        // the source queue takes ownership. Break the intentional cycle after observing it.
+        var currentLink = oneWorker(null, ID_HANDLER_A, 0);
+        currentLink.packet.link = currentLink.worker;
+        currentLink.scheduler.schedule();
+        check(currentLink.worker.queue === currentLink.worker &&
+              currentLink.worker.priority === 1000, 'current link survives transfer');
+        checkQueued(currentLink, currentLink.worker, STATE_RUNNABLE,
+                    STATE_SUSPENDED | STATE_HELD | STATE_RUNNABLE, 'current link');
+        currentLink.worker.queue = null;
+
+        // Worker names are live values. These cases must replay when they no longer match the
+        // profiled Richards constants rather than baking old loop bounds, ids, or state bits.
+        var oldDataSize = DATA_SIZE;
+        var shortLoop = oneWorker(null, ID_HANDLER_A, 0);
+        DATA_SIZE = 2;
+        shortLoop.scheduler.schedule();
+        DATA_SIZE = oldDataSize;
+        check(shortLoop.task.v2 === 2 && shortLoop.packet.a2[0] === 1 &&
+              shortLoop.packet.a2[1] === 2 && !Object.hasOwn(shortLoop.packet.a2, 2) &&
+              !Object.hasOwn(shortLoop.packet.a2, 3), 'live DATA_SIZE');
+        checkQueued(shortLoop, null, STATE_RUNNING,
+                    STATE_SUSPENDED | STATE_HELD | STATE_RUNNABLE, 'short loop');
+
+        var oldSuspendedRunnable = STATE_SUSPENDED_RUNNABLE;
+        var oldRunning = STATE_RUNNING;
+        var oldRunnable = STATE_RUNNABLE;
+        var liveState = oneWorker(null, ID_HANDLER_A, 0);
+        STATE_SUSPENDED_RUNNABLE = 8;
+        STATE_RUNNING = 16;
+        STATE_RUNNABLE = 17;
+        liveState.worker.state = STATE_SUSPENDED_RUNNABLE;
+        liveState.scheduler.schedule();
+        STATE_SUSPENDED_RUNNABLE = oldSuspendedRunnable;
+        STATE_RUNNING = oldRunning;
+        STATE_RUNNABLE = oldRunnable;
+        check(liveState.worker.state === 16 && liveState.target.state === 23,
+              'live active state names');
+        check(liveState.scheduler.queueCount === 1 &&
+              liveState.scheduler.currentTcb === null, 'live state completion');
+
+        var oldHandlerA = ID_HANDLER_A;
+        var oldHandlerB = ID_HANDLER_B;
+        var liveIds = oneWorker(null, ID_HANDLER_A, 0);
+        ID_HANDLER_A = 7;
+        ID_HANDLER_B = 8;
+        liveIds.task.v1 = ID_HANDLER_A;
+        liveIds.scheduler.blocks[ID_HANDLER_B] = liveIds.target;
+        liveIds.scheduler.schedule();
+        ID_HANDLER_A = oldHandlerA;
+        ID_HANDLER_B = oldHandlerB;
+        check(liveIds.task.v1 === 8 && liveIds.packet.id === ID_WORKER,
+              'live handler ids');
+        check(liveIds.target.queue === liveIds.packet &&
+              liveIds.scheduler.currentTcb === null, 'live id target');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_active_worker_packet_replays_changed_methods_once() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'active worker packet methods: ' + message;
+        }
+        function oneWorker() {
+          var scheduler = new Scheduler();
+          var task = new WorkerTask(scheduler, ID_HANDLER_A, 24);
+          var packet = new Packet(null, ID_WORKER, KIND_WORK);
+          var worker = new TaskControlBlock(
+              null, ID_WORKER, 1000, packet, task);
+          var target = new TaskControlBlock(
+              null, ID_HANDLER_B, 2000, null, new HandlerTask(scheduler));
+          target.state = STATE_SUSPENDED | STATE_HELD;
+          for (var id = 0; id < NUMBER_OF_IDS; id++) scheduler.blocks[id] = target;
+          scheduler.blocks[ID_WORKER] = worker;
+          scheduler.list = worker;
+          return {
+            scheduler: scheduler,
+            task: task,
+            worker: worker,
+            target: target,
+            packet: packet
+          };
+        }
+        function checkComplete(one, targetState, label) {
+          check(one.task.v1 === ID_HANDLER_B && one.task.v2 === 2,
+                label + ' Worker numerics once');
+          check(one.packet.a2.join(',') === '25,26,1,2',
+                label + ' payload once');
+          check(one.worker.queue === null && one.worker.state === STATE_RUNNING,
+                label + ' source dequeue');
+          check(one.scheduler.queueCount === 1 && one.target.queue === one.packet &&
+                one.target.state === targetState, label + ' target publish');
+          check(one.packet.link === null && one.packet.id === ID_WORKER &&
+                one.scheduler.currentTcb === null, label + ' completion');
+        }
+
+        // TCB.run dequeues and updates state before looking up WorkerTask.run. A replacement must
+        // therefore enter once after those effects, but before any Worker field or packet write.
+        var originalWorkerRun = WorkerTask.prototype.run;
+        var runHits = 0, runPacket = null, runState = -1, runQueue = 1;
+        var runV1 = -1, runV2 = -1;
+        WorkerTask.prototype.run = function(packet) {
+          runHits++;
+          runPacket = packet;
+          runState = this.scheduler.currentTcb.state;
+          runQueue = this.scheduler.currentTcb.queue;
+          runV1 = this.v1;
+          runV2 = this.v2;
+          return originalWorkerRun.call(this, packet);
+        };
+        var changedRun = oneWorker();
+        changedRun.scheduler.schedule();
+        WorkerTask.prototype.run = originalWorkerRun;
+        check(runHits === 1 && runPacket === changedRun.packet &&
+              runState === STATE_RUNNING && runQueue === null &&
+              runV1 === ID_HANDLER_A && runV2 === 24,
+              'changed run source-order entry');
+        checkComplete(changedRun,
+                      STATE_SUSPENDED | STATE_HELD | STATE_RUNNABLE,
+                      'changed run');
+
+        // queue is looked up after every Worker mutation. Its replacement also changes a state
+        // name before delegating, so checkPriorityAdd must consume that new value in this call.
+        var originalQueue = Scheduler.prototype.queue;
+        var queueHits = 0, queueSawCurrent = false, queueCountAtEntry = -1;
+        var queueV1 = -1, queueV2 = -1, queueId = -1, queuePayload = '';
+        var oldRunnable = STATE_RUNNABLE;
+        Scheduler.prototype.queue = function(packet) {
+          queueHits++;
+          queueSawCurrent = this.currentTcb === changedQueue.worker;
+          queueCountAtEntry = this.queueCount;
+          queueV1 = changedQueue.task.v1;
+          queueV2 = changedQueue.task.v2;
+          queueId = packet.id;
+          queuePayload = packet.a2.join(',');
+          STATE_RUNNABLE = 8;
+          return originalQueue.call(this, packet);
+        };
+        var changedQueue = oneWorker();
+        changedQueue.scheduler.schedule();
+        Scheduler.prototype.queue = originalQueue;
+        STATE_RUNNABLE = oldRunnable;
+        check(queueHits === 1 && queueSawCurrent && queueCountAtEntry === 0 &&
+              queueV1 === ID_HANDLER_B && queueV2 === 2 &&
+              queueId === ID_HANDLER_B && queuePayload === '25,26,1,2',
+              'changed queue sees Worker effects once');
+        checkComplete(changedQueue, STATE_SUSPENDED | STATE_HELD | 8,
+                      'changed queue');
+
+        // checkPriorityAdd is looked up only after Scheduler.queue's prefix has committed, while
+        // the target queue and state are still untouched.
+        var originalCheck = TaskControlBlock.prototype.checkPriorityAdd;
+        var checkHits = 0, checkCount = -1, checkPacketId = -1;
+        var checkTargetQueue = 1, checkTargetState = -1, checkTask = null;
+        TaskControlBlock.prototype.checkPriorityAdd = function(task, packet) {
+          checkHits++;
+          checkCount = changedCheck.scheduler.queueCount;
+          checkPacketId = packet.id;
+          checkTargetQueue = this.queue;
+          checkTargetState = this.state;
+          checkTask = task;
+          return originalCheck.call(this, task, packet);
+        };
+        var changedCheck = oneWorker();
+        changedCheck.scheduler.schedule();
+        TaskControlBlock.prototype.checkPriorityAdd = originalCheck;
+        check(checkHits === 1 && checkCount === 1 &&
+              checkPacketId === ID_WORKER && checkTargetQueue === null &&
+              checkTargetState === (STATE_SUSPENDED | STATE_HELD) &&
+              checkTask === changedCheck.worker,
+              'changed check sees queue prefix once');
+        checkComplete(changedCheck,
+                      STATE_SUSPENDED | STATE_HELD | STATE_RUNNABLE,
+                      'changed check');
+
+        // markAsRunnable is later again: target.queue has been published, but its state has not
+        // yet changed. A replay after a partial native commit would make either observation fail.
+        var originalMark = TaskControlBlock.prototype.markAsRunnable;
+        var markHits = 0, markQueue = null, markState = -1;
+        TaskControlBlock.prototype.markAsRunnable = function() {
+          markHits++;
+          markQueue = this.queue;
+          markState = this.state;
+          return originalMark.call(this);
+        };
+        var changedMark = oneWorker();
+        changedMark.scheduler.schedule();
+        TaskControlBlock.prototype.markAsRunnable = originalMark;
+        check(markHits === 1 && markQueue === changedMark.packet &&
+              markState === (STATE_SUSPENDED | STATE_HELD),
+              'changed mark source-order entry');
+        checkComplete(changedMark,
+                      STATE_SUSPENDED | STATE_HELD | STATE_RUNNABLE,
+                      'changed mark');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_active_worker_packet_preserves_source_order_on_throws() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'active worker packet throws: ' + message;
+        }
+        function oneWorker(link, v2) {
+          var scheduler = new Scheduler();
+          var task = new WorkerTask(scheduler, ID_HANDLER_A, v2);
+          var packet = new Packet(link, ID_WORKER, KIND_WORK);
+          var worker = new TaskControlBlock(
+              null, ID_WORKER, 1000, packet, task);
+          var target = new TaskControlBlock(
+              null, ID_HANDLER_B, 2000, null, new HandlerTask(scheduler));
+          target.state = STATE_SUSPENDED | STATE_HELD;
+          for (var id = 0; id < NUMBER_OF_IDS; id++) scheduler.blocks[id] = target;
+          scheduler.blocks[ID_WORKER] = worker;
+          scheduler.list = worker;
+          return {
+            scheduler: scheduler,
+            task: task,
+            worker: worker,
+            target: target,
+            packet: packet
+          };
+        }
+
+        // The third dense write throws after v1/id/a1 and three v2 updates. Earlier element writes
+        // and TCB.run's dequeue must survive, but Scheduler.queue must not have begun.
+        var elementThrow = oneWorker(null, 0);
+        var elementSets = 0;
+        Object.defineProperty(elementThrow.packet.a2, '2', {
+          configurable: true,
+          set: function(value) { elementSets++; throw 'element boom'; }
+        });
+        var elementError = '';
+        try { elementThrow.scheduler.schedule(); } catch (e) { elementError = e; }
+        check(elementError === 'element boom' && elementSets === 1,
+              'element setter throws once');
+        check(elementThrow.worker.queue === null &&
+              elementThrow.worker.state === STATE_RUNNING,
+              'element throw source dequeue');
+        check(elementThrow.task.v1 === ID_HANDLER_B && elementThrow.task.v2 === 3,
+              'element throw Worker numerics');
+        check(elementThrow.packet.id === ID_HANDLER_B && elementThrow.packet.a1 === 0 &&
+              elementThrow.packet.a2[0] === 1 && elementThrow.packet.a2[1] === 2 &&
+              Object.hasOwn(elementThrow.packet.a2, 2) &&
+              !Object.hasOwn(elementThrow.packet.a2, 3),
+              'element throw partial payload');
+        check(elementThrow.scheduler.queueCount === 0 &&
+              elementThrow.target.queue === null &&
+              elementThrow.scheduler.currentTcb === elementThrow.worker,
+              'element throw stops before queue');
+
+        // scheduler is read only after the complete Worker loop. Its getter observes all Worker
+        // effects and throws before queue(), while packet.link and the dequeued successor coexist.
+        var successor = new Packet(null, ID_DEVICE_A, KIND_DEVICE);
+        successor.a1 = 91;
+        var schedulerThrow = oneWorker(successor, 0);
+        var schedulerGets = 0;
+        Object.defineProperty(schedulerThrow.task, 'scheduler', {
+          configurable: true,
+          get: function() { schedulerGets++; throw 'scheduler boom'; }
+        });
+        var schedulerError = '';
+        try { schedulerThrow.scheduler.schedule(); } catch (e) { schedulerError = e; }
+        check(schedulerError === 'scheduler boom' && schedulerGets === 1,
+              'scheduler getter throws once');
+        check(schedulerThrow.worker.queue === successor &&
+              schedulerThrow.worker.state === STATE_RUNNABLE &&
+              schedulerThrow.packet.link === successor && successor.a1 === 91,
+              'scheduler throw preserves successor owners');
+        check(schedulerThrow.task.v1 === ID_HANDLER_B && schedulerThrow.task.v2 === 4 &&
+              schedulerThrow.packet.id === ID_HANDLER_B &&
+              schedulerThrow.packet.a2.join(',') === '1,2,3,4',
+              'scheduler throw preserves Worker writes');
+        check(schedulerThrow.scheduler.queueCount === 0 &&
+              schedulerThrow.scheduler.currentTcb === schedulerThrow.worker,
+              'scheduler throw stops before queue');
+
+        // A current-priority getter runs after queueCount, packet rewrites, target publication,
+        // and markAsRunnable. Throwing here must preserve all those effects exactly once while
+        // leaving Scheduler.currentTcb on the source TCB.
+        var priorityThrow = oneWorker(null, 0);
+        var priorityGets = 0;
+        Object.defineProperty(priorityThrow.worker, 'priority', {
+          configurable: true,
+          get: function() { priorityGets++; throw 'priority boom'; }
+        });
+        var priorityError = '';
+        try { priorityThrow.scheduler.schedule(); } catch (e) { priorityError = e; }
+        check(priorityError === 'priority boom' && priorityGets === 1,
+              'priority getter throws once');
+        check(priorityThrow.task.v1 === ID_HANDLER_B && priorityThrow.task.v2 === 4 &&
+              priorityThrow.worker.queue === null &&
+              priorityThrow.worker.state === STATE_RUNNING,
+              'priority throw Worker effects');
+        check(priorityThrow.scheduler.queueCount === 1 &&
+              priorityThrow.packet.link === null &&
+              priorityThrow.packet.id === ID_WORKER,
+              'priority throw queue prefix');
+        check(priorityThrow.target.queue === priorityThrow.packet &&
+              priorityThrow.target.state ===
+                  (STATE_SUSPENDED | STATE_HELD | STATE_RUNNABLE) &&
+              priorityThrow.scheduler.currentTcb === priorityThrow.worker,
+              'priority throw target effects');
+
+        // The outer assignment is later than WorkerTask.run and Scheduler.queue. A setter that
+        // rejects the preempting target must see the initial source assignment first and retain
+        // the old current value after every preceding effect has committed.
+        var currentThrow = oneWorker(null, 0);
+        var storedCurrent = null, currentGets = 0, currentSets = 0;
+        Object.defineProperty(currentThrow.scheduler, 'currentTcb', {
+          configurable: true,
+          get: function() { currentGets++; return storedCurrent; },
+          set: function(value) {
+            currentSets++;
+            if (value === currentThrow.target) throw 'current boom';
+            storedCurrent = value;
+          }
+        });
+        var currentError = '';
+        try { currentThrow.scheduler.schedule(); } catch (e) { currentError = e; }
+        check(currentError === 'current boom' && currentSets === 2 && currentGets > 0,
+              'current setter source order');
+        check(storedCurrent === currentThrow.worker &&
+              currentThrow.scheduler.queueCount === 1,
+              'current setter retains source');
+        check(currentThrow.task.v1 === ID_HANDLER_B && currentThrow.task.v2 === 4 &&
+              currentThrow.target.queue === currentThrow.packet &&
+              currentThrow.target.state ===
+                  (STATE_SUSPENDED | STATE_HELD | STATE_RUNNABLE),
+              'current setter preserves prior effects');
+
+        // An element setter is arbitrary user code. Mutating both loop and queue globals during
+        // the first store must terminate the loop at one element and affect the later target mark.
+        var liveSetter = oneWorker(null, 0);
+        var oldDataSize = DATA_SIZE;
+        var oldRunnable = STATE_RUNNABLE;
+        var storedElement = -1, liveSets = 0;
+        Object.defineProperty(liveSetter.packet.a2, '0', {
+          configurable: true,
+          get: function() { return storedElement; },
+          set: function(value) {
+            liveSets++;
+            storedElement = value;
+            DATA_SIZE = 1;
+            STATE_RUNNABLE = 8;
+          }
+        });
+        liveSetter.scheduler.schedule();
+        DATA_SIZE = oldDataSize;
+        STATE_RUNNABLE = oldRunnable;
+        check(liveSets === 1 && storedElement === 1 && liveSetter.task.v2 === 1 &&
+              !Object.hasOwn(liveSetter.packet.a2, 1),
+              'live setter changes loop bound');
+        check(liveSetter.scheduler.queueCount === 1 &&
+              liveSetter.target.queue === liveSetter.packet &&
+              liveSetter.target.state === (STATE_SUSPENDED | STATE_HELD | 8) &&
+              liveSetter.scheduler.currentTcb === null,
+              'live setter changes runnable bit');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_idle_release_flattens_both_branches_and_preserves_return_owners() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'idle release owners: ' + message;
+        }
+        function oneIdle(v1, count, id, targetState, targetPriority, currentPriority) {
+          var scheduler = new Scheduler();
+          var current = new TaskControlBlock(null, ID_IDLE, currentPriority, null, {});
+          current.state = STATE_RUNNING;
+          var target = new TaskControlBlock(null, id, targetPriority, null, {marker: 77});
+          target.state = targetState;
+          scheduler.blocks[id] = target;
+          scheduler.currentTcb = current;
+          return {
+            scheduler: scheduler,
+            idle: new IdleTask(scheduler, v1, count),
+            current: current,
+            target: target,
+            id: id
+          };
+        }
+
+        var even = oneIdle(2, 2, ID_DEVICE_A,
+                           STATE_HELD | STATE_RUNNABLE, 3, 2);
+        var evenResult = even.idle.run(null);
+        check(evenResult === even.target, 'even return identity');
+        check(even.idle.count === 1 && even.idle.v1 === 1, 'even numerics');
+        check(even.target.state === STATE_RUNNABLE, 'even state');
+        check(even.scheduler.currentTcb === even.current, 'even current untouched');
+
+        var odd = oneIdle(3, 2, ID_DEVICE_B,
+                          STATE_HELD | STATE_SUSPENDED | STATE_RUNNABLE, 4, 2);
+        var oddResult = odd.idle.run(null);
+        check(oddResult === odd.target, 'odd return identity');
+        check(odd.idle.count === 1 && odd.idle.v1 === ((3 >> 1) ^ 0xD008),
+              'odd numerics');
+        check(odd.target.state === (STATE_SUSPENDED | STATE_RUNNABLE), 'odd state');
+
+        // Drop every source owner after return. The returned Value must retain its own Rc.
+        even.scheduler.blocks[even.id] = null;
+        even.target = null;
+        check(evenResult.task.marker === 77 && evenResult.priority === 3,
+              'returned target remains owned');
+
+        // count==1 is the final hold and must replay the untouched ordinary function.
+        var finalCase = oneIdle(9, 1, ID_DEVICE_A, STATE_HELD, 1, 2);
+        var tail = new TaskControlBlock(null, ID_WORKER, 1, null, {});
+        finalCase.current.link = tail;
+        var finalResult = finalCase.idle.run(null);
+        check(finalResult === tail && finalCase.idle.count === 0, 'final hold return');
+        check(finalCase.scheduler.holdCount === 1 &&
+              finalCase.current.state === STATE_HELD, 'final hold effects');
+        check(finalCase.idle.v1 === 9, 'final hold leaves v1');
+
+        // Unsupported outcomes replay from pc0 and apply their ordinary effects exactly once.
+        var low = oneIdle(2, 2, ID_DEVICE_A, STATE_HELD, 1, 2);
+        var lowResult = low.idle.run(null);
+        check(lowResult === low.current && low.idle.count === 1 && low.idle.v1 === 1,
+              'nonpreempt replay');
+        check(low.target.state === STATE_RUNNING, 'nonpreempt mark');
+        var missing = oneIdle(2, 2, ID_DEVICE_A, STATE_HELD, 3, 2);
+        missing.scheduler.blocks[ID_DEVICE_A] = null;
+        var missingResult = missing.idle.run(null);
+        check(missingResult === null && missing.idle.count === 1 && missing.idle.v1 === 1,
+              'missing target replay');
+
+        // IDs and the state mask are live bindings, not constants baked into native code.
+        var oldA = ID_DEVICE_A;
+        ID_DEVICE_A = 1;
+        var liveId = oneIdle(2, 2, ID_DEVICE_A, STATE_HELD, 3, 2);
+        check(liveId.idle.run(null) === liveId.target, 'live device id');
+        ID_DEVICE_A = oldA;
+        var oldMask = STATE_NOT_HELD;
+        STATE_NOT_HELD = ~8;
+        var liveMask = oneIdle(2, 2, ID_DEVICE_A, 13, 3, 2);
+        liveMask.idle.run(null);
+        check(liveMask.target.state === 5, 'live not-held mask');
+
+        var oldB = ID_DEVICE_B;
+        ID_DEVICE_B = 1;
+        var liveOdd = oneIdle(3, 2, ID_DEVICE_B, 13, 3, 2);
+        check(liveOdd.idle.run(null) === liveOdd.target, 'live odd device id');
+        check(liveOdd.idle.v1 === ((3 >> 1) ^ 0xD008) && liveOdd.target.state === 5,
+              'live odd values');
+        ID_DEVICE_B = oldB;
+        STATE_NOT_HELD = oldMask;
+
+        // Signed ToInt32 shifts stay on the fast path for both branches.
+        var signedOdd = oneIdle(-1, 2, ID_DEVICE_B, STATE_HELD, 3, 2);
+        signedOdd.idle.run(null);
+        check(signedOdd.idle.v1 === ((-1 >> 1) ^ 0xD008), 'signed odd shift');
+        var signedEven = oneIdle(-2147483648, 2, ID_DEVICE_A, STATE_HELD, 3, 2);
+        signedEven.idle.run(null);
+        check(signedEven.idle.v1 === -1073741824, 'signed even shift');
+
+        // target===current is the equal-priority/nonpreempting ownership case and must replay.
+        var alias = oneIdle(2, 2, ID_DEVICE_A, STATE_HELD, 3, 2);
+        alias.current.priority = 3;
+        alias.current.state = STATE_HELD;
+        alias.scheduler.blocks[ID_DEVICE_A] = alias.current;
+        var aliasResult = alias.idle.run(null);
+        check(aliasResult === alias.current && alias.current.state === STATE_RUNNING,
+              'target current alias');
+        check(alias.idle.count === 1 && alias.idle.v1 === 1, 'alias effects once');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_idle_release_replays_observable_guards_and_partial_effects_once() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'idle release guards: ' + message;
+        }
+        function oneIdle(v1) {
+          var scheduler = new Scheduler();
+          var current = new TaskControlBlock(null, ID_IDLE, 2, null, {});
+          current.state = STATE_RUNNING;
+          var target = new TaskControlBlock(null, ID_DEVICE_A, 3, null, {});
+          target.state = STATE_HELD;
+          scheduler.blocks[ID_DEVICE_A] = target;
+          scheduler.currentTcb = current;
+          return [scheduler, new IdleTask(scheduler, v1, 2), current, target];
+        }
+
+        var originalRelease = Scheduler.prototype.release, releaseCalls = 0;
+        Scheduler.prototype.release = function(id) {
+          releaseCalls++;
+          return originalRelease.call(this, id);
+        };
+        var releaseCase = oneIdle(2);
+        check(releaseCase[1].run(null) === releaseCase[3], 'release replacement return');
+        Scheduler.prototype.release = originalRelease;
+        check(releaseCalls === 1 && releaseCase[1].count === 1 &&
+              releaseCase[1].v1 === 1, 'release replacement once');
+
+        var originalMark = TaskControlBlock.prototype.markAsNotHeld, markCalls = 0;
+        TaskControlBlock.prototype.markAsNotHeld = function() {
+          markCalls++;
+          return originalMark.call(this);
+        };
+        var markCase = oneIdle(2);
+        markCase[1].run(null);
+        TaskControlBlock.prototype.markAsNotHeld = originalMark;
+        check(markCalls === 1 && markCase[3].state === STATE_RUNNING,
+              'mark replacement once');
+
+        // UpdateProp reads count, writes it, then the following GetProp reads it again.
+        var countCase = oneIdle(2), countValue = 2, countGets = 0, countSets = 0;
+        Object.defineProperty(countCase[1], 'count', {
+          get: function() { countGets++; return countValue; },
+          set: function(value) { countSets++; countValue = value; }, configurable: true
+        });
+        countCase[1].run(null);
+        check(countGets === 2 && countSets === 1 && countValue === 1,
+              'count accessor order');
+
+        // The branch test and shift are two distinct v1 reads in the source program.
+        var v1Case = oneIdle(2), v1Value = 2, v1Gets = 0, v1Sets = 0;
+        Object.defineProperty(v1Case[1], 'v1', {
+          get: function() { v1Gets++; return v1Value; },
+          set: function(value) { v1Sets++; v1Value = value; }, configurable: true
+        });
+        v1Case[1].run(null);
+        check(v1Gets === 2 && v1Sets === 1 && v1Value === 1,
+              'v1 accessor order');
+
+        var schedulerCase = oneIdle(2), schedulerValue = schedulerCase[0], schedulerGets = 0;
+        Object.defineProperty(schedulerCase[1], 'scheduler', {
+          get: function() { schedulerGets++; return schedulerValue; }, configurable: true
+        });
+        schedulerCase[1].run(null);
+        check(schedulerGets === 1, 'scheduler accessor once');
+
+        var stateCase = oneIdle(2), stateValue = STATE_HELD;
+        var stateGets = 0, stateSets = 0;
+        Object.defineProperty(stateCase[3], 'state', {
+          get: function() { stateGets++; return stateValue; },
+          set: function(value) { stateSets++; stateValue = value; }, configurable: true
+        });
+        stateCase[1].run(null);
+        check(stateGets === 1 && stateSets === 1 && stateValue === STATE_RUNNING,
+              'state accessor once');
+
+        // A blocks getter runs after Idle's count/v1 writes but before markAsNotHeld.
+        var blocksCase = oneIdle(2), blocksGets = 0, blocksError = '';
+        Object.defineProperty(blocksCase[0], 'blocks', {
+          get: function() { blocksGets++; throw 'blocks boom'; }, configurable: true
+        });
+        try { blocksCase[1].run(null); } catch (e) { blocksError = e; }
+        check(blocksError === 'blocks boom' && blocksGets === 1, 'blocks throw once');
+        check(blocksCase[1].count === 1 && blocksCase[1].v1 === 1 &&
+              blocksCase[3].state === STATE_HELD, 'blocks throw prefix effects');
+
+        // An indexed accessor declines the packed-element guard, then executes once normally.
+        var elementCase = oneIdle(2), elementGets = 0;
+        Object.defineProperty(elementCase[0].blocks, String(ID_DEVICE_A), {
+          get: function() { elementGets++; return elementCase[3]; }, configurable: true
+        });
+        elementCase[1].run(null);
+        check(elementGets === 1 && elementCase[3].state === STATE_RUNNING,
+              'blocks element accessor once');
+
+        // A late throwing priority getter observes the earlier count, v1, and state writes once.
+        var priorityCase = oneIdle(2), priorityGets = 0, priorityError = '';
+        Object.defineProperty(priorityCase[3], 'priority', {
+          get: function() { priorityGets++; throw 'priority boom'; }, configurable: true
+        });
+        try { priorityCase[1].run(null); } catch (e) { priorityError = e; }
+        check(priorityError === 'priority boom' && priorityGets === 1,
+              'priority throw once');
+        check(priorityCase[1].count === 1 && priorityCase[1].v1 === 1 &&
+              priorityCase[3].state === STATE_RUNNING, 'priority throw prefix effects');
+
+        var currentCase = oneIdle(2), currentGets = 0, currentError = '';
+        Object.defineProperty(currentCase[2], 'priority', {
+          get: function() { currentGets++; throw 'current priority boom'; }, configurable: true
+        });
+        try { currentCase[1].run(null); } catch (e) { currentError = e; }
+        check(currentError === 'current priority boom' && currentGets === 1,
+              'current priority throw once');
+        check(currentCase[1].count === 1 && currentCase[1].v1 === 1 &&
+              currentCase[3].state === STATE_RUNNING, 'current throw prefix effects');
+
+        var currentTcbCase = oneIdle(2), currentTcbGets = 0, currentTcbError = '';
+        Object.defineProperty(currentTcbCase[0], 'currentTcb', {
+          get: function() { currentTcbGets++; throw 'current tcb boom'; }, configurable: true
+        });
+        try { currentTcbCase[1].run(null); } catch (e) { currentTcbError = e; }
+        check(currentTcbError === 'current tcb boom' && currentTcbGets === 1,
+              'current tcb throw once');
+        check(currentTcbCase[1].count === 1 && currentTcbCase[1].v1 === 1 &&
+              currentTcbCase[3].state === STATE_RUNNING, 'current tcb prefix effects');
+
+        var nanPriority = oneIdle(2);
+        nanPriority[3].priority = NaN;
+        check(nanPriority[1].run(null) === nanPriority[2] &&
+              nanPriority[3].state === STATE_RUNNING, 'NaN priority replay');
+        var valueOfCalls = 0, objectPriority = oneIdle(2);
+        objectPriority[3].priority = {
+          valueOf: function() { valueOfCalls++; return 3; }
+        };
+        check(objectPriority[1].run(null) === objectPriority[3] && valueOfCalls === 1,
+              'object priority coercion once');
+
+        // Coercive values deliberately replay the baseline ToInt32/Number semantics.
+        var fractional = oneIdle(2);
+        fractional[1].count = 2.5;
+        fractional[1].run(null);
+        check(fractional[1].count === 1.5 && fractional[1].v1 === 1,
+              'fractional count replay');
+        var stringV1 = oneIdle('3');
+        stringV1[0].blocks[ID_DEVICE_B] = stringV1[3];
+        stringV1[1].run(null);
+        check(stringV1[1].v1 === ((3 >> 1) ^ 0xD008), 'string v1 replay');
+        var oldNotHeld = STATE_NOT_HELD;
+        STATE_NOT_HELD = 1.5;
+        var fractionalMask = oneIdle(2);
+        fractionalMask[1].run(null);
+        STATE_NOT_HELD = oldNotHeld;
+        check(fractionalMask[3].state === STATE_RUNNING, 'fractional mask replay');
+
+        // A throwing replacement is reached after the two Idle writes and only once on replay.
+        var throwCase = oneIdle(2), throwCalls = 0, throwError = '';
+        Scheduler.prototype.release = function() { throwCalls++; throw 'release boom'; };
+        try { throwCase[1].run(null); } catch (e) { throwError = e; }
+        Scheduler.prototype.release = originalRelease;
+        check(throwError === 'release boom' && throwCalls === 1,
+              'release throw once');
+        check(throwCase[1].count === 1 && throwCase[1].v1 === 1 &&
+              throwCase[3].state === STATE_HELD, 'release throw prefix effects');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_device_suspend_guards_methods_globals_and_descriptors() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+
+        var originalRun = DeviceTask.prototype.run, runHits = 0;
+        DeviceTask.prototype.run = function(packet) {
+          runHits++;
+          return originalRun.call(this, packet);
+        };
+        runRichards();
+        DeviceTask.prototype.run = originalRun;
+
+        var originalSuspend = Scheduler.prototype.suspendCurrent, suspendHits = 0;
+        Scheduler.prototype.suspendCurrent = function() {
+          suspendHits++;
+          return originalSuspend.call(this);
+        };
+        runRichards();
+        Scheduler.prototype.suspendCurrent = originalSuspend;
+
+        var originalMark = TaskControlBlock.prototype.markAsSuspended, markHits = 0;
+        TaskControlBlock.prototype.markAsSuspended = function() {
+          markHits++;
+          return originalMark.call(this);
+        };
+        runRichards();
+        TaskControlBlock.prototype.markAsSuspended = originalMark;
+
+        function oneDevice() {
+          var scheduler = new Scheduler();
+          var device = new DeviceTask(scheduler);
+          var tcb = new TaskControlBlock(null, ID_DEVICE_A, 1, null, device);
+          tcb.state = STATE_RUNNING;
+          scheduler.list = tcb;
+          return [scheduler, device, tcb];
+        }
+
+        var oldSuspended = STATE_SUSPENDED;
+        STATE_SUSPENDED = 8;
+        var globalCase = oneDevice();
+        globalCase[0].schedule();
+        var globalState = globalCase[2].state;
+        STATE_SUSPENDED = oldSuspended;
+
+        var v1Case = oneDevice(), v1 = null, v1Gets = 0, v1Sets = 0;
+        Object.defineProperty(v1Case[1], 'v1', {
+          get: function() { v1Gets++; return v1; },
+          set: function(x) { v1Sets++; v1 = x; },
+          configurable: true
+        });
+        v1Case[0].schedule();
+
+        var currentCase = oneDevice(), current = currentCase[0].currentTcb;
+        var currentGets = 0, currentSets = 0;
+        Object.defineProperty(currentCase[0], 'currentTcb', {
+          get: function() { currentGets++; return current; },
+          set: function(x) { currentSets++; current = x; },
+          configurable: true
+        });
+        currentCase[0].schedule();
+
+        var stateCase = oneDevice(), state = STATE_RUNNING, stateGets = 0, stateSets = 0;
+        Object.defineProperty(stateCase[2], 'state', {
+          get: function() { stateGets++; return state; },
+          set: function(x) { stateSets++; state = x; },
+          configurable: true
+        });
+        stateCase[0].schedule();
+
+        [runHits, suspendHits, markHits, globalState,
+         v1Gets, v1Sets, v1Case[2].state,
+         currentGets > 0, currentSets > 0, current === null,
+         stateGets, stateSets, state].join('|')
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(
+        run_jit(&src),
+        "2777|2324|2324|8|1|0|2|true|true|true|6|1|2"
+    );
+}
+
+#[test]
+fn jit_scheduler_device_hold_guards_methods_ownership_and_numeric_updates() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+
+        var originalHold = Scheduler.prototype.holdCurrent, holdHits = 0;
+        Scheduler.prototype.holdCurrent = function() {
+          holdHits++;
+          return originalHold.call(this);
+        };
+        runRichards();
+        Scheduler.prototype.holdCurrent = originalHold;
+
+        var originalMark = TaskControlBlock.prototype.markAsHeld, markHits = 0;
+        TaskControlBlock.prototype.markAsHeld = function() {
+          markHits++;
+          return originalMark.call(this);
+        };
+        runRichards();
+        TaskControlBlock.prototype.markAsHeld = originalMark;
+
+        function oneHold(link) {
+          var scheduler = new Scheduler();
+          var device = new DeviceTask(scheduler);
+          var packet = new Packet(null, ID_DEVICE_A, KIND_DEVICE);
+          var tcb = new TaskControlBlock(link, ID_DEVICE_A, 1, packet, device);
+          scheduler.list = tcb;
+          return [scheduler, device, tcb, packet];
+        }
+
+        var oldHeld = STATE_HELD;
+        STATE_HELD = 8;
+        var globalScheduler = new Scheduler();
+        var globalDevice = new DeviceTask(globalScheduler);
+        var globalPacket = new Packet(null, ID_DEVICE_A, KIND_DEVICE);
+        var tail = new TaskControlBlock(null, 0, 1, null, globalDevice);
+        var globalTcb = new TaskControlBlock(tail, ID_DEVICE_A, 1,
+                                             globalPacket, globalDevice);
+        tail.state = 8;
+        globalScheduler.list = globalTcb;
+        globalScheduler.schedule();
+        var globalResult = [globalScheduler.holdCount, globalTcb.state,
+                            globalDevice.v1 === globalPacket,
+                            globalScheduler.currentTcb === null, tail.state];
+        STATE_HELD = oldHeld;
+
+        var v1Case = oneHold(null), v1 = null, v1Gets = 0, v1Sets = 0;
+        Object.defineProperty(v1Case[1], 'v1', {
+          get: function() { v1Gets++; return v1; },
+          set: function(x) { v1Sets++; v1 = x; },
+          configurable: true
+        });
+        v1Case[0].schedule();
+
+        var countCase = oneHold(null), count = 0, countGets = 0, countSets = 0;
+        Object.defineProperty(countCase[0], 'holdCount', {
+          get: function() { countGets++; return count; },
+          set: function(x) { countSets++; count = x; },
+          configurable: true
+        });
+        countCase[0].schedule();
+
+        var stateCase = oneHold(null), state = stateCase[2].state;
+        var stateGets = 0, stateSets = 0;
+        Object.defineProperty(stateCase[2], 'state', {
+          get: function() { stateGets++; return state; },
+          set: function(x) { stateSets++; state = x; },
+          configurable: true
+        });
+        stateCase[0].schedule();
+
+        var linkCase = oneHold(null), link = linkCase[2].link, linkGets = 0;
+        Object.defineProperty(linkCase[2], 'link', {
+          get: function() { linkGets++; return link; }, configurable: true
+        });
+        linkCase[0].schedule();
+
+        var overflow = oneHold(null);
+        overflow[0].holdCount = 2147483647;
+        overflow[0].schedule();
+
+        [holdHits, markHits, globalResult,
+         v1Gets, v1Sets, v1 === v1Case[3], v1Case[0].holdCount, v1Case[2].state,
+         countGets, countSets, count,
+         stateGets, stateSets, state,
+         linkGets, linkCase[0].holdCount, linkCase[1].v1 === linkCase[3],
+         overflow[0].holdCount].flat().join('|')
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(
+        run_jit(&src),
+        "928|928|1|8|true|true|8|0|1|true|1|4|1|1|1|4|2|4|1|1|true|2147483648"
+    );
+}
+
+#[test]
+fn jit_scheduler_device_queue_guards_ownership_descriptors_and_overflow() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+
+        function oneQueue(link, queued, targetPriority, currentPriority) {
+          var scheduler = new Scheduler();
+          var device = new DeviceTask(scheduler);
+          var packet = new Packet(link, ID_HANDLER_A, KIND_DEVICE);
+          var targetTask = {
+            seen: null,
+            run: function(packet) { this.seen = packet; return null; }
+          };
+          var target = new TaskControlBlock(null, ID_HANDLER_A,
+                                            targetPriority == null ? 1 : targetPriority,
+                                            queued, targetTask);
+          var current = new TaskControlBlock(null, ID_DEVICE_A,
+                                             currentPriority == null ? 2 : currentPriority,
+                                             null, device);
+          current.state = STATE_RUNNING;
+          for (var id = 0; id < NUMBER_OF_IDS; id++) scheduler.blocks[id] = target;
+          scheduler.blocks[ID_DEVICE_A] = current;
+          scheduler.list = current;
+          device.v1 = packet;
+          return [scheduler, device, current, target, packet, targetTask];
+        }
+
+        var oldLink = new Packet(null, ID_WORKER, KIND_WORK);
+        oldLink.a1 = 77;
+        var direct = oneQueue(oldLink, null, 1, 2);
+        direct[0].schedule();
+        var directResult = [direct[0].queueCount, direct[3].state,
+                            direct[3].queue === direct[4], direct[4].link === null,
+                            direct[4].id, direct[1].v1 === null, oldLink.a1,
+                            direct[2].state, direct[0].currentTcb === null];
+
+        var selfLink = oneQueue(null, null, 1, 2);
+        selfLink[4].link = selfLink[4];
+        selfLink[0].schedule();
+        var selfLinkResult = [selfLink[0].queueCount,
+                              selfLink[3].queue === selfLink[4],
+                              selfLink[4].link === null,
+                              selfLink[1].v1 === null,
+                              selfLink[3].state,
+                              selfLink[0].currentTcb === null];
+
+        var lastOwner = oneQueue(new Packet(null, ID_WORKER, KIND_WORK),
+                                 null, 1, 2);
+        lastOwner[0].schedule();
+        var lastOwnerResult = [lastOwner[0].queueCount,
+                               lastOwner[3].queue === lastOwner[4],
+                               lastOwner[4].link === null,
+                               lastOwner[1].v1 === null];
+
+        var preempt = oneQueue(null, null, 3, 2);
+        preempt[0].schedule();
+        var preemptResult = [preempt[0].queueCount,
+                             preempt[5].seen === preempt[4],
+                             preempt[3].queue === null,
+                             preempt[3].state,
+                             preempt[4].id,
+                             preempt[4].link === null,
+                             preempt[1].v1 === null,
+                             preempt[0].currentTcb === null];
+
+        var originalQueue = Scheduler.prototype.queue, queueHits = 0;
+        Scheduler.prototype.queue = function(packet) {
+          queueHits++;
+          return originalQueue.call(this, packet);
+        };
+        oneQueue(null, null, 1, 2)[0].schedule();
+        Scheduler.prototype.queue = originalQueue;
+
+        var originalCheck = TaskControlBlock.prototype.checkPriorityAdd, checkHits = 0;
+        TaskControlBlock.prototype.checkPriorityAdd = function(task, packet) {
+          checkHits++;
+          return originalCheck.call(this, task, packet);
+        };
+        oneQueue(null, null, 1, 2)[0].schedule();
+        TaskControlBlock.prototype.checkPriorityAdd = originalCheck;
+
+        var originalMark = TaskControlBlock.prototype.markAsRunnable, markHits = 0;
+        TaskControlBlock.prototype.markAsRunnable = function() {
+          markHits++;
+          return originalMark.call(this);
+        };
+        oneQueue(null, null, 1, 2)[0].schedule();
+        TaskControlBlock.prototype.markAsRunnable = originalMark;
+
+        var oldRunnable = STATE_RUNNABLE;
+        STATE_RUNNABLE = 8;
+        var globalCase = oneQueue(null, null, 1, 2);
+        globalCase[0].schedule();
+        var globalState = globalCase[3].state;
+        STATE_RUNNABLE = oldRunnable;
+
+        var holeLink = new Packet(null, ID_WORKER, KIND_WORK);
+        var hole = oneQueue(holeLink, null, 1, 2);
+        delete hole[0].blocks[ID_HANDLER_A];
+        hole[0].schedule();
+        var holeResult = [hole[0].queueCount, hole[3].queue === null,
+                          hole[1].v1 === null, hole[4].link === holeLink,
+                          hole[4].id];
+
+        var tail = new Packet(null, ID_HANDLER_A, KIND_DEVICE);
+        var queued = new Packet(tail, ID_HANDLER_A, KIND_DEVICE);
+        var replacedLink = new Packet(null, ID_WORKER, KIND_WORK);
+        var nonempty = oneQueue(replacedLink, queued, 1, 2);
+        nonempty[0].schedule();
+        var nonemptyResult = [nonempty[0].queueCount,
+                              nonempty[3].queue === queued,
+                              tail.link === nonempty[4],
+                              nonempty[4].link === null,
+                              nonempty[4].id,
+                              nonempty[3].state,
+                              replacedLink.id];
+
+        var overflow = oneQueue(null, null, 1, 2);
+        overflow[0].queueCount = 2147483647;
+        overflow[0].schedule();
+        var overflowCount = overflow[0].queueCount;
+
+        var countCase = oneQueue(null, null, 1, 2), count = 0;
+        var countGets = 0, countSets = 0;
+        Object.defineProperty(countCase[0], 'queueCount', {
+          get: function() { countGets++; return count; },
+          set: function(x) { countSets++; count = x; }, configurable: true
+        });
+        countCase[0].schedule();
+
+        var linkCase = oneQueue(null, null, 1, 2), storedLink = oldLink;
+        var linkGets = 0, linkSets = 0;
+        Object.defineProperty(linkCase[4], 'link', {
+          get: function() { linkGets++; return storedLink; },
+          set: function(x) { linkSets++; storedLink = x; }, configurable: true
+        });
+        linkCase[0].schedule();
+
+        var idCase = oneQueue(null, null, 1, 2), storedId = ID_HANDLER_A;
+        var idGets = 0, idSets = 0;
+        Object.defineProperty(idCase[4], 'id', {
+          get: function() { idGets++; return storedId; },
+          set: function(x) { idSets++; storedId = x; }, configurable: true
+        });
+        idCase[0].schedule();
+
+        var blocksCase = oneQueue(null, null, 1, 2), storedBlocks = blocksCase[0].blocks;
+        var blocksGets = 0;
+        Object.defineProperty(blocksCase[0], 'blocks', {
+          get: function() { blocksGets++; return storedBlocks; }, configurable: true
+        });
+        blocksCase[0].schedule();
+
+        var targetQueueCase = oneQueue(null, null, 1, 2), storedQueue = null;
+        var queueGets = 0, queueSets = 0;
+        Object.defineProperty(targetQueueCase[3], 'queue', {
+          get: function() { queueGets++; return storedQueue; },
+          set: function(x) { queueSets++; storedQueue = x; }, configurable: true
+        });
+        targetQueueCase[0].schedule();
+
+        var stateCase = oneQueue(null, null, 1, 2), storedState = stateCase[3].state;
+        var stateGets = 0, stateSets = 0;
+        Object.defineProperty(stateCase[3], 'state', {
+          get: function() { stateGets++; return storedState; },
+          set: function(x) { stateSets++; storedState = x; }, configurable: true
+        });
+        stateCase[0].schedule();
+
+        var priorityCase = oneQueue(null, null, 1, 2);
+        var targetPriority = priorityCase[3].priority;
+        var currentPriority = priorityCase[2].priority;
+        var targetPriorityGets = 0, currentPriorityGets = 0;
+        Object.defineProperty(priorityCase[3], 'priority', {
+          get: function() { targetPriorityGets++; return targetPriority; },
+          configurable: true
+        });
+        Object.defineProperty(priorityCase[2], 'priority', {
+          get: function() { currentPriorityGets++; return currentPriority; },
+          configurable: true
+        });
+        priorityCase[0].schedule();
+
+        [directResult, selfLinkResult, lastOwnerResult, preemptResult,
+         queueHits, checkHits, markHits, globalState,
+         holeResult, nonemptyResult, overflowCount,
+         countGets, countSets, count,
+         linkGets, linkSets, storedLink === null, oldLink.a1,
+         idGets, idSets, storedId,
+         blocksGets, blocksCase[3].queue === blocksCase[4],
+         queueGets, queueSets, storedQueue === targetQueueCase[4],
+         stateGets, stateSets, storedState,
+         targetPriorityGets, currentPriorityGets].flat().join('|')
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(
+        run_jit(&src),
+        "1|3|true|true|4|true|77|2|true|1|true|true|true|3|true|1|true|true|true|1|true|true|0|4|true|true|true|1|1|1|10|0|true|true|true|2|1|true|true|true|4|3|1|2147483648|1|1|1|0|1|true|77|1|1|4|1|true|1|1|true|1|1|3|1|1"
+    );
+}
+
+#[test]
+fn jit_scheduler_active_handler_null_full_transfers_delivery_and_completion_owners() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'handler null owners: ' + message;
+        }
+        function makeCase(count, payload, workLink, packetLink, queued,
+                          targetPriority, holdTarget) {
+          var scheduler = new Scheduler();
+          var handler = new HandlerTask(scheduler);
+          var work = new Packet(workLink, ID_WORKER, KIND_WORK);
+          work.a1 = count;
+          work.a2[count] = payload;
+          var packet = new Packet(packetLink, ID_WORKER, KIND_DEVICE);
+          var target = new TaskControlBlock(
+              null, ID_WORKER, targetPriority, queued, { run: function() {
+                throw 'held/off-list target ran';
+              }});
+          if (holdTarget) target.state = target.state | STATE_HELD;
+          var current = new TaskControlBlock(
+              null, ID_HANDLER_A, 2, null, handler);
+          current.state = STATE_RUNNING;
+          scheduler.blocks[ID_WORKER] = target;
+          // A later completed Handler packet deliberately terminates the isolated schedule.
+          scheduler.blocks[ID_HANDLER_A] = null;
+          scheduler.list = current;
+          handler.v1 = work;
+          handler.v2 = packet;
+          return {
+            scheduler: scheduler, handler: handler, work: work, packet: packet,
+            current: current, target: target, queued: queued,
+            workLink: workLink, packetLink: packetLink
+          };
+        }
+
+        // One-node delivery keeps current unchanged and can take the graph fast-resume edge.
+        // The following completed-work miss terminates without disturbing the appended owner.
+        var queued = new Packet(null, ID_WORKER, KIND_DEVICE);
+        var oneNode = makeCase(DATA_SIZE - 1, 71, null, null, queued, 1, false);
+        oneNode.scheduler.schedule();
+        check(oneNode.scheduler.queueCount === 2 && queued.link === oneNode.packet &&
+              oneNode.packet.link === oneNode.work && oneNode.work.link === null,
+              'one-node delivery/completion publication');
+        check(oneNode.packet.a1 === 71 &&
+              oneNode.packet.id === ID_HANDLER_A, 'one-node packet writes');
+        check(oneNode.handler.v2 === null && oneNode.handler.v1 === null &&
+              oneNode.work.a1 === DATA_SIZE, 'one-node Handler writes');
+
+        // Empty/preempting delivery stops on a held target. P.link's sole list owner moves to
+        // Handler.v2 while the former Handler.v2 owner moves into target.queue.
+        var packetTail = new Packet(null, ID_DEVICE_A, KIND_DEVICE);
+        packetTail.a2[0] = 81;
+        var preempt = makeCase(1, 72, null, packetTail, null, 3, true);
+        preempt.scheduler.schedule();
+        check(preempt.handler.v2 === packetTail && packetTail.a2[0] === 81,
+              'delivery successor owner');
+        check(preempt.target.queue === preempt.packet && preempt.packet.link === null &&
+              preempt.packet.a1 === 72, 'delivery packet owner');
+        check(preempt.current.state === STATE_RUNNING &&
+              preempt.scheduler.currentTcb === null, 'delivery preempt completion');
+
+        // Completed-v1 queue transfers W.link into Handler.v1 and W into target.queue without
+        // transient retains. The next Handler iteration observes the successor and suspends.
+        var workTail = new Packet(null, ID_HANDLER_A, KIND_WORK);
+        workTail.a1 = 0;
+        workTail.a2[0] = 82;
+        var completed = makeCase(DATA_SIZE, 73, workTail, null, null, 1, true);
+        completed.handler.v2 = null;
+        completed.scheduler.schedule();
+        check(completed.handler.v1 === workTail && workTail.a2[0] === 82,
+              'completion successor owner');
+        check(completed.target.queue === completed.work && completed.work.link === null &&
+              completed.work.id === ID_HANDLER_A, 'completion packet owner');
+        check(completed.scheduler.queueCount === 1 &&
+              completed.current.state === STATE_SUSPENDED, 'completion scheduler writes');
+
+        // W=P is intentionally outside the direct delivery transaction. Untouched pc59 replay
+        // must preserve the source-ordered double a1 write and publish exactly one packet.
+        var aliasQueued = new Packet(null, ID_WORKER, KIND_DEVICE);
+        var alias = makeCase(3, 74, null, null, aliasQueued, 1, false);
+        alias.handler.v1 = alias.packet;
+        alias.packet.a1 = 3;
+        alias.packet.a2[3] = 74;
+        alias.scheduler.schedule();
+        check(alias.handler.v1 === null && alias.handler.v2 === null &&
+              alias.packet.a1 === DATA_SIZE, 'delivery alias write order');
+        check(aliasQueued.link === alias.packet && alias.packet.link === null &&
+              alias.scheduler.queueCount === 1, 'delivery alias owner');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_active_handler_null_full_replays_live_globals_accessors_and_methods() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'handler null guards: ' + message;
+        }
+        function oneDelivery(count, payload) {
+          var scheduler = new Scheduler();
+          var handler = new HandlerTask(scheduler);
+          var work = new Packet(null, ID_WORKER, KIND_WORK);
+          work.a1 = count;
+          work.a2[count] = payload;
+          var packet = new Packet(null, ID_WORKER, KIND_DEVICE);
+          var target = new TaskControlBlock(null, ID_WORKER, 3, null, {
+            run: function() { throw 'held target ran'; }
+          });
+          target.state = target.state | STATE_HELD;
+          var current = new TaskControlBlock(null, ID_HANDLER_A, 2, null, handler);
+          current.state = STATE_RUNNING;
+          scheduler.blocks[ID_WORKER] = target;
+          scheduler.blocks[ID_HANDLER_A] = null;
+          scheduler.list = current;
+          handler.v1 = work;
+          handler.v2 = packet;
+          return {
+            scheduler: scheduler, handler: handler, work: work, packet: packet,
+            current: current, target: target, payload: payload
+          };
+        }
+
+        // DATA_SIZE is guarded live. An exact changed integer selects completion; a fractional
+        // value declines the stitch and executes the original numeric comparison/delivery.
+        var oldDataSize = DATA_SIZE;
+        var changedSize = oneDelivery(1, 83);
+        DATA_SIZE = 1;
+        changedSize.scheduler.schedule();
+        DATA_SIZE = oldDataSize;
+        check(changedSize.target.queue === changedSize.work &&
+              changedSize.handler.v1 === null && changedSize.handler.v2 === changedSize.packet,
+              'changed integer DATA_SIZE');
+
+        var fractional = oneDelivery(1, 84);
+        DATA_SIZE = 4.5;
+        fractional.scheduler.schedule();
+        DATA_SIZE = oldDataSize;
+        check(fractional.target.queue === fractional.packet &&
+              fractional.handler.v2 === null && fractional.work.a1 === 2 &&
+              fractional.packet.a1 === 84, 'fractional DATA_SIZE replay');
+
+        // Accessor shapes must fall back before the stitch writes anything. Original Handler
+        // source order performs three v2 gets and one set for a delivery.
+        var v2Case = oneDelivery(1, 85), storedV2 = v2Case.packet;
+        var v2Gets = 0, v2Sets = 0;
+        Object.defineProperty(v2Case.handler, 'v2', {
+          get: function() { v2Gets++; return storedV2; },
+          set: function(value) { v2Sets++; storedV2 = value; }, configurable: true
+        });
+        v2Case.scheduler.schedule();
+        check(v2Gets === 3 && v2Sets === 1 && storedV2 === null &&
+              v2Case.packet.a1 === 85, 'v2 accessor replay once');
+
+        var a1Case = oneDelivery(1, 86), storedA1 = 1;
+        var a1Gets = 0, a1Sets = 0;
+        Object.defineProperty(a1Case.work, 'a1', {
+          get: function() { a1Gets++; return storedA1; },
+          set: function(value) { a1Sets++; storedA1 = value; }, configurable: true
+        });
+        a1Case.scheduler.schedule();
+        check(a1Gets === 1 && a1Sets === 1 && storedA1 === 2 &&
+              a1Case.packet.a1 === 86, 'a1 accessor replay once');
+
+        var schedulerCase = oneDelivery(1, 87), schedulerGets = 0;
+        var storedScheduler = schedulerCase.scheduler;
+        Object.defineProperty(schedulerCase.handler, 'scheduler', {
+          get: function() { schedulerGets++; return storedScheduler; }, configurable: true
+        });
+        schedulerCase.scheduler.schedule();
+        check(schedulerGets === 1 && schedulerCase.packet.a1 === 87,
+              'scheduler accessor replay once');
+
+        // Changed task and nested scheduler methods are resolved in original order, once, and
+        // see the same pre-call state as the interpreter path.
+        var originalRun = HandlerTask.prototype.run, runHits = 0;
+        HandlerTask.prototype.run = function(packet) {
+          runHits++;
+          return originalRun.call(this, packet);
+        };
+        var runCase = oneDelivery(1, 88);
+        runCase.scheduler.schedule();
+        HandlerTask.prototype.run = originalRun;
+        check(runHits === 1 && runCase.packet.a1 === 88, 'run method replay once');
+
+        var originalQueue = Scheduler.prototype.queue, queueHits = 0;
+        var queueCase = oneDelivery(1, 89), queueSawWrites = false;
+        Scheduler.prototype.queue = function(packet) {
+          queueHits++;
+          queueSawWrites = queueCase.handler.v2 === null &&
+                           queueCase.work.a1 === 2 && packet.a1 === 89 &&
+                           this.queueCount === 0;
+          return originalQueue.call(this, packet);
+        };
+        queueCase.scheduler.schedule();
+        Scheduler.prototype.queue = originalQueue;
+        check(queueHits === 1 && queueSawWrites, 'queue method replay once');
+
+        // Handler.scheduler may name a different Scheduler. Equality failure must occur before
+        // delivery writes, then ordinary execution mutates only that foreign receiver.
+        var foreignCase = oneDelivery(1, 90), foreign = new Scheduler();
+        foreign.blocks[ID_WORKER] = foreignCase.target;
+        foreign.currentTcb = foreignCase.current;
+        foreign.currentId = 99;
+        foreignCase.handler.scheduler = foreign;
+        foreignCase.scheduler.schedule();
+        check(foreign.queueCount === 1 && foreignCase.scheduler.queueCount === 0 &&
+              foreignCase.packet.id === 99 && foreignCase.packet.a1 === 90,
+              'foreign scheduler receiver');
+        check(foreignCase.target.queue === foreignCase.packet &&
+              foreignCase.handler.v2 === null && foreignCase.work.a1 === 2,
+              'foreign scheduler writes once');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_handler_wait_suspend_guards_live_values_and_descriptors() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+
+        var originalRun = HandlerTask.prototype.run, runHits = 0;
+        HandlerTask.prototype.run = function(packet) {
+          runHits++;
+          return originalRun.call(this, packet);
+        };
+        runRichards();
+        HandlerTask.prototype.run = originalRun;
+
+        var originalSuspend = Scheduler.prototype.suspendCurrent, suspendHits = 0;
+        Scheduler.prototype.suspendCurrent = function() {
+          suspendHits++;
+          return originalSuspend.call(this);
+        };
+        runRichards();
+        Scheduler.prototype.suspendCurrent = originalSuspend;
+
+        var originalMark = TaskControlBlock.prototype.markAsSuspended, markHits = 0;
+        TaskControlBlock.prototype.markAsSuspended = function() {
+          markHits++;
+          return originalMark.call(this);
+        };
+        runRichards();
+        TaskControlBlock.prototype.markAsSuspended = originalMark;
+
+        function oneWait(a1, v2) {
+          var scheduler = new Scheduler();
+          var handler = new HandlerTask(scheduler);
+          if (a1 !== null) {
+            var packet = new Packet(null, ID_HANDLER_A, KIND_WORK);
+            packet.a1 = a1;
+            handler.v1 = packet;
+          } else {
+            var packet = null;
+          }
+          handler.v2 = v2;
+          var current = new TaskControlBlock(null, ID_HANDLER_A, 1, null, handler);
+          current.state = STATE_RUNNING;
+          scheduler.blocks[ID_HANDLER_A] = current;
+          scheduler.list = current;
+          return [scheduler, handler, current, packet];
+        }
+
+        var nullCase = oneWait(null, null);
+        nullCase[0].schedule();
+
+        var oldLink = new Packet(null, ID_WORKER, KIND_WORK);
+        var objectCase = oneWait(1, null);
+        objectCase[3].link = oldLink;
+        objectCase[0].schedule();
+
+        var oldDataSize = DATA_SIZE;
+        var fractionalGlobal = oneWait(1, null);
+        DATA_SIZE = 4.5;
+        fractionalGlobal[0].schedule();
+        DATA_SIZE = oldDataSize;
+
+        var fractionalA1 = oneWait(1.5, null);
+        fractionalA1[0].schedule();
+
+        var oldSuspended = STATE_SUSPENDED;
+        STATE_SUSPENDED = 8;
+        var globalState = oneWait(1, null);
+        globalState[0].schedule();
+        STATE_SUSPENDED = oldSuspended;
+
+        var undefinedCase = oneWait(null, null);
+        undefinedCase[1].v1 = undefined;
+        undefinedCase[0].schedule();
+        var ddaCase = oneWait(null, null);
+        ddaCase[1].v1 = $262.IsHTMLDDA;
+        ddaCase[0].schedule();
+
+        var v1Case = oneWait(null, null), storedV1 = null, v1Gets = 0;
+        Object.defineProperty(v1Case[1], 'v1', {
+          get: function() { v1Gets++; return storedV1; }, configurable: true
+        });
+        v1Case[0].schedule();
+
+        var a1Case = oneWait(1, null), storedA1 = 1, a1Gets = 0;
+        Object.defineProperty(a1Case[3], 'a1', {
+          get: function() { a1Gets++; return storedA1; }, configurable: true
+        });
+        a1Case[0].schedule();
+
+        var v2Case = oneWait(1, null), storedV2 = null, v2Gets = 0;
+        Object.defineProperty(v2Case[1], 'v2', {
+          get: function() { v2Gets++; return storedV2; }, configurable: true
+        });
+        v2Case[0].schedule();
+
+        var schedulerCase = oneWait(1, null), storedScheduler = schedulerCase[0];
+        var schedulerGets = 0;
+        Object.defineProperty(schedulerCase[1], 'scheduler', {
+          get: function() { schedulerGets++; return storedScheduler; }, configurable: true
+        });
+        schedulerCase[0].schedule();
+
+        var stateCase = oneWait(1, null), storedState = STATE_RUNNING;
+        var stateGets = 0, stateSets = 0;
+        Object.defineProperty(stateCase[2], 'state', {
+          get: function() { stateGets++; return storedState; },
+          set: function(x) { stateSets++; storedState = x; }, configurable: true
+        });
+        stateCase[0].schedule();
+
+        var currentCase = oneWait(1, null), storedCurrent = currentCase[0].currentTcb;
+        var currentGets = 0, currentSets = 0;
+        Object.defineProperty(currentCase[0], 'currentTcb', {
+          get: function() { currentGets++; return storedCurrent; },
+          set: function(x) { currentSets++; storedCurrent = x; }, configurable: true
+        });
+        currentCase[0].schedule();
+
+        [runHits, suspendHits, markHits,
+         nullCase[2].state, nullCase[0].currentTcb === null,
+         objectCase[2].state, objectCase[1].v1 === objectCase[3],
+         objectCase[3].a1, objectCase[3].link === oldLink,
+         objectCase[0].currentTcb === null,
+         fractionalGlobal[2].state, fractionalA1[2].state,
+         globalState[2].state, undefinedCase[2].state, ddaCase[2].state,
+         v1Gets, v1Case[2].state,
+         a1Gets, a1Case[2].state,
+         v2Gets, v2Case[2].state,
+         schedulerGets, schedulerCase[2].state,
+         stateGets > 0, stateSets, storedState,
+         currentGets > 0, currentSets > 0, storedCurrent === null].join('|')
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(
+        run_jit(&src),
+        "2328|2324|2324|2|true|2|true|1|true|true|2|2|8|2|2|1|2|1|2|1|2|1|2|true|1|2|true|true|true"
+    );
+}
+
+#[test]
+fn jit_scheduler_handler_queue_transfers_owners_and_replays_before_effects() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+
+        function check(value, message) {
+          if (!value) throw 'handler queue: ' + message;
+        }
+        function linked(a1) {
+          var packet = new Packet(null, ID_DEVICE_A, KIND_DEVICE);
+          packet.a1 = a1;
+          return packet;
+        }
+        function oneHandlerQueue(link, queued, targetPriority, currentPriority, a1) {
+          var scheduler = new Scheduler();
+          var handler = new HandlerTask(scheduler);
+          var packet = new Packet(link, ID_WORKER, KIND_WORK);
+          packet.a1 = a1 === undefined ? DATA_SIZE : a1;
+          var targetTask = {
+            seen: null,
+            run: function(packet) { this.seen = packet; return null; }
+          };
+          var target = new TaskControlBlock(null, ID_WORKER,
+                                            targetPriority == null ? 1 : targetPriority,
+                                            queued, targetTask);
+          var current = new TaskControlBlock(null, ID_HANDLER_A,
+                                             currentPriority == null ? 2 : currentPriority,
+                                             null, handler);
+          current.state = STATE_RUNNING;
+          scheduler.blocks[ID_WORKER] = target;
+          // A Handler self-link queues once, then the rewritten Handler id deliberately misses.
+          scheduler.blocks[ID_HANDLER_A] = null;
+          scheduler.list = current;
+          handler.v1 = packet;
+          return [scheduler, handler, current, target, packet, targetTask];
+        }
+
+        var direct = oneHandlerQueue(null, null);
+        direct[0].schedule();
+        check(direct[0].queueCount === 1, 'direct count');
+        check(direct[3].queue === direct[4] && direct[3].state === 3, 'direct target');
+        check(direct[1].v1 === null && direct[4].link === null, 'direct source');
+        check(direct[2].state === STATE_SUSPENDED && direct[0].currentTcb === null,
+              'direct suspension');
+
+        var oldLink = linked(1);
+        oldLink.a2[0] = 77;
+        var transfer = oneHandlerQueue(oldLink, null);
+        transfer[0].schedule();
+        check(transfer[1].v1 === oldLink && oldLink.a2[0] === 77, 'object transfer');
+        check(transfer[3].queue === transfer[4] && transfer[4].link === null,
+              'object packet move');
+
+        var selfLink = oneHandlerQueue(null, null);
+        selfLink[4].link = selfLink[4];
+        selfLink[0].schedule();
+        check(selfLink[0].queueCount === 1, 'self count');
+        check(selfLink[3].queue === selfLink[4] && selfLink[4].link === null,
+              'self packet');
+        check(selfLink[1].v1 === null && selfLink[0].currentTcb === null, 'self source');
+
+        var lastOwner = oneHandlerQueue(null, null);
+        lastOwner[4].link = linked(1);
+        lastOwner[4].link.a2[0] = 91;
+        lastOwner[0].schedule();
+        check(lastOwner[1].v1.a2[0] === 91 && lastOwner[4].link === null,
+              'last-owner link');
+
+        var missingLink = linked(2);
+        var missing = oneHandlerQueue(missingLink, null);
+        missing[0].blocks[ID_WORKER] = null;
+        missing[0].schedule();
+        check(missing[0].queueCount === 0 && missing[1].v1 === missingLink,
+              'missing target source effect');
+        check(missing[4].link === missingLink && missing[4].id === ID_WORKER,
+              'missing target packet untouched');
+
+        var queued = linked(0), replaced = linked(1);
+        var nonempty = oneHandlerQueue(replaced, queued);
+        nonempty[0].schedule();
+        check(nonempty[3].queue === queued && queued.link === nonempty[4],
+              'nonempty append');
+        check(nonempty[1].v1 === replaced && nonempty[4].link === null,
+              'nonempty source');
+
+        var preempt = oneHandlerQueue(null, null, 3, 2);
+        preempt[0].schedule();
+        check(preempt[0].queueCount === 1 && preempt[5].seen === preempt[4],
+              'preempt run');
+        check(preempt[3].queue === null && preempt[3].state === STATE_RUNNING,
+              'preempt consume');
+
+        var undefinedLink = oneHandlerQueue(null, null);
+        undefinedLink[4].link = undefined;
+        undefinedLink[0].schedule();
+        check(undefinedLink[1].v1 === undefined && undefinedLink[3].queue === undefinedLink[4],
+              'undefined link fallback');
+        var ddaLink = oneHandlerQueue(null, null);
+        ddaLink[4].link = $262.IsHTMLDDA;
+        ddaLink[0].schedule();
+        check(ddaLink[1].v1 === $262.IsHTMLDDA && ddaLink[3].queue === ddaLink[4],
+              'HTMLDDA link fallback');
+
+        var undefinedQueue = oneHandlerQueue(null, undefined);
+        undefinedQueue[0].schedule();
+        check(undefinedQueue[3].queue === undefinedQueue[4], 'undefined target queue');
+        var ddaQueue = oneHandlerQueue(null, $262.IsHTMLDDA);
+        ddaQueue[0].schedule();
+        check(ddaQueue[3].queue === ddaQueue[4], 'HTMLDDA target queue');
+
+        var originalRun = HandlerTask.prototype.run, runHits = 0;
+        HandlerTask.prototype.run = function(packet) {
+          runHits++;
+          return originalRun.call(this, packet);
+        };
+        var runCase = oneHandlerQueue(null, null);
+        runCase[0].schedule();
+        HandlerTask.prototype.run = originalRun;
+        check(runHits > 0 && runCase[3].queue === runCase[4], 'run replacement');
+
+        var originalQueue = Scheduler.prototype.queue, queueHits = 0;
+        Scheduler.prototype.queue = function(packet) {
+          queueHits++;
+          return originalQueue.call(this, packet);
+        };
+        var queueCase = oneHandlerQueue(null, null);
+        queueCase[0].schedule();
+        Scheduler.prototype.queue = originalQueue;
+        check(queueHits === 1 && queueCase[3].queue === queueCase[4], 'queue replacement');
+
+        var originalCheck = TaskControlBlock.prototype.checkPriorityAdd, checkHits = 0;
+        TaskControlBlock.prototype.checkPriorityAdd = function(task, packet) {
+          checkHits++;
+          return originalCheck.call(this, task, packet);
+        };
+        var checkCase = oneHandlerQueue(null, null);
+        checkCase[0].schedule();
+        TaskControlBlock.prototype.checkPriorityAdd = originalCheck;
+        check(checkHits === 1 && checkCase[3].queue === checkCase[4], 'check replacement');
+
+        var originalMark = TaskControlBlock.prototype.markAsRunnable, markHits = 0;
+        TaskControlBlock.prototype.markAsRunnable = function() {
+          markHits++;
+          return originalMark.call(this);
+        };
+        var markCase = oneHandlerQueue(null, null);
+        markCase[0].schedule();
+        TaskControlBlock.prototype.markAsRunnable = originalMark;
+        check(markHits === 1 && markCase[3].state === 3, 'mark replacement');
+
+        var oldRunnable = STATE_RUNNABLE;
+        STATE_RUNNABLE = 8;
+        var runnableCase = oneHandlerQueue(null, null);
+        runnableCase[0].schedule();
+        STATE_RUNNABLE = oldRunnable;
+        check(runnableCase[3].state === 10, 'live runnable global');
+
+        var oldDataSize = DATA_SIZE;
+        DATA_SIZE = 5;
+        var waitCase = oneHandlerQueue(null, null, 1, 2, 4);
+        waitCase[0].schedule();
+        DATA_SIZE = oldDataSize;
+        check(waitCase[0].queueCount === 0 && waitCase[1].v1 === waitCase[4],
+              'live DATA_SIZE branch');
+
+        var v1Case = oneHandlerQueue(null, null), storedV1 = v1Case[4];
+        var v1Gets = 0, v1Sets = 0;
+        Object.defineProperty(v1Case[1], 'v1', {
+          get: function() { v1Gets++; return storedV1; },
+          set: function(value) { v1Sets++; storedV1 = value; }, configurable: true
+        });
+        v1Case[0].schedule();
+        check(v1Gets > 0 && v1Sets > 0 && storedV1 === null, 'v1 accessor');
+
+        var linkCase = oneHandlerQueue(null, null), storedLink = linked(1);
+        var linkGets = 0, linkSets = 0;
+        Object.defineProperty(linkCase[4], 'link', {
+          get: function() { linkGets++; return storedLink; },
+          set: function(value) { linkSets++; storedLink = value; }, configurable: true
+        });
+        linkCase[0].schedule();
+        check(linkGets > 0 && linkSets > 0 && storedLink === null, 'link accessor');
+        check(linkCase[1].v1.a1 === 1, 'link accessor transfer');
+
+        var schedulerCase = oneHandlerQueue(null, null), storedScheduler = schedulerCase[0];
+        var schedulerGets = 0;
+        Object.defineProperty(schedulerCase[1], 'scheduler', {
+          get: function() { schedulerGets++; return storedScheduler; }, configurable: true
+        });
+        schedulerCase[0].schedule();
+        check(schedulerGets > 0 && schedulerCase[3].queue === schedulerCase[4],
+              'scheduler accessor');
+
+        var currentCase = oneHandlerQueue(null, null), storedCurrent = null;
+        var currentGets = 0, currentSets = 0;
+        Object.defineProperty(currentCase[0], 'currentTcb', {
+          get: function() { currentGets++; return storedCurrent; },
+          set: function(value) { currentSets++; storedCurrent = value; }, configurable: true
+        });
+        currentCase[0].schedule();
+        check(currentGets > 0 && currentSets > 0 && storedCurrent === null,
+              'current accessor');
+        check(currentCase[3].queue === currentCase[4], 'current accessor effects');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_active_handler_incoming_work_delivery_moves_source_and_v2_owners() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'active Handler WORK delivery: ' + message;
+        }
+        function oneDelivery(depth, preempt, payload) {
+          var scheduler = new Scheduler();
+          var handler = new HandlerTask(scheduler);
+          var work = new Packet(null, ID_HANDLER_A, KIND_WORK);
+          work.a1 = 0;
+          work.a2[0] = payload;
+          var devices = null;
+          for (var i = 0; i < depth; i++)
+            devices = new Packet(devices, ID_WORKER, KIND_DEVICE);
+          handler.v2 = devices;
+          var queued = preempt ? null : new Packet(null, ID_WORKER, KIND_DEVICE);
+          var targetTask = {
+            seen: null,
+            run: function(packet) { this.seen = packet; return null; }
+          };
+          var target = new TaskControlBlock(null, ID_WORKER, preempt ? 3 : 1,
+                                            queued, targetTask);
+          var current = new TaskControlBlock(null, ID_HANDLER_A, 2, work, handler);
+          scheduler.blocks[ID_WORKER] = target;
+          scheduler.blocks[ID_HANDLER_A] = current;
+          scheduler.list = current;
+          // W and every D are intentionally omitted. Their only source owners must move through
+          // C.queue/H.v1 and H.v2/target without a retain or last-owner gap.
+          return [scheduler, handler, current, target, targetTask, queued];
+        }
+
+        var one = oneDelivery(1, false, 71), q = one[5];
+        one[0].schedule();
+        var d1 = q.link, w1 = one[1].v1;
+        check(d1 !== null && d1.link === null && d1.a1 === 71 &&
+              d1.id === ID_HANDLER_A, 'depth-one delivered owner');
+        check(w1 !== null && w1.a1 === 1 && w1.link === null &&
+              one[1].v2 === null, 'depth-one work/source owners');
+        check(one[3].queue === q && one[2].queue === null &&
+              one[2].state === STATE_SUSPENDED && one[0].queueCount === 1,
+              'one-node nonpreempt');
+
+        var two = oneDelivery(2, true, 72);
+        two[0].schedule();
+        var first2 = two[4].seen, rest2 = two[1].v2, work2 = two[1].v1;
+        check(first2 !== null && first2.link === null && first2.a1 === 72 &&
+              first2.id === ID_HANDLER_A, 'depth-two delivered owner');
+        check(rest2 !== null && rest2.link === null && work2 !== null &&
+              work2.a1 === 1 && work2.link === null, 'depth-two successor/source owners');
+        check(two[3].queue === null && two[2].queue === null &&
+              two[2].state === STATE_RUNNING && two[0].queueCount === 1,
+              'depth-two empty preempt');
+
+        var three = oneDelivery(3, true, 73);
+        three[0].schedule();
+        var first3 = three[4].seen, rest3 = three[1].v2, work3 = three[1].v1;
+        check(first3 !== null && first3.link === null && first3.a1 === 73 &&
+              first3.id === ID_HANDLER_A, 'depth-three delivered owner');
+        check(rest3 !== null && rest3.link !== null && rest3.link.link === null &&
+              work3 !== null && work3.a1 === 1 && work3.link === null,
+              'depth-three successor/source owners');
+        check(three[2].state === STATE_RUNNING && three[0].currentTcb === null &&
+              three[0].queueCount === 1, 'depth-three graph rebuild');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_active_handler_incoming_work_delivery_replays_late_guards_and_aliases() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'active Handler WORK replay: ' + message;
+        }
+        function oneDelivery(preempt, payload) {
+          var scheduler = new Scheduler();
+          var handler = new HandlerTask(scheduler);
+          var work = new Packet(null, ID_HANDLER_A, KIND_WORK);
+          work.a1 = 0;
+          work.a2[0] = payload;
+          var device = new Packet(null, ID_WORKER, KIND_DEVICE);
+          handler.v2 = device;
+          var queued = preempt ? null : new Packet(null, ID_WORKER, KIND_DEVICE);
+          var task = { seen: null, run: function(p) { this.seen = p; return null; } };
+          var target = new TaskControlBlock(null, ID_WORKER, preempt ? 3 : 1,
+                                            queued, task);
+          var current = new TaskControlBlock(null, ID_HANDLER_A, 2, work, handler);
+          scheduler.blocks[ID_WORKER] = target;
+          scheduler.blocks[ID_HANDLER_A] = current;
+          scheduler.list = current;
+          return [scheduler, handler, current, target, task, queued, work, device];
+        }
+
+        // W.a1 is read after incoming addTo. Generic replay must expose H.v1=W but leave H.v2,
+        // D, target, and queueCount untouched when the accessor throws exactly once.
+        var a1Case = oneDelivery(true, 81), a1Gets = 0, storedA1 = 0;
+        Object.defineProperty(a1Case[6], 'a1', {
+          get: function() { a1Gets++; throw 'a1'; },
+          set: function(v) { storedA1 = v; }, configurable: true
+        });
+        var a1Error = '';
+        try { a1Case[0].schedule(); } catch (e) { a1Error = e; }
+        check(a1Error === 'a1' && a1Gets === 1 && a1Case[1].v1 === a1Case[6],
+              'a1 accessor replay once');
+        check(a1Case[1].v2 === a1Case[7] && a1Case[4].seen === null &&
+              a1Case[0].queueCount === 0 && a1Case[2].queue === null &&
+              a1Case[2].state === STATE_RUNNING, 'a1 checkpoint');
+
+        // The indexed payload read follows H.v2 advancement in source order.
+        var elemCase = oneDelivery(true, 82), elemGets = 0;
+        Object.defineProperty(elemCase[6].a2, 0, {
+          get: function() { elemGets++; throw 'elem'; }, configurable: true
+        });
+        var elemError = '';
+        try { elemCase[0].schedule(); } catch (e) { elemError = e; }
+        check(elemError === 'elem' && elemGets === 1 && elemCase[1].v1 === elemCase[6] &&
+              elemCase[1].v2 === null, 'payload accessor source order');
+        check(elemCase[7].a1 === 0 && elemCase[4].seen === null &&
+              elemCase[0].queueCount === 0, 'payload checkpoint');
+
+        var originalAdd = Packet.prototype.addTo, addHits = 0;
+        Packet.prototype.addTo = function(queue) {
+          addHits++;
+          return originalAdd.call(this, queue);
+        };
+        var addCase = oneDelivery(true, 83);
+        addCase[0].schedule();
+        Packet.prototype.addTo = originalAdd;
+        check(addHits === 1 && addCase[4].seen === addCase[7],
+              'incoming addTo replacement once');
+
+        var originalQueue = Scheduler.prototype.queue, queueHits = 0;
+        Scheduler.prototype.queue = function(packet) {
+          queueHits++;
+          return originalQueue.call(this, packet);
+        };
+        var queueCase = oneDelivery(true, 84);
+        queueCase[0].schedule();
+        Scheduler.prototype.queue = originalQueue;
+        check(queueHits === 1 && queueCase[4].seen === queueCase[7] &&
+              queueCase[7].a1 === 84, 'queue replacement once');
+
+        // A non-Null incoming link is moved by Active into C.queue before Handler clears W.link.
+        // It is outside the narrow direct subset and must survive generic delivery/preemption.
+        var linkCase = oneDelivery(true, 85);
+        var successor = new Packet(null, ID_HANDLER_A, KIND_WORK);
+        linkCase[6].link = successor;
+        linkCase[0].schedule();
+        check(linkCase[2].queue === successor && linkCase[6].link === null &&
+              linkCase[2].state === STATE_RUNNABLE && linkCase[4].seen === linkCase[7],
+              'incoming successor owner replay');
+
+        // Preexisting H.v1 forces the full addTo path before delivery from H.v2.
+        var oldCase = oneDelivery(true, 86);
+        var oldWork = new Packet(null, ID_HANDLER_A, KIND_WORK);
+        oldWork.a1 = 0;
+        oldWork.a2[0] = 86;
+        oldCase[1].v1 = oldWork;
+        oldCase[0].schedule();
+        check(oldCase[1].v1 === oldWork && oldWork.link === oldCase[6] &&
+              oldWork.a1 === 1 && oldCase[6].link === null,
+              'preexisting v1 replay');
+        check(oldCase[4].seen === oldCase[7] && oldCase[7].a1 === 86,
+              'preexisting v1 delivery');
+
+        // D===W is valid source behavior. The second a1 store wins after the payload copy.
+        var aliasScheduler = new Scheduler();
+        var aliasHandler = new HandlerTask(aliasScheduler);
+        var aliasPacket = new Packet(null, ID_WORKER, KIND_WORK);
+        aliasPacket.a1 = 0;
+        aliasPacket.a2[0] = 99;
+        aliasHandler.v2 = aliasPacket;
+        var aliasTask = { seen: null, run: function(p) { this.seen = p; return null; } };
+        var aliasTarget = new TaskControlBlock(null, ID_WORKER, 3, null, aliasTask);
+        var aliasCurrent = new TaskControlBlock(null, ID_HANDLER_A, 2,
+                                                aliasPacket, aliasHandler);
+        aliasScheduler.blocks[ID_WORKER] = aliasTarget;
+        aliasScheduler.blocks[ID_HANDLER_A] = aliasCurrent;
+        aliasScheduler.list = aliasCurrent;
+        aliasScheduler.schedule();
+        check(aliasTask.seen === aliasPacket && aliasPacket.a1 === 1 &&
+              aliasPacket.id === ID_HANDLER_A && aliasPacket.link === null,
+              'D equals W source order');
+        check(aliasHandler.v1 === aliasPacket && aliasHandler.v2 === null &&
+              aliasScheduler.queueCount === 1, 'D equals W graph');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_active_handler_incoming_work_delivery_parity_case() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function oneDelivery(preempt, depth, payload) {
+          var scheduler = new Scheduler();
+          var handler = new HandlerTask(scheduler);
+          var work = new Packet(null, ID_HANDLER_A, KIND_WORK);
+          work.a2[0] = payload;
+          var devices = null;
+          for (var i = 0; i < depth; i++)
+            devices = new Packet(devices, ID_WORKER, KIND_DEVICE);
+          handler.v2 = devices;
+          var queued = preempt ? null : new Packet(null, ID_WORKER, KIND_DEVICE);
+          var task = { seen: null, run: function(p) { this.seen = p; return null; } };
+          var target = new TaskControlBlock(null, ID_WORKER, preempt ? 3 : 1,
+                                            queued, task);
+          var current = new TaskControlBlock(null, ID_HANDLER_A, 2, work, handler);
+          scheduler.blocks[ID_WORKER] = target;
+          scheduler.blocks[ID_HANDLER_A] = current;
+          scheduler.list = current;
+          scheduler.schedule();
+          var delivered = preempt ? task.seen : queued.link;
+          return [scheduler.queueCount, current.queue === null, current.state,
+                  handler.v1 === work, work.a1, work.link === null,
+                  delivered.a1, delivered.id, delivered.link === null,
+                  handler.v2 === null ? 0 : 1].join('|');
+        }
+        oneDelivery(false, 1, 91) + ';' + oneDelivery(true, 2, 92)
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(
+        run_jit(&src),
+        "1|true|2|true|1|true|91|2|true|0;1|true|0|true|1|true|92|2|true|1"
+    );
+}
+
+#[test]
+fn jit_scheduler_active_handler_incoming_work_delivery_enabled_disabled_parity() {
+    use std::process::Command;
+
+    let executable = std::env::current_exe().expect("current test executable");
+    for disabled in [false, true] {
+        let mut command = Command::new(&executable);
+        command
+            .arg("--exact")
+            .arg("tests::jit_scheduler_active_handler_incoming_work_delivery_parity_case")
+            .arg("--nocapture")
+            .env("LUMEN_JIT_REGIONLOG", "1")
+            .env_remove("LUMEN_JIT_NO_SCHED_HANDLER_ACTIVE_WORK_DELIVERY");
+        if disabled {
+            command.env("LUMEN_JIT_NO_SCHED_HANDLER_ACTIVE_WORK_DELIVERY", "1");
+        }
+        let output = command.output().expect("run parity child test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let planned = if disabled {
+            "incoming_work_delivery=false"
+        } else {
+            "incoming_work_delivery=true"
+        };
+        assert!(
+            output.status.success() && stdout.contains("running 1 test") && stderr.contains(planned),
+            "Handler Active WORK delivery parity child disabled={disabled} failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn jit_scheduler_active_handler_incoming_suspend_moves_bounded_packet_pools() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'active Handler incoming suspend: ' + message;
+        }
+        function deviceBurst() {
+          var scheduler = new Scheduler();
+          var handler = new HandlerTask(scheduler);
+          var p3 = new Packet(null, ID_WORKER, KIND_DEVICE);
+          var p2 = new Packet(p3, ID_WORKER, KIND_DEVICE);
+          var p1 = new Packet(p2, ID_WORKER, KIND_DEVICE);
+          var current = new TaskControlBlock(null, ID_HANDLER_A, 2, p1, handler);
+          scheduler.blocks[ID_HANDLER_A] = current;
+          scheduler.list = current;
+          // Do not return any packet root. Each incoming C.queue owner must move into v2/the
+          // previous tail before its source is removed, including across same-record resumes.
+          return [scheduler, handler, current];
+        }
+        var devices = deviceBurst();
+        devices[0].schedule();
+        var p1 = devices[1].v2, p2 = p1.link, p3 = p2.link;
+        check(p1 !== null && p2 !== null && p3 !== null && p3.link === null,
+              'DEVICE depth 0/1/2 chain');
+        check(p1.id === ID_WORKER && p2.id === ID_WORKER && p3.id === ID_WORKER,
+              'DEVICE owners survived');
+        check(devices[2].queue === null && devices[2].state === STATE_SUSPENDED,
+              'null successor final state');
+        check(devices[0].currentId === ID_HANDLER_A &&
+              devices[0].currentTcb === null && devices[0].queueCount === 0,
+              'DEVICE scheduler result');
+
+        // A non-Null successor makes the collapsed run+suspend state exactly
+        // SUSPENDED_RUNNABLE. The next packet's throwing link getter checkpoints that state
+        // before its own TaskControlBlock.run can advance the queue.
+        var linkGets = 0;
+        var successor = {};
+        Object.defineProperty(successor, 'link', {
+          get: function() { linkGets++; throw 'successor link'; }, configurable: true
+        });
+        var successorScheduler = new Scheduler();
+        var successorHandler = new HandlerTask(successorScheduler);
+        var first = new Packet(successor, ID_WORKER, KIND_DEVICE);
+        var successorCurrent = new TaskControlBlock(
+            null, ID_HANDLER_A, 2, first, successorHandler);
+        successorScheduler.blocks[ID_HANDLER_A] = successorCurrent;
+        successorScheduler.list = successorCurrent;
+        var successorError = '';
+        try { successorScheduler.schedule(); } catch (e) { successorError = e; }
+        check(successorError === 'successor link' && linkGets === 1,
+              'successor replay once');
+        check(successorCurrent.queue === successor &&
+              successorCurrent.state === STATE_SUSPENDED_RUNNABLE,
+              'non-Null successor pending state');
+        check(successorHandler.v2 === first && first.link === null,
+              'successor/P owner moves');
+
+        function workCase(withHead) {
+          var scheduler = new Scheduler();
+          var handler = new HandlerTask(scheduler);
+          var incoming = new Packet(null, ID_HANDLER_A, KIND_WORK);
+          var head = withHead ? new Packet(null, ID_HANDLER_A, KIND_WORK) : null;
+          if (head !== null) handler.v1 = head;
+          var current = new TaskControlBlock(null, ID_HANDLER_A, 2, incoming, handler);
+          scheduler.blocks[ID_HANDLER_A] = current;
+          scheduler.list = current;
+          return [scheduler, handler, current, head];
+        }
+        var empty = workCase(false);
+        empty[0].schedule();
+        check(empty[1].v1 !== null && empty[1].v1.link === null &&
+              empty[1].v1.a1 === 0, 'WORK empty v1');
+        check(empty[2].queue === null && empty[2].state === STATE_SUSPENDED &&
+              empty[0].currentTcb === null, 'WORK empty suspend');
+
+        var one = workCase(true), head = one[3];
+        one[0].schedule();
+        check(one[1].v1 === head && head.link !== null && head.link.link === null &&
+              head.a1 === 0, 'WORK one-node append');
+        check(one[2].queue === null && one[2].state === STATE_SUSPENDED &&
+              one[0].currentId === ID_HANDLER_A && one[0].queueCount === 0,
+              'WORK one-node suspend');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_active_handler_incoming_suspend_replays_bounds_and_guards() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'active Handler incoming replay: ' + message;
+        }
+        function oneIncoming(kind, v1, v2) {
+          var scheduler = new Scheduler();
+          var handler = new HandlerTask(scheduler);
+          var packet = new Packet(null, ID_HANDLER_A, kind);
+          var current = new TaskControlBlock(null, ID_HANDLER_A, 2, packet, handler);
+          handler.v1 = v1;
+          handler.v2 = v2;
+          scheduler.blocks[ID_HANDLER_A] = current;
+          scheduler.list = current;
+          return [scheduler, handler, current, packet];
+        }
+
+        // Lists just beyond the unrolled subsets must replay Packet.addTo's full scan once.
+        var d3 = new Packet(null, ID_WORKER, KIND_DEVICE);
+        var d2 = new Packet(d3, ID_WORKER, KIND_DEVICE);
+        var d1 = new Packet(d2, ID_WORKER, KIND_DEVICE);
+        var longDevice = oneIncoming(KIND_DEVICE, null, d1);
+        longDevice[0].schedule();
+        check(d1.link === d2 && d2.link === d3 && d3.link === longDevice[3] &&
+              longDevice[3].link === null, 'DEVICE length-three replay');
+
+        var w2 = new Packet(null, ID_HANDLER_A, KIND_WORK);
+        var w1 = new Packet(w2, ID_HANDLER_A, KIND_WORK);
+        var longWork = oneIncoming(KIND_WORK, w1, null);
+        longWork[0].schedule();
+        check(w1.link === w2 && w2.link === longWork[3] &&
+              longWork[3].link === null, 'WORK length-two replay');
+
+        // An observable kind access declines before Active/Handler writes, then generic replay
+        // performs the getter exactly once after TaskControlBlock.run's dequeue/state prefix.
+        var kindCase = oneIncoming(KIND_DEVICE, null, null), kindGets = 0;
+        Object.defineProperty(kindCase[3], 'kind', {
+          get: function() {
+            kindGets++;
+            check(kindCase[2].queue === null && kindCase[2].state === STATE_RUNNING &&
+                  kindCase[0].currentId === ID_HANDLER_A && kindCase[1].v2 === null,
+                  'kind getter checkpoint');
+            return KIND_DEVICE;
+          }, configurable: true
+        });
+        kindCase[0].schedule();
+        check(kindGets === 1 && kindCase[1].v2 === kindCase[3], 'kind getter once');
+
+        var originalAdd = Packet.prototype.addTo, addHits = 0;
+        Packet.prototype.addTo = function(queue) {
+          addHits++;
+          return originalAdd.call(this, queue);
+        };
+        var addCase = oneIncoming(KIND_DEVICE, null, null);
+        addCase[0].schedule();
+        Packet.prototype.addTo = originalAdd;
+        check(addHits === 1 && addCase[1].v2 === addCase[3], 'addTo replacement once');
+
+        var originalSuspend = Scheduler.prototype.suspendCurrent, suspendHits = 0;
+        Scheduler.prototype.suspendCurrent = function() {
+          suspendHits++;
+          return originalSuspend.call(this);
+        };
+        var suspendCase = oneIncoming(KIND_DEVICE, null, null);
+        suspendCase[0].schedule();
+        Scheduler.prototype.suspendCurrent = originalSuspend;
+        check(suspendHits === 1 && suspendCase[2].state === STATE_SUSPENDED,
+              'suspend replacement once');
+
+        var originalMark = TaskControlBlock.prototype.markAsSuspended, markHits = 0;
+        TaskControlBlock.prototype.markAsSuspended = function() {
+          markHits++;
+          return originalMark.call(this);
+        };
+        var markCase = oneIncoming(KIND_DEVICE, null, null);
+        markCase[0].schedule();
+        TaskControlBlock.prototype.markAsSuspended = originalMark;
+        check(markHits === 1 && markCase[1].v2 === markCase[3] &&
+              markCase[2].state === STATE_SUSPENDED, 'mark replacement once');
+
+        var schedulerCase = oneIncoming(KIND_DEVICE, null, null), schedulerGets = 0;
+        var storedScheduler = schedulerCase[0];
+        Object.defineProperty(schedulerCase[1], 'scheduler', {
+          get: function() { schedulerGets++; return storedScheduler; }, configurable: true
+        });
+        schedulerCase[0].schedule();
+        check(schedulerGets === 1 && schedulerCase[1].v2 === schedulerCase[3],
+              'Handler.scheduler accessor once');
+
+        // Non-numeric KIND_WORK forces generic loose-equality coercion exactly once.
+        var oldKindWork = KIND_WORK, nameHits = 0;
+        KIND_WORK = { valueOf: function() { nameHits++; return oldKindWork; } };
+        var nameCase = oneIncoming(oldKindWork, null, null);
+        nameCase[0].schedule();
+        KIND_WORK = oldKindWork;
+        check(nameHits === 1 && nameCase[1].v1 === nameCase[3] &&
+              nameCase[1].v2 === null, 'KIND_WORK coercion replay');
+
+        // P already present as the selected list head is a valid but uncommon source-order
+        // alias. Ordinary addTo creates the self-link; the direct transaction must decline.
+        var alias = oneIncoming(KIND_DEVICE, null, null);
+        alias[1].v2 = alias[3];
+        alias[0].schedule();
+        check(alias[1].v2 === alias[3] && alias[3].link === alias[3] &&
+              alias[2].state === STATE_SUSPENDED, 'P equals v2 replay');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_active_handler_incoming_suspend_parity_case() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        var scheduler = new Scheduler();
+        var handler = new HandlerTask(scheduler);
+        var p3 = new Packet(null, ID_WORKER, KIND_DEVICE);
+        var p2 = new Packet(p3, ID_WORKER, KIND_DEVICE);
+        var p1 = new Packet(p2, ID_WORKER, KIND_DEVICE);
+        var current = new TaskControlBlock(null, ID_HANDLER_A, 2, p1, handler);
+        scheduler.blocks[ID_HANDLER_A] = current;
+        scheduler.list = current;
+        scheduler.schedule();
+        var deviceState = current.state;
+        var deviceQueueNull = current.queue === null;
+        var deviceChainComplete = handler.v2.link.link.link === null;
+        var deviceCurrentNull = scheduler.currentTcb === null;
+        var wScheduler = new Scheduler();
+        var wHandler = new HandlerTask(wScheduler);
+        var oldWork = new Packet(null, ID_HANDLER_A, KIND_WORK);
+        var newWork = new Packet(null, ID_HANDLER_A, KIND_WORK);
+        var wCurrent = new TaskControlBlock(null, ID_HANDLER_A, 2, newWork, wHandler);
+        wHandler.v1 = oldWork;
+        wScheduler.blocks[ID_HANDLER_A] = wCurrent;
+        wScheduler.list = wCurrent;
+        wScheduler.schedule();
+        var workState = wCurrent.state;
+        [deviceState, deviceQueueNull, deviceChainComplete, deviceCurrentNull,
+         workState, wHandler.v1 === oldWork,
+         oldWork.link === newWork, newWork.link === null].join('|')
+        "#,
+    ]
+    .join("\n");
+    // This deliberately global construction retains the scheduler's runnable checkpoint; the
+    // parent parity test executes the identical fixture with the stitched arm both on and off.
+    assert_eq!(run_jit(&src), "2|true|true|true|2|true|true|true");
+}
+
+#[test]
+fn jit_scheduler_active_handler_incoming_suspend_enabled_disabled_parity() {
+    use std::process::Command;
+
+    let executable = std::env::current_exe().expect("current test executable");
+    for disabled in [false, true] {
+        let mut command = Command::new(&executable);
+        command
+            .arg("--exact")
+            .arg("tests::jit_scheduler_active_handler_incoming_suspend_parity_case")
+            .arg("--nocapture")
+            .env_remove("LUMEN_JIT_NO_SCHED_HANDLER_INCOMING_SUSPEND");
+        if disabled {
+            command.env("LUMEN_JIT_NO_SCHED_HANDLER_INCOMING_SUSPEND", "1");
+        }
+        let output = command.output().expect("run parity child test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("running 1 test"),
+            "Handler incoming suspend parity child disabled={disabled} failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn jit_scheduler_handler_incoming_device_bridge_preserves_owners_and_replays_guards() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'handler incoming: ' + message;
+        }
+        function oneIncoming(link, count, payload) {
+          var scheduler = new Scheduler();
+          var handler = new HandlerTask(scheduler);
+          var work = new Packet(null, ID_HANDLER_A, KIND_WORK);
+          work.a1 = count;
+          work.a2[count] = payload;
+          var packet = new Packet(link, ID_WORKER, KIND_DEVICE);
+          var queued = new Packet(null, ID_WORKER, KIND_DEVICE);
+          var target = new TaskControlBlock(null, ID_WORKER, 1, queued, {
+            run: function() { return null; }
+          });
+          var current = new TaskControlBlock(null, ID_HANDLER_A, 2, packet, handler);
+          scheduler.blocks[ID_WORKER] = target;
+          scheduler.blocks[ID_HANDLER_A] = current;
+          scheduler.list = current;
+          handler.v1 = work;
+          // Deliberately omit packet from the returned roots. A successful bridge must preserve
+          // it through both skipped inline frames until the target queue receives the owner.
+          return [scheduler, handler, current, target, work, queued];
+        }
+
+        var direct = oneIncoming(null, 1, 77);
+        direct[0].schedule();
+        var delivered = direct[3].queue.link;
+        check(direct[0].queueCount === 1, 'direct queue count');
+        check(delivered.a1 === 77 && delivered.id === ID_HANDLER_A,
+              'direct packet fields');
+        check(delivered.link === null && direct[4].a1 === 2 && direct[1].v2 === null,
+              'direct Handler state');
+        check(direct[2].queue === null && direct[2].state === STATE_SUSPENDED &&
+              direct[0].currentId === ID_HANDLER_A && direct[0].currentTcb === null,
+              'direct active state');
+
+        // A successor is moved into current.queue by TaskControlBlock.run before Handler runs.
+        // The bridge's pre-prefix Null-link guard must replay, after which both packets are
+        // delivered once without losing the successor's last hidden owner.
+        var successor = new Packet(null, ID_WORKER, KIND_DEVICE);
+        successor.a2[0] = 91;
+        var linked = oneIncoming(successor, 1, 81);
+        linked[0].schedule();
+        var first = linked[3].queue.link;
+        check(linked[0].queueCount === 2 && first.a1 === 81, 'linked deliveries');
+        check(first.link === successor && successor.link === null, 'linked owners');
+        check(successor.a1 === linked[4].a2[2] && linked[4].a1 === 3,
+              'linked cursor');
+        check(linked[2].queue === null && linked[2].state === STATE_SUSPENDED,
+              'linked suspension');
+
+        // An observable kind read makes the generic Active fast path materialize and replay.
+        // The getter must nevertheless observe only the source-ordered Active effects: currentId
+        // and the queue/state prefix, but none of HandlerTask.run's writes.
+        var early = oneIncoming(null, 1, 80);
+        var earlyPacket = early[2].queue, kindThrows = 0;
+        Object.defineProperty(earlyPacket, 'kind', {
+          get: function() { kindThrows++; throw 'kind boom'; }, configurable: true
+        });
+        var kindError = '';
+        try { early[0].schedule(); } catch (e) { kindError = e; }
+        check(kindError === 'kind boom' && kindThrows === 1, 'early throw once');
+        check(early[2].queue === null && early[2].state === STATE_RUNNING &&
+              early[0].currentId === ID_HANDLER_A && early[0].currentTcb === early[2],
+              'early active checkpoint');
+        check(early[1].v2 === null && early[4].a1 === 1 &&
+              early[0].queueCount === 0 && early[3].queue === early[5],
+              'early Handler untouched');
+
+        var originalAdd = Packet.prototype.addTo, addHits = 0;
+        Packet.prototype.addTo = function(queue) {
+          addHits++;
+          return originalAdd.call(this, queue);
+        };
+        var methodCase = oneIncoming(null, 1, 82);
+        methodCase[0].schedule();
+        Packet.prototype.addTo = originalAdd;
+        check(addHits === 2 && methodCase[3].queue.link.a1 === 82,
+              'method replacement replay');
+
+        var kindCase = oneIncoming(null, 1, 83);
+        var kindPacket = kindCase[2].queue, kindGets = 0;
+        Object.defineProperty(kindPacket, 'kind', {
+          get: function() { kindGets++; return KIND_DEVICE; }, configurable: true
+        });
+        kindCase[0].schedule();
+        check(kindGets === 1 && kindCase[3].queue.link === kindPacket,
+              'kind getter replay');
+
+        // Handler.v1 is observed after the incoming Packet.addTo side effects. A late throw must
+        // therefore see the active-prefix and addTo effects exactly once, but no delivery writes.
+        var throwCase = oneIncoming(null, 1, 84);
+        var throwPacket = throwCase[2].queue, v1Gets = 0;
+        Object.defineProperty(throwCase[1], 'v1', {
+          get: function() { v1Gets++; throw 'v1 boom'; }, configurable: true
+        });
+        var error = '';
+        try { throwCase[0].schedule(); } catch (e) { error = e; }
+        check(error === 'v1 boom' && v1Gets === 1, 'late throw once');
+        check(throwCase[2].queue === null && throwCase[2].state === STATE_RUNNING &&
+              throwCase[0].currentId === ID_HANDLER_A &&
+              throwCase[0].currentTcb === throwCase[2], 'late active effects');
+        check(throwCase[1].v2 === throwPacket && throwPacket.link === null,
+              'late addTo effects');
+        check(throwCase[0].queueCount === 0 && throwCase[3].queue === throwCase[5] &&
+              throwCase[5].link === null && throwCase[0].currentTcb === throwCase[2],
+              'late target untouched');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_handler_incoming_delivery_fuses_preempt_and_replays_late_guards() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'handler incoming delivery: ' + message;
+        }
+        function emptyTarget(targetPriority, currentPriority, payload) {
+          var scheduler = new Scheduler();
+          var handler = new HandlerTask(scheduler);
+          var work = new Packet(null, ID_HANDLER_A, KIND_WORK);
+          work.a1 = 1;
+          work.a2[1] = payload;
+          var packet = new Packet(null, ID_WORKER, KIND_DEVICE);
+          var seen = { packet: null, handlerState: -1, wasCurrent: false };
+          var current, target;
+          var task = {
+            run: function(value) {
+              seen.packet = value;
+              seen.handlerState = current.state;
+              seen.wasCurrent = scheduler.currentTcb === target;
+              return null;
+            }
+          };
+          target = new TaskControlBlock(null, ID_WORKER, targetPriority, null, task);
+          current = new TaskControlBlock(target, ID_HANDLER_A, currentPriority, packet, handler);
+          scheduler.blocks[ID_WORKER] = target;
+          scheduler.blocks[ID_HANDLER_A] = current;
+          scheduler.list = current;
+          handler.v1 = work;
+          return [scheduler, handler, current, target, work, packet, seen];
+        }
+
+        // The fused empty-target arm must publish exactly one packet owner and immediately
+        // preempt when the target priority is higher. The Handler has not run its later suspend.
+        var preempt = emptyTarget(3, 2, 71);
+        preempt[0].schedule();
+        check(preempt[6].packet === preempt[5] && preempt[6].wasCurrent,
+              'preempt packet/current');
+        check(preempt[6].handlerState === STATE_RUNNING,
+              'preempt happens before Handler suspend');
+        check(preempt[5].a1 === 71 && preempt[5].id === ID_HANDLER_A &&
+              preempt[5].link === null, 'preempt packet fields');
+        check(preempt[1].v2 === null && preempt[4].a1 === 2 &&
+              preempt[0].queueCount === 1, 'preempt Handler writes');
+
+        // The same empty target with a lower priority must decline the fused preempt guard and
+        // replay pc59. Handler suspends before the linked target is selected, with no duplicates.
+        var noPreempt = emptyTarget(1, 2, 72);
+        noPreempt[0].schedule();
+        check(noPreempt[6].packet === noPreempt[5] && noPreempt[6].wasCurrent,
+              'nonpreempt packet/current');
+        check(noPreempt[6].handlerState === STATE_SUSPENDED,
+              'nonpreempt runs after Handler suspend');
+        check(noPreempt[5].a1 === 72 && noPreempt[4].a1 === 2 &&
+              noPreempt[0].queueCount === 1, 'nonpreempt writes once');
+
+        function twoNodeTarget() {
+          var scheduler = new Scheduler();
+          var handler = new HandlerTask(scheduler);
+          var work = new Packet(null, ID_HANDLER_A, KIND_WORK);
+          work.a1 = 1;
+          work.a2[1] = 73;
+          var packet = new Packet(null, ID_WORKER, KIND_DEVICE);
+          var tail = new Packet(null, ID_WORKER, KIND_DEVICE);
+          var head = new Packet(tail, ID_WORKER, KIND_DEVICE);
+          var target = new TaskControlBlock(null, ID_WORKER, 1, head, {
+            run: function() { return null; }
+          });
+          var current = new TaskControlBlock(null, ID_HANDLER_A, 2, packet, handler);
+          scheduler.blocks[ID_WORKER] = target;
+          scheduler.blocks[ID_HANDLER_A] = current;
+          scheduler.list = current;
+          handler.v1 = work;
+          return [scheduler, handler, current, target, work, packet, head, tail];
+        }
+
+        // A two-node destination is intentionally outside the one-node transaction. Full replay
+        // must run Packet.addTo's scan once and append rather than overwrite the existing tail.
+        var scanned = twoNodeTarget();
+        scanned[0].schedule();
+        check(scanned[6].link === scanned[7] && scanned[7].link === scanned[5] &&
+              scanned[5].link === null, 'two-node append order');
+        check(scanned[0].queueCount === 1 && scanned[5].a1 === 73 &&
+              scanned[4].a1 === 2 && scanned[1].v2 === null,
+              'two-node replay writes once');
+
+        function latePayloadThrow() {
+          var scheduler = new Scheduler();
+          var handler = new HandlerTask(scheduler);
+          var work = new Packet(null, ID_HANDLER_A, KIND_WORK);
+          work.a1 = 1;
+          var payload = {}, hits = { value: 0 };
+          Object.defineProperty(payload, '1', {
+            get: function() { hits.value++; throw 'payload boom'; }, configurable: true
+          });
+          // Keep the Packet's warmed shape unchanged while making a2 non-packed. The incoming
+          // prefix can fuse, but the later delivery guard must decline before committing.
+          work.a2 = payload;
+          var packet = new Packet(null, ID_WORKER, KIND_DEVICE);
+          var queued = new Packet(null, ID_WORKER, KIND_DEVICE);
+          var target = new TaskControlBlock(null, ID_WORKER, 1, queued, {
+            run: function() { return null; }
+          });
+          var current = new TaskControlBlock(null, ID_HANDLER_A, 2, packet, handler);
+          scheduler.blocks[ID_WORKER] = target;
+          scheduler.blocks[ID_HANDLER_A] = current;
+          scheduler.list = current;
+          handler.v1 = work;
+          return [scheduler, handler, current, target, work, packet, queued, hits];
+        }
+
+        // Original execution has already published the incoming packet to v2 and advanced v2
+        // back to Null when the payload getter throws. Replaying from pc161 would miss that order.
+        var late = latePayloadThrow(), error = '';
+        try { late[0].schedule(); } catch (e) { error = e; }
+        check(error === 'payload boom' && late[7].value === 1, 'late throw once');
+        check(late[1].v2 === null && late[5].link === null && late[5].a1 === 0 &&
+              late[5].id === ID_WORKER, 'late prefix/delivery checkpoint');
+        check(late[4].a1 === 1 && late[0].queueCount === 0 &&
+              late[3].queue === late[6] && late[6].link === null,
+              'late queue untouched');
+        check(late[2].queue === null && late[2].state === STATE_RUNNING &&
+              late[0].currentTcb === late[2], 'late active effects');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_active_handler_incoming_replays_changed_methods_once() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'active handler methods: ' + message;
+        }
+        function oneIncoming(payload) {
+          var scheduler = new Scheduler();
+          var handler = new HandlerTask(scheduler);
+          var work = new Packet(null, ID_HANDLER_A, KIND_WORK);
+          work.a1 = 1;
+          work.a2[1] = payload;
+          var packet = new Packet(null, ID_WORKER, KIND_DEVICE);
+          var target = new TaskControlBlock(null, ID_WORKER, 3, null, {
+            run: function() { throw 'held target ran'; }
+          });
+          target.state = STATE_SUSPENDED | STATE_HELD;
+          var current = new TaskControlBlock(null, ID_HANDLER_A, 2, packet, handler);
+          scheduler.blocks[ID_WORKER] = target;
+          scheduler.blocks[ID_HANDLER_A] = current;
+          scheduler.list = current;
+          handler.v1 = work;
+          return {
+            scheduler: scheduler, handler: handler, work: work, packet: packet,
+            current: current, target: target, payload: payload
+          };
+        }
+        function checkComplete(one, label) {
+          check(one.current.queue === null && one.current.state === STATE_RUNNING,
+                label + ' source dequeue');
+          check(one.scheduler.currentId === ID_HANDLER_A &&
+                one.scheduler.currentTcb === null, label + ' scheduler state');
+          check(one.handler.v2 === null && one.work.a1 === 2 &&
+                one.packet.a1 === one.payload, label + ' Handler writes');
+          check(one.scheduler.queueCount === 1 && one.packet.link === null &&
+                one.packet.id === ID_HANDLER_A, label + ' queue prefix');
+          check(one.target.queue === one.packet &&
+                one.target.state === (STATE_SUSPENDED | STATE_HELD | STATE_RUNNABLE),
+                label + ' target publication');
+        }
+
+        // TaskControlBlock.run dequeues and writes currentId before resolving Handler.run.
+        var originalRun = HandlerTask.prototype.run;
+        var runCase, runHits = 0, runPacket = null, runQueue = 1;
+        var runState = -1, runId = -1, runV2 = 1;
+        HandlerTask.prototype.run = function(packet) {
+          runHits++;
+          runPacket = packet;
+          runQueue = runCase.current.queue;
+          runState = runCase.current.state;
+          runId = runCase.scheduler.currentId;
+          runV2 = this.v2;
+          return originalRun.call(this, packet);
+        };
+        runCase = oneIncoming(71);
+        runCase.scheduler.schedule();
+        HandlerTask.prototype.run = originalRun;
+        check(runHits === 1 && runPacket === runCase.packet && runQueue === null &&
+              runState === STATE_RUNNING && runId === ID_HANDLER_A && runV2 === null,
+              'run entry once');
+        checkComplete(runCase, 'run');
+
+        // The first addTo is still before Handler.v2 is published. An empty target avoids a
+        // second addTo inside checkPriorityAdd, making this call count exact.
+        var originalAdd = Packet.prototype.addTo;
+        var addCase, addHits = 0, addQueue = 1, addLink = 1, addCurrent = false;
+        Packet.prototype.addTo = function(queue) {
+          addHits++;
+          addQueue = queue;
+          addLink = this.link;
+          addCurrent = addCase.scheduler.currentTcb === addCase.current &&
+                       addCase.current.queue === null;
+          return originalAdd.call(this, queue);
+        };
+        addCase = oneIncoming(72);
+        addCase.scheduler.schedule();
+        Packet.prototype.addTo = originalAdd;
+        check(addHits === 1 && addQueue === null && addLink === null && addCurrent,
+              'addTo entry once');
+        checkComplete(addCase, 'addTo');
+
+        // Scheduler.queue is resolved after all Handler delivery writes, but before its own
+        // queueCount/link/id prefix.
+        var originalQueue = Scheduler.prototype.queue;
+        var queueCase, queueHits = 0, queueCountAtEntry = -1;
+        var queueV2 = 1, queueCount = -1, queueId = -1, queueLink = 1;
+        Scheduler.prototype.queue = function(packet) {
+          queueHits++;
+          queueCountAtEntry = this.queueCount;
+          queueV2 = queueCase.handler.v2;
+          queueCount = queueCase.work.a1;
+          queueId = packet.id;
+          queueLink = packet.link;
+          return originalQueue.call(this, packet);
+        };
+        queueCase = oneIncoming(73);
+        queueCase.scheduler.schedule();
+        Scheduler.prototype.queue = originalQueue;
+        check(queueHits === 1 && queueCountAtEntry === 0 && queueV2 === null &&
+              queueCount === 2 && queueId === ID_WORKER && queueLink === null &&
+              queueCase.packet.a1 === 73, 'queue entry once');
+        checkComplete(queueCase, 'queue');
+
+        // checkPriorityAdd sees Scheduler.queue's prefix and no target mutation yet.
+        var originalCheck = TaskControlBlock.prototype.checkPriorityAdd;
+        var checkCase, checkHits = 0, checkTask = null, checkQueue = 1;
+        var checkState = -1, checkId = -1, checkCount = -1;
+        TaskControlBlock.prototype.checkPriorityAdd = function(task, packet) {
+          checkHits++;
+          checkTask = task;
+          checkQueue = this.queue;
+          checkState = this.state;
+          checkId = packet.id;
+          checkCount = checkCase.scheduler.queueCount;
+          return originalCheck.call(this, task, packet);
+        };
+        checkCase = oneIncoming(74);
+        checkCase.scheduler.schedule();
+        TaskControlBlock.prototype.checkPriorityAdd = originalCheck;
+        check(checkHits === 1 && checkTask === checkCase.current && checkQueue === null &&
+              checkState === (STATE_SUSPENDED | STATE_HELD) &&
+              checkId === ID_HANDLER_A && checkCount === 1, 'check entry once');
+        checkComplete(checkCase, 'check');
+
+        // markAsRunnable is later still: target.queue owns the packet while state is unchanged.
+        var originalMark = TaskControlBlock.prototype.markAsRunnable;
+        var markCase, markHits = 0, markQueue = null, markState = -1;
+        TaskControlBlock.prototype.markAsRunnable = function() {
+          markHits++;
+          markQueue = this.queue;
+          markState = this.state;
+          return originalMark.call(this);
+        };
+        markCase = oneIncoming(75);
+        markCase.scheduler.schedule();
+        TaskControlBlock.prototype.markAsRunnable = originalMark;
+        check(markHits === 1 && markQueue === markCase.packet &&
+              markState === (STATE_SUSPENDED | STATE_HELD), 'mark entry once');
+        checkComplete(markCase, 'mark');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_handler_v2_delivery_preserves_aliases_and_owner_moves() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'handler v2 owners: ' + message;
+        }
+        function oneDelivery(count, payload) {
+          var scheduler = new Scheduler();
+          var handler = new HandlerTask(scheduler);
+          var work = new Packet(null, ID_HANDLER_A, KIND_WORK);
+          work.a1 = count;
+          work.a2[count] = payload;
+          var packet = new Packet(null, ID_WORKER, KIND_DEVICE);
+          var queued = new Packet(null, ID_WORKER, KIND_DEVICE);
+          var target = new TaskControlBlock(null, ID_WORKER, 1, queued, {
+            run: function() { return null; }
+          });
+          var current = new TaskControlBlock(null, ID_HANDLER_A, 2, null, handler);
+          current.state = STATE_RUNNING;
+          handler.v1 = work;
+          handler.v2 = packet;
+          scheduler.blocks[ID_WORKER] = target;
+          scheduler.blocks[ID_HANDLER_A] = null;
+          scheduler.list = current;
+          return [scheduler, handler, current, target, packet, work, queued];
+        }
+
+        var direct = oneDelivery(1, 77);
+        direct[0].schedule();
+        check(direct[0].queueCount === 1, 'direct count');
+        check(direct[1].v2 === null && direct[4].link === null, 'direct source');
+        check(direct[4].a1 === 77 && direct[5].a1 === 2, 'direct numerics');
+        check(direct[4].id === ID_HANDLER_A, 'direct id');
+        check(direct[3].queue === direct[6] && direct[6].link === direct[4],
+              'direct append');
+        check(direct[2].state === STATE_SUSPENDED && direct[0].currentTcb === null,
+              'direct suspension');
+
+        // Valid aliases currently replay at the transaction head. These assertions pin the
+        // source-order behavior so a future alias-specialized commit cannot silently drift.
+        var queueIsPacket = oneDelivery(3, 70);
+        var successor = new Packet(null, ID_DEVICE_A, KIND_DEVICE);
+        successor.a2[0] = 91;
+        queueIsPacket[4].link = successor;
+        queueIsPacket[3].queue = queueIsPacket[4];
+        queueIsPacket[0].schedule();
+        check(queueIsPacket[1].v2 === successor, 'Q=P successor');
+        check(queueIsPacket[4].link === queueIsPacket[4], 'Q=P self append');
+        check(queueIsPacket[3].queue === queueIsPacket[4], 'Q=P queue');
+
+        var workIsPacket = oneDelivery(1, 88);
+        workIsPacket[1].v1 = workIsPacket[4];
+        workIsPacket[4].a1 = 1;
+        workIsPacket[4].a2[1] = 88;
+        workIsPacket[0].schedule();
+        check(workIsPacket[4].a1 === 2, 'W=P ordered a1 writes');
+        check(workIsPacket[6].link === workIsPacket[4], 'W=P append');
+
+        var queueIsWork = oneDelivery(1, 66);
+        queueIsWork[3].queue = queueIsWork[5];
+        queueIsWork[0].schedule();
+        check(queueIsWork[5].link === queueIsWork[4], 'Q=W append');
+        check(queueIsWork[5].a1 === 2 && queueIsWork[4].a1 === 66,
+              'Q=W distinct fields');
+
+        var linkIsQueue = oneDelivery(3, 65);
+        linkIsQueue[4].link = linkIsQueue[6];
+        linkIsQueue[0].schedule();
+        check(linkIsQueue[1].v2 === linkIsQueue[6], 'L=Q transfer');
+        check(linkIsQueue[6].link === linkIsQueue[4], 'L=Q append');
+
+        var selfSource = oneDelivery(3, 64);
+        selfSource[4].link = selfSource[4];
+        selfSource[0].schedule();
+        check(selfSource[1].v2 === selfSource[4], 'L=P transfer');
+        check(selfSource[4].link === null && selfSource[6].link === selfSource[4],
+              'L=P queue clear');
+
+        var lastOwner = oneDelivery(3, 63);
+        lastOwner[4].link = new Packet(null, ID_DEVICE_A, KIND_DEVICE);
+        lastOwner[4].link.a2[0] = 92;
+        lastOwner[0].schedule();
+        check(lastOwner[1].v2.a2[0] === 92, 'last-owner successor');
+        check(lastOwner[4].link === null && lastOwner[6].link === lastOwner[4],
+              'last-owner packet move');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_handler_v2_delivery_guards_effect_order_and_live_values() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'handler v2 guards: ' + message;
+        }
+        function oneDelivery(count, payload) {
+          var scheduler = new Scheduler();
+          var handler = new HandlerTask(scheduler);
+          var work = new Packet(null, ID_HANDLER_A, KIND_WORK);
+          work.a1 = count;
+          work.a2[count] = payload;
+          var packet = new Packet(null, ID_WORKER, KIND_DEVICE);
+          var queued = new Packet(null, ID_WORKER, KIND_DEVICE);
+          var target = new TaskControlBlock(null, ID_WORKER, 1, queued, {
+            run: function() { return null; }
+          });
+          var current = new TaskControlBlock(null, ID_HANDLER_A, 2, null, handler);
+          current.state = STATE_RUNNING;
+          handler.v1 = work;
+          handler.v2 = packet;
+          scheduler.blocks[ID_WORKER] = target;
+          scheduler.blocks[ID_HANDLER_A] = null;
+          scheduler.list = current;
+          return [scheduler, handler, current, target, packet, work, queued];
+        }
+
+        // The region must use the count local captured before this getter changes Handler.v1.
+        var changed = oneDelivery(0, 10);
+        var oldWork = changed[5];
+        var newWork = new Packet(null, ID_HANDLER_A, KIND_WORK);
+        newWork.a1 = 0;
+        newWork.a2[1] = 81;
+        Object.defineProperty(oldWork, 'a1', {
+          get: function() { changed[1].v1 = newWork; return 1; }, configurable: true
+        });
+        changed[0].schedule();
+        check(changed[4].a1 === 81 && newWork.a1 === 2, 'captured count');
+        check(changed[6].link === changed[4], 'changed work append');
+
+        var hole = oneDelivery(1, 11);
+        delete hole[5].a2[1];
+        Array.prototype[1] = 73;
+        hole[0].schedule();
+        delete Array.prototype[1];
+        check(hole[4].a1 === 73, 'inherited payload hole');
+
+        var element = oneDelivery(1, 12), elementGets = 0;
+        Object.defineProperty(element[5].a2, '1', {
+          get: function() { elementGets++; return 74; }, configurable: true
+        });
+        element[0].schedule();
+        check(elementGets === 1 && element[4].a1 === 74, 'payload getter');
+
+        var payloadObject = { marker: 75 };
+        var objectPayload = oneDelivery(1, payloadObject);
+        objectPayload[0].schedule();
+        check(objectPayload[4].a1 === payloadObject, 'object payload ownership');
+
+        var originalAdd = Packet.prototype.addTo, addHits = 0;
+        Packet.prototype.addTo = function(queue) {
+          addHits++;
+          return originalAdd.call(this, queue);
+        };
+        var addCase = oneDelivery(1, 76);
+        addCase[0].schedule();
+        Packet.prototype.addTo = originalAdd;
+        check(addHits === 1 && addCase[6].link === addCase[4], 'addTo replacement');
+
+        var linkCase = oneDelivery(1, 77), storedLink = null;
+        var linkGets = 0, linkSets = 0;
+        Object.defineProperty(linkCase[4], 'link', {
+          get: function() { linkGets++; return storedLink; },
+          set: function(value) { linkSets++; storedLink = value; }, configurable: true
+        });
+        linkCase[0].schedule();
+        check(linkGets > 0 && linkSets > 0 && storedLink === null, 'packet link accessor');
+        check(linkCase[6].link === linkCase[4], 'packet link accessor append');
+
+        var twoNode = oneDelivery(1, 78);
+        var tail = new Packet(null, ID_WORKER, KIND_DEVICE);
+        twoNode[6].link = tail;
+        twoNode[0].schedule();
+        check(twoNode[6].link === tail && tail.link === twoNode[4], 'two-node replay');
+
+        var undefinedLink = oneDelivery(1, 79);
+        undefinedLink[6].link = undefined;
+        undefinedLink[0].schedule();
+        check(undefinedLink[6].link === undefinedLink[4], 'undefined queued link');
+        var ddaLink = oneDelivery(1, 80);
+        ddaLink[6].link = $262.IsHTMLDDA;
+        ddaLink[0].schedule();
+        check(ddaLink[6].link === ddaLink[4], 'HTMLDDA queued link');
+
+        // Missing target returns before Scheduler.queue's own writes, but Handler's three writes
+        // have already happened and must be replayed exactly once.
+        var missing = oneDelivery(1, 82);
+        var missingSuccessor = new Packet(null, ID_DEVICE_A, KIND_DEVICE);
+        missing[4].link = missingSuccessor;
+        missing[0].blocks[ID_WORKER] = null;
+        missing[0].schedule();
+        check(missing[1].v2 === missingSuccessor, 'missing source transfer');
+        check(missing[4].a1 === 82 && missing[5].a1 === 2, 'missing Handler writes');
+        check(missing[0].queueCount === 0, 'missing queue count');
+        check(missing[4].link === missingSuccessor && missing[4].id === ID_WORKER,
+              'missing packet untouched');
+
+        // An id setter throws after queueCount and packet.link, but before target mutation.
+        var idThrow = oneDelivery(1, 83), idValue = ID_WORKER, idSets = 0;
+        Object.defineProperty(idThrow[4], 'id', {
+          get: function() { return idValue; },
+          set: function(value) { idSets++; throw 'id boom'; }, configurable: true
+        });
+        var idError = '';
+        try { idThrow[0].schedule(); } catch (e) { idError = e; }
+        check(idError === 'id boom' && idSets === 1, 'id throw once');
+        check(idThrow[1].v2 === null && idThrow[4].a1 === 83 && idThrow[5].a1 === 2,
+              'id throw Handler effects');
+        check(idThrow[0].queueCount === 1 && idThrow[4].link === null,
+              'id throw queue prefix');
+        check(idThrow[6].link === null, 'id throw target untouched');
+
+        // The tail setter throws after every queue prefix write and before target.queue's no-op.
+        var tailThrow = oneDelivery(1, 84), tailValue = null, tailSets = 0;
+        Object.defineProperty(tailThrow[6], 'link', {
+          get: function() { return tailValue; },
+          set: function(value) { tailSets++; throw 'tail boom'; }, configurable: true
+        });
+        var tailError = '';
+        try { tailThrow[0].schedule(); } catch (e) { tailError = e; }
+        check(tailError === 'tail boom' && tailSets === 1, 'tail throw once');
+        check(tailThrow[1].v2 === null && tailThrow[4].a1 === 84 && tailThrow[5].a1 === 2,
+              'tail throw Handler effects');
+        check(tailThrow[0].queueCount === 1 && tailThrow[4].link === null,
+              'tail throw queue prefix');
+        check(tailThrow[4].id === ID_HANDLER_A && tailThrow[3].queue === tailThrow[6],
+              'tail throw target state');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_handler_v2_empty_preempt_preserves_effects_and_owners() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'handler v2 empty: ' + message;
+        }
+        function emptyDelivery(targetState, targetPriority, currentPriority, payload) {
+          var scheduler = new Scheduler();
+          var handler = new HandlerTask(scheduler);
+          var work = new Packet(null, ID_HANDLER_A, KIND_WORK);
+          work.a1 = 1;
+          work.a2[1] = payload;
+          var packet = new Packet(null, ID_WORKER, KIND_DEVICE);
+          var observed = { calls: 0, packet: null };
+          var target = new TaskControlBlock(null, ID_WORKER, targetPriority, null, {
+            run: function(value) {
+              observed.calls++;
+              observed.packet = value;
+              return null;
+            }
+          });
+          target.state = targetState;
+          var current = new TaskControlBlock(null, ID_HANDLER_A, currentPriority, null, handler);
+          current.state = STATE_RUNNING;
+          handler.v1 = work;
+          handler.v2 = packet;
+          scheduler.blocks[ID_WORKER] = target;
+          scheduler.blocks[ID_HANDLER_A] = null;
+          scheduler.list = current;
+          return [scheduler, handler, current, target, packet, work, observed];
+        }
+
+        // A held higher-priority target exposes the transaction after preemption without
+        // consuming the packet on the following scheduler iteration.
+        var held = emptyDelivery(STATE_SUSPENDED | STATE_HELD, 3, 2, 91);
+        var successor = new Packet(null, ID_DEVICE_A, KIND_DEVICE);
+        successor.a2[0] = 92;
+        held[4].link = successor;
+        held[0].schedule();
+        check(held[0].queueCount === 1, 'held queue count');
+        check(held[1].v2 === successor && held[4].link === null, 'held owner moves');
+        check(held[4].a1 === 91 && held[5].a1 === 2, 'held numeric writes');
+        check(held[4].id === ID_HANDLER_A, 'held packet id');
+        check(held[3].queue === held[4] && held[3].state === 7, 'held target publish');
+        check(held[6].calls === 0 && held[0].currentTcb === null, 'held preemption');
+
+        // The source successor may be the old current TCB. Its link owner moves to Handler.v2
+        // before Scheduler.current releases its separate owner.
+        var currentLink = emptyDelivery(STATE_SUSPENDED | STATE_HELD, 4, 2, 93);
+        currentLink[4].link = currentLink[2];
+        currentLink[0].schedule();
+        check(currentLink[1].v2 === currentLink[2], 'L=C survives current release');
+        check(currentLink[1].v2.priority === 2 && currentLink[4].link === null,
+              'L=C remains live');
+        check(currentLink[3].queue === currentLink[4], 'L=C packet move');
+
+        // A suspended target immediately consumes the newly queued packet after preemption.
+        var consume = emptyDelivery(STATE_SUSPENDED, 3, 2, 94);
+        consume[0].schedule();
+        check(consume[6].calls === 1 && consume[6].packet === consume[4],
+              'suspended target consumes identity');
+        check(consume[3].queue === null && consume[3].state === STATE_RUNNING,
+              'suspended target state');
+        check(consume[1].v2 === null && consume[4].a1 === 94, 'consume source writes');
+
+        // The runnable bit is read from the live global, not baked into generated code.
+        var oldRunnable = STATE_RUNNABLE;
+        STATE_RUNNABLE = 8;
+        var liveFlag = emptyDelivery(STATE_HELD, 5, 2, 95);
+        liveFlag[0].schedule();
+        STATE_RUNNABLE = oldRunnable;
+        check(liveFlag[3].queue === liveFlag[4] && liveFlag[3].state === 12,
+              'live runnable flag');
+
+        // Non-preemption deliberately replays, but all ordinary effects must still occur once.
+        var noPreempt = emptyDelivery(STATE_SUSPENDED | STATE_HELD, 1, 2, 96);
+        noPreempt[0].schedule();
+        check(noPreempt[0].queueCount === 1 && noPreempt[3].queue === noPreempt[4],
+              'nonpreempt queue');
+        check(noPreempt[3].state === 7 && noPreempt[4].a1 === 96,
+              'nonpreempt state and payload');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
+fn jit_scheduler_handler_v2_empty_preempt_replays_observable_guards_once() {
+    let src = [
+        include_str!("../../../v8-v7/base.js"),
+        include_str!("../../../v8-v7/richards.js"),
+        r#"
+        for (var i = 0; i < 110; i++) runRichards();
+        function check(value, message) {
+          if (!value) throw 'handler v2 empty guards: ' + message;
+        }
+        function emptyDelivery() {
+          var scheduler = new Scheduler();
+          var handler = new HandlerTask(scheduler);
+          var work = new Packet(null, ID_HANDLER_A, KIND_WORK);
+          work.a1 = 1;
+          work.a2[1] = 77;
+          var packet = new Packet(null, ID_WORKER, KIND_DEVICE);
+          var target = new TaskControlBlock(null, ID_WORKER, 3, null, {
+            run: function() { return null; }
+          });
+          target.state = STATE_SUSPENDED | STATE_HELD;
+          var current = new TaskControlBlock(null, ID_HANDLER_A, 2, null, handler);
+          current.state = STATE_RUNNING;
+          handler.v1 = work;
+          handler.v2 = packet;
+          scheduler.blocks[ID_WORKER] = target;
+          scheduler.blocks[ID_HANDLER_A] = null;
+          scheduler.list = current;
+          return [scheduler, handler, current, target, packet, work];
+        }
+
+        var originalMark = TaskControlBlock.prototype.markAsRunnable, markCalls = 0;
+        TaskControlBlock.prototype.markAsRunnable = function() {
+          markCalls++;
+          return originalMark.call(this);
+        };
+        var markCase = emptyDelivery();
+        markCase[0].schedule();
+        TaskControlBlock.prototype.markAsRunnable = originalMark;
+        check(markCalls === 1 && markCase[3].queue === markCase[4],
+              'mark replacement once');
+        check(markCase[3].state === 7, 'mark replacement state');
+
+        var stateCase = emptyDelivery(), stateValue = stateCase[3].state;
+        var stateGets = 0, stateSets = 0;
+        Object.defineProperty(stateCase[3], 'state', {
+          get: function() { stateGets++; return stateValue; },
+          set: function(value) { stateSets++; stateValue = value; }, configurable: true
+        });
+        stateCase[0].schedule();
+        check(stateGets > 0 && stateSets === 1 && stateValue === 7,
+              'state accessor effects');
+        check(stateCase[3].queue === stateCase[4], 'state accessor packet');
+
+        var targetPriority = emptyDelivery(), targetPriorityGets = 0;
+        Object.defineProperty(targetPriority[3], 'priority', {
+          get: function() { targetPriorityGets++; return 3; }, configurable: true
+        });
+        targetPriority[0].schedule();
+        check(targetPriorityGets === 1 && targetPriority[3].queue === targetPriority[4],
+              'target priority getter once');
+
+        // The throwing priority read happens after Handler, queue-prefix, target.queue, and
+        // markAsRunnable effects in ordinary source order, but before Scheduler.current changes.
+        var throwing = emptyDelivery(), currentPriorityGets = 0;
+        Object.defineProperty(throwing[2], 'priority', {
+          get: function() { currentPriorityGets++; throw 'priority boom'; }, configurable: true
+        });
+        var error = '';
+        try { throwing[0].schedule(); } catch (e) { error = e; }
+        check(error === 'priority boom' && currentPriorityGets === 1, 'priority throw once');
+        check(throwing[1].v2 === null && throwing[4].a1 === 77 && throwing[5].a1 === 2,
+              'priority throw Handler effects');
+        check(throwing[0].queueCount === 1 && throwing[4].link === null &&
+              throwing[4].id === ID_HANDLER_A, 'priority throw queue prefix');
+        check(throwing[3].queue === throwing[4] && throwing[3].state === 7,
+              'priority throw target effects');
+        check(throwing[0].currentTcb === throwing[2], 'priority throw current untouched');
+        'ok'
+        "#,
+    ]
+    .join("\n");
+    assert_eq!(run_jit(&src), "ok");
+}
+
+#[test]
 fn jit_reads_packed_dense_values_without_losing_identity() {
     assert_eq!(
         run_jit(
@@ -1619,6 +7350,49 @@ fn jit_compact_warmed_property_probes_deopt_cleanly() {
              alternate + ':' + accessor + ':' + read(child)"
         ),
         "2:7:9"
+    );
+}
+
+#[test]
+fn jit_numeric_property_chains_guard_live_values_and_shapes() {
+    assert_eq!(
+        run_jit(
+            "function below(o, n) { return o.x < n; }
+             function same(n) { return this.x === n; }
+             var a = { x: 3 }, holder = { x: 5 }, child = Object.create(holder);
+             var m = { x: 7, same: same };
+             for (var i = 0; i < 500; i++) {
+               below(a, 4); below(child, 6); m.same(7);
+             }
+             var warm = below(a, 4) + ':' + below(child, 6) + ':' + m.same(7);
+             a.x = '9';
+             var typeChange = below(a, 10);
+             var other = { pad: 0, x: 2 };
+             var shapeChange = below(other, 3);
+             Object.defineProperty(holder, 'x', { get: function () { return 11; } });
+             var accessor = below(child, 12);
+             m.x = 8;
+             var thisMutation = m.same(8);
+             var b = new ArrayBuffer(8), d = new DataView(b);
+             d.setUint32(0, 0x7ff80000); d.setUint32(4, 1);
+             var nan = { x: d.getFloat64(0) };
+             var nanResult = below(nan, 99);
+             var FLAG = 2;
+             function mark() { this.state = this.state | FLAG; return this.state; }
+             var state = { state: 1, mark: mark };
+             for (var i = 0; i < 500; i++) { state.state = 1; state.mark(); }
+             var stored = state.state;
+             state.state = '1'; var typeStore = state.mark();
+             var seen = 0;
+             Object.defineProperty(state, 'state', {
+               get: function () { return 1; },
+               set: function (v) { seen = v; }, configurable: true
+             });
+             state.mark();
+             [warm,typeChange,shapeChange,accessor,thisMutation,nanResult,
+              stored,typeStore,seen].join('|')"
+        ),
+        "true:true:true|true|true|true|true|false|3|3|3"
     );
 }
 
@@ -2228,6 +8002,78 @@ fn compiled_parameterless_arguments_object() {
         };
         assert_eq!(got, "3:a:c:true:a,b,c|true|TypeError");
     }
+}
+
+#[test]
+fn jit_function_apply_forwards_dense_arguments() {
+    // The ARM64 call intrinsic moves an unmapped, dense arguments list directly into a compiled
+    // target. A deleted entry must leave that path and preserve the inherited indexed getter.
+    assert_eq!(
+        run_jit(
+            "function sum(a,b,c){ return this.bias+a+b+c; }
+             var recv={bias:10};
+             function forward(){ return sum.apply(recv, arguments); }
+             var n=0;
+             for(var i=0;i<600;i++) n=forward(i,2,3);
+             Object.defineProperty(Object.prototype,'1',
+               {get:function(){return 20}, configurable:true});
+             function holey(){ delete arguments[1]; return sum.apply(recv,arguments); }
+             var h=holey(1,2,3);
+             delete Object.prototype['1'];
+             n+':'+h"
+        ),
+        "614:34"
+    );
+}
+
+#[test]
+fn jit_construct_arguments_apply_forwarder_preserves_live_guards() {
+    assert_eq!(
+        run_jit(
+            "function Wrapper(){this.initialize.apply(this,arguments);}
+             function init(a,b){this.sum=a+b;this.argc=arguments.length;return {replace:true};}
+             Wrapper.prototype.initialize=init;
+             var value;
+             for(var i=0;i<600;i++) value=new Wrapper(i,2);
+             var out=[value.sum,value.argc,value.replace===undefined];
+
+             var overrideCalls=0;
+             init.apply=function(recv,list){
+               overrideCalls++;
+               recv.sum=list[0]*list[1];
+               recv.argc=list.length;
+               return {replace:true};
+             };
+             value=new Wrapper(3,4);
+             out.push(value.sum,value.argc,overrideCalls,value.replace===undefined);
+             delete init.apply;
+
+             var applyGets=0;
+             Object.defineProperty(init,'apply',{
+               configurable:true,
+               get:function(){applyGets++;return Function.prototype.apply;}
+             });
+             value=new Wrapper(5,6);
+             out.push(value.sum,applyGets);
+             delete init.apply;
+
+             var initializeGets=0;
+             Object.defineProperty(Wrapper.prototype,'initialize',{
+               configurable:true,
+               get:function(){initializeGets++;return init;}
+             });
+             value=new Wrapper(7,8);
+             out.push(value.sum,initializeGets);
+
+             Object.defineProperty(Wrapper.prototype,'initialize',{
+               configurable:true,
+               get:function(){initializeGets++;throw new Error('getter');}
+             });
+             try{new Wrapper(1,2);}catch(e){out.push(e.message,initializeGets);}
+             out.join(':')"
+        ),
+        "601:2:true:12:2:1:true:11:1:15:1:getter:2"
+    );
 }
 
 #[test]
@@ -5100,6 +10946,24 @@ fn math_constants_and_hypot() {
     assert_eq!(run("Math.hypot(Infinity, NaN)"), "Infinity");
     assert_eq!(run("Math.hypot(3, 4)"), "5");
     assert_eq!(run("Number.isNaN(Math.hypot(NaN, 2))"), "true");
+}
+
+#[test]
+fn jit_math_sqrt_intrinsic_preserves_fallbacks_and_identity_guards() {
+    assert_eq!(
+        run_jit(
+            "function root(x){return Math.sqrt(x);}
+             var original=Math.sqrt, holder={sqrt:original};
+             function viaHolder(x){return holder.sqrt(x);}
+             for(var i=0;i<600;i++){root(i);viaHolder(i);}
+             var coercions=0, object={valueOf:function(){coercions++;return 25;}};
+             var before=[root(81),1/root(-0),Number.isNaN(root(-1)),
+                         root('16'),root(object),coercions,viaHolder(49)].join(':');
+             Math.sqrt=function(x){return x+1;};
+             before+':'+root(4)"
+        ),
+        "9:-Infinity:true:4:5:1:7:5"
+    );
 }
 
 #[test]
@@ -10075,6 +15939,44 @@ fn loop_chain_int_kernel() {
 }
 
 #[test]
+fn loop_chain_name_probe_does_not_clobber_sixth_integer_home() {
+    // The name IC probe uses x7 as its packed/wide marker. A region with six integer-resident
+    // locals also assigns x7, so captured/global names must be validated before local homes are
+    // populated. This four-receiver stencil is the pressure shape that exposed the overwrite.
+    assert_eq!(
+        run_jit(
+            "var width = 6, rowSize = 8;
+             function project(u, v, p, div, h, j) {
+               var row = j * rowSize;
+               var previousRow = (j - 1) * rowSize;
+               var prevValue = row - 1;
+               var currentRow = row;
+               var nextValue = row + 1;
+               var nextRow = (j + 1) * rowSize;
+               for (var i = 1; i <= width; i++) {
+                 div[++currentRow] =
+                   h * (u[++nextValue] - u[++prevValue] +
+                        v[++nextRow] - v[++previousRow]);
+                 p[currentRow] = 0;
+               }
+             }
+             var u = [], v = [], p = [], div = [];
+             for (var k = 0; k < 100; k++) {
+               u[k] = k * 0.25 + 1;
+               v[k] = k * -0.125 + 3;
+               p[k] = 9;
+               div[k] = 7;
+             }
+             for (var r = 0; r < 40; r++) project(u, v, p, div, -0.1, 3);
+             var out = [];
+             for (var n = 24; n <= 30; n++) out.push(div[n] + ':' + p[n]);
+             out.join('|')"
+        ),
+        "7:9|0.15000000000000002:0|0.15000000000000002:0|0.15000000000000002:0|0.15000000000000002:0|0.15000000000000002:0|0.15000000000000002:0"
+    );
+}
+
+#[test]
 fn loop_chain_zero_trip_and_bails() {
     // Zero-trip: virgin locals keep their pre-loop values (nothing sanitized or flushed).
     assert_eq!(
@@ -10170,6 +16072,140 @@ fn loop_chain_elem_dedup_and_aliasing() {
              f(x, x, 6)"
         ),
         "266"
+    );
+}
+
+#[test]
+fn jit_bitnot_numeric_fast_path_and_coercion_bails() {
+    // Exercise signed boundaries, modulo-2^32 behavior, fractional truncation and the values
+    // that must bail out of the machine template to full ToNumber/ToInt32 semantics.
+    assert_eq!(
+        run_jit(
+            "function f(x) { return ~x; }
+             var hot = 0;
+             for (var i = 0; i < 200; i++) hot = f(i);
+             [f(0), f(-1), f(2147483647), f(2147483648),
+              f(4294967295), f(4294967296), f(3.9), f(-3.9),
+              f(NaN), f(Infinity), f(-Infinity), f('7'),
+              f({ valueOf: function () { return 9; } })].join(':')"
+        ),
+        "-1:0:-2147483648:2147483647:0:-1:-4:2:-1:-1:-1:-8:-10"
+    );
+    assert_eq!(
+        run_jit(
+            "function f(x) { return ~x; }
+             for (var i = 0; i < 100; i++) f(i);
+             String(f(1n))"
+        ),
+        "-2"
+    );
+    assert_eq!(
+        run_jit(
+            "function f(x) { return ~x; }
+             for (var i = 0; i < 100; i++) f(i);
+             try { f(Symbol('x')); 'no throw' } catch (e) { e.name }"
+        ),
+        "TypeError"
+    );
+}
+
+#[test]
+fn jit_plain_object_templates_move_values_without_aliasing() {
+    // Repeated literal sites must retain independent descriptors and owned refcounted values.
+    // Numeric-looking keys also exercise the template's dense lookup sidecar copy.
+    assert_eq!(
+        run_jit(
+            "function make(i) {
+               var child = { value: i };
+               return { alpha: 'v' + i, child: child, 0: i + 10, omega: [i] };
+             }
+             var first = make(1), last, checksum = 0;
+             for (var i = 0; i < 2000; i++) {
+               last = make(i);
+               checksum += last.child.value + last[0] + last.omega[0];
+             }
+             last.alpha = 'changed'; last.child.value = 99; last.omega[0] = 88;
+             [checksum, first.alpha, first.child.value, first[0], first.omega[0],
+              last.alpha, last.child.value, last.omega[0], Object.keys(first).join(',')].join(':')"
+        ),
+        "6017000:v1:1:11:1:changed:99:88:0,alpha,child,omega"
+    );
+}
+
+#[test]
+fn jit_direct_calls_support_wide_argument_lists() {
+    // More than eight arguments used to force every hot call through the layered Rust path.
+    // Keep refcounted operands, method receivers, nested wide calls and an unwind in the test:
+    // these pin the move/drop ownership rules on both successful and throwing exits.
+    assert_eq!(
+        run_jit(
+            "function sum12(a,b,c,d,e,f,g,h,i,j,k,l) {
+               return a+b+c+d+e+f+g+h+i+j+k+l;
+             }
+             function wrap12(a,b,c,d,e,f,g,h,i,j,k,l) {
+               return sum12(a,b,c,d,e,f,g,h,i,j,k,l);
+             }
+             var obj = {
+               base: 100,
+               join12: function(a,b,c,d,e,f,g,h,i,j,k,l) {
+                 if (a === 'throw') throw new Error(k.tag);
+                 return this.base + ':' + a.tag+b.tag+c.tag+d.tag+e.tag+f.tag+
+                        g.tag+h.tag+i.tag+j.tag+k.tag+l.tag;
+               }
+             };
+             var nums = 0, text = '';
+             for (var r = 0; r < 500; r++) {
+               nums = wrap12(1,2,3,4,5,6,7,8,9,10,11,12);
+               text = obj.join12({tag:'a'},{tag:'b'},{tag:'c'},{tag:'d'},
+                                 {tag:'e'},{tag:'f'},{tag:'g'},{tag:'h'},
+                                 {tag:'i'},{tag:'j'},{tag:'k'},{tag:'l'});
+             }
+             var caught;
+             try { obj.join12('throw',{tag:'b'},{tag:'c'},{tag:'d'},
+                              {tag:'e'},{tag:'f'},{tag:'g'},{tag:'h'},
+                              {tag:'i'},{tag:'j'},{tag:'boom'},{tag:'l'}); }
+             catch (e) { caught = e.message; }
+             nums + '|' + text + '|' + caught"
+        ),
+        "78|100:abcdefghijkl|boom"
+    );
+}
+
+#[test]
+fn jit_slice_and_hasown_intrinsics_preserve_slow_paths() {
+    assert_eq!(
+        run_jit(
+            "function cut(s, a, b) { return s.slice(a, b); }
+             var out = '';
+             for (var i = 0; i < 400; i++) out = cut('abcdefghij', 2, 7);
+             var coerced = 0;
+             var bound = { valueOf: function () { coerced++; return 3; } };
+             [out, cut('abcdefghij', -4, 99), cut('abcdefghij', NaN, 2),
+              cut('åbcdef', 1, 4), cut('abcdef', bound, 5), coerced].join(':')"
+        ),
+        "cdefg:ghij:ab:bcd:de:1"
+    );
+    assert_eq!(
+        run_jit(
+            "function own(o, k) { return Object.hasOwn(o, k); }
+             var o = { alpha: 1, beta: 2 };
+             var v;
+             for (var i = 0; i < 400; i++) v = own(o, i & 1 ? 'alpha' : 'missing');
+             var sym = Symbol('s'); o[sym] = 3;
+             var before = own(o, 'alpha') + ':' + own(o, 'missing') + ':' + own(o, sym);
+             delete o.alpha;
+             var deleted = own(o, 'alpha');
+             o.alpha = 4;
+             var restored = own(o, 'alpha');
+             var saved = Object.hasOwn;
+             Object.hasOwn = function () { return 'changed'; };
+             var changed = own(o, 'alpha');
+             Object.hasOwn = saved;
+             var thrown;
+             try { own(1, 'x'); } catch (e) { thrown = e.name; }
+             before + ':' + deleted + ':' + restored + ':' + changed + ':' + thrown"
+        ),
+        "true:false:true:false:true:changed:TypeError"
     );
 }
 
@@ -10305,6 +16341,348 @@ fn inline_throw_from_spliced_body() {
              s + ':' + caught"
         ),
         "450:true"
+    );
+}
+
+#[test]
+fn inline_recompile_preserves_monomorphic_and_polymorphic_property_sites() {
+    // The second-stage compiler seeds property ICs from the hot source chunks. Own-field reads
+    // should remain monomorphic after splicing, while the shared virtual-call site must retain
+    // every observed receiver shape instead of baking only its most recent way.
+    assert_eq!(
+        run_jit(
+            "function A(x) { this.x = x; }
+             function B(x) { this.x = x; this.pad = 1; }
+             function C(x) { this.x = x; this.pad = 1; this.more = 2; }
+             A.prototype.run = function(n) { return this.x + n; };
+             B.prototype.run = function(n) { return this.x - n; };
+             C.prototype.run = function(n) { return this.x * n; };
+             function dispatch(task, n) { return task.run(n); }
+             function mono(task, n) { return task.x + n; }
+             var tasks = [new A(10), new B(20), new C(3)];
+             var sum = 0;
+             for (var i = 0; i < 600; i++) {
+               sum += dispatch(tasks[i % 3], 2);
+               sum += mono(tasks[0], 1);
+             }
+             sum"
+        ),
+        "13800"
+    );
+}
+
+#[test]
+fn inline_recompile_preserves_four_way_call_sites_across_epoch_refill() {
+    // `dispatch`'s second-stage compile guards all four observed method identities and must also
+    // carry the four-way CallIc profile into its generic guard tail.  A fifth identity takes that
+    // tail, then an unrelated inline compile bumps CALL_IC_EPOCH.  The copied entry must
+    // miss/refill at the new epoch and execute the replacement exactly once per invocation.
+    assert_eq!(
+        run_jit(
+            "function f0(x) { return x + 1; }
+             function f1(x) { return x + 2; }
+             function f2(x) { return x + 3; }
+             function f3(x) { return x + 4; }
+             var tasks = [{ run: f0 }, { run: f1 }, { run: f2 }, { run: f3 }];
+             function dispatch(task, x) { return task.run(x); }
+             function outer(task, x) { return dispatch(task, x); }
+             for (var i = 0; i < 800; i++) outer(tasks[i & 3], i & 7);
+
+             function check(value, message) {
+               if (!value) throw 'seeded call cache: ' + message;
+             }
+             check([outer(tasks[0], 10), outer(tasks[1], 10),
+                    outer(tasks[2], 10), outer(tasks[3], 10)].join(',') ===
+                   '11,12,13,14', 'four inherited ways');
+
+             var replacementHits = 0;
+             tasks[1].run = function (x) { replacementHits++; return x * 10; };
+             check(outer(tasks[1], 7) === 70 && replacementHits === 1,
+                   'fifth callee deopt');
+
+             // Compiling this independent caller produces another second-stage chunk and bumps
+             // the process-wide call epoch after the replacement entry above was filled.
+             function epochLeaf(x) { return x + 100; }
+             function epochDriver(x) { return epochLeaf(x); }
+             function epochOuter(x) { return epochDriver(x); }
+             for (var i = 0; i < 400; i++) epochOuter(i);
+
+             check(outer(tasks[1], 8) === 80 && replacementHits === 2,
+                   'epoch miss refilled once');
+             check(outer(tasks[1], 9) === 90 && replacementHits === 3,
+                   'refilled replacement hit');
+             var secondHits = 0;
+             tasks[3].run = function (x) { secondHits++; return x * 100; };
+             check(outer(tasks[3], 6) === 600 && secondHits === 1,
+                   'post-epoch method mutation');
+             check(outer(tasks[0], 5) === 6 && outer(tasks[2], 5) === 8,
+                   'original inline ways remain live');
+             'ok'"
+        ),
+        "ok"
+    );
+}
+
+#[test]
+fn inline_seeded_call_cache_pins_dead_callee_addresses() {
+    // The four dynamic targets contain handlers, so they cannot be spliced.  The small `leaf`
+    // call still causes `dispatch` to receive a second-stage compile, where its generic function
+    // call inherits all four CallIc entries and their Weak address pins.  After an epoch refill,
+    // drop every target and allocate many fresh closures: no recycled address may turn a new
+    // function into a stale identity hit (the classic raw-pointer ABA failure).
+    assert_eq!(
+        run_jit(
+            "var OLD_HITS = [0, 0, 0, 0];
+             var oldFns = [
+               Function('x', 'OLD_HITS[0]++; try { return x + 1; } catch (e) { return -1; }'),
+               Function('x', 'OLD_HITS[1]++; try { return x + 2; } catch (e) { return -1; }'),
+               Function('x', 'OLD_HITS[2]++; try { return x + 3; } catch (e) { return -1; }'),
+               Function('x', 'OLD_HITS[3]++; try { return x + 4; } catch (e) { return -1; }')
+             ];
+             function leaf(x) { return x * 2; }
+             function dispatch(fn, x) { return leaf(fn(x)); }
+             function outer(fn, x) { return dispatch(fn, x); }
+             for (var i = 0; i < 800; i++) outer(oldFns[i & 3], i & 7);
+
+             function epochLeaf(x) { return x - 1; }
+             function epochDriver(x) { return epochLeaf(x); }
+             function epochOuter(x) { return epochDriver(x); }
+             for (var i = 0; i < 400; i++) epochOuter(i);
+             for (var i = 0; i < 4; i++) {
+               if (outer(oldFns[i], 10) !== (11 + i) * 2)
+                 throw 'dead call seed: stale epoch refill ' + i;
+             }
+             if (OLD_HITS.join(',') !== '201,201,201,201')
+               throw 'dead call seed: wrong old hit counts ' + OLD_HITS.join(',');
+
+             oldFns = null;
+             function makeFresh(k) { return function (x) { return k + x; }; }
+             var churn = [];
+             for (var i = 0; i < 512; i++) churn[i] = makeFresh(1000 + i);
+             for (var i = 0; i < churn.length; i++) {
+               if (outer(churn[i], 1) !== (1001 + i) * 2)
+                 throw 'dead call seed: recycled callee ' + i;
+             }
+             var replacementHits = 0;
+             var replacement = function (x) { replacementHits++; return x * 3; };
+             if (outer(replacement, 4) !== 24 ||
+                 outer(replacement, 5) !== 30 || replacementHits !== 2)
+               throw 'dead call seed: final refill';
+             'ok'"
+        ),
+        "ok"
+    );
+}
+
+#[test]
+fn jit_peek_truthiness_covers_all_value_kinds() {
+    // `&&`, `||`, and `??` keep the tested value on the operand stack. Their ARM64 path checks
+    // common tags without taking ownership; BigInt and HTMLDDA deliberately exercise the helper
+    // fallback while nullish coalescing must still treat HTMLDDA as a non-nullish object.
+    assert_eq!(
+        run_jit(
+            "function flags(v) {
+               return (v ? 100 : 0) + ((v && true) ? 10 : 0) +
+                      (((v ?? null) === null) ? 0 : 1);
+             }
+             var values = [undefined, null, false, true, 0, NaN, 1, '', 'x',
+                           Symbol(), {}, 0n, 1n, $262.IsHTMLDDA];
+             for (var r = 0; r < 300; r++) {
+               for (var i = 0; i < values.length; i++) flags(values[i]);
+             }
+             values.map(flags).join(',')"
+        ),
+        "0,0,1,111,1,1,111,1,111,111,111,1,111,1"
+    );
+}
+
+#[test]
+fn jit_local_equality_branch_preserves_coercion_and_htmldda() {
+    // The local/local branch fusion handles borrowed object identity and nullish values. Mixed
+    // coercing pairs, TDZ, and the HTMLDDA nullish exception must retain the checked helpers.
+    assert_eq!(
+        run_jit(
+            "function ne(a,b){if(a!=b)return 1;return 0;}
+             function eq(a,b){if(a==b)return 1;return 0;}
+             function sne(a,b){if(a!==b)return 1;return 0;}
+             function seq(a,b){if(a===b)return 1;return 0;}
+             var a={}, b={};
+             for(var i=0;i<600;i++){
+               ne(a,null); ne(a,b); eq(a,a); sne(a,null); seq(a,a);
+             }
+             var coercions=0;
+             var c={valueOf:function(){coercions++;return 7;}};
+             [ne(a,a),ne(a,b),ne(a,null),ne(null,undefined),ne(null,0),
+              ne($262.IsHTMLDDA,null),ne(c,7),coercions,
+              eq(a,a),eq(a,b),eq($262.IsHTMLDDA,null),
+              sne(a,a),sne(a,b),sne(null,undefined),
+              seq(a,a),seq(a,b),seq(null,undefined)].join(':')"
+        ),
+        "0:1:1:0:1:0:0:1:1:0:1:0:1:1:1:0:0"
+    );
+}
+
+#[test]
+fn jit_inlined_equality_return_threads_into_caller_condition() {
+    // After speculative inlining, a callee's returned equality result reaches the caller's
+    // shared `if` condition through an unconditional join. The JIT may thread that edge and
+    // branch on equality directly, including the coercing slow path, without materializing a
+    // temporary Bool or disturbing other predecessors of the join.
+    assert_eq!(
+        run_jit(
+            "function isOne() { return this.x == 1; }
+             function choose(o) { if (o.isOne()) return 7; return 3; }
+             var a = { x: 1, isOne: isOne };
+             var b = { x: '1', isOne: isOne };
+             var c = { x: 2, isOne: isOne };
+             var sum = 0;
+             for (var i = 0; i < 600; i++) sum += choose(i % 3 === 0 ? a : i % 3 === 1 ? b : c);
+             sum"
+        ),
+        "3400"
+    );
+}
+
+#[test]
+fn jit_seeded_numeric_name_cache_reads_live_mutations() {
+    // Second-stage chunks inherit the hot global-name cache and its observed numeric bits. The
+    // generated path must compare the live packed property every time: assigning a new value
+    // after recompilation falls back to the generic decoder instead of baking a constant.
+    assert_eq!(
+        run_jit(
+            "var HOT_NUMBER = 11;
+             function readHot() { return HOT_NUMBER; }
+             function outer() { return readHot() + 1; }
+             var before;
+             for (var i = 0; i < 400; i++) before = outer();
+             HOT_NUMBER = 40;
+             before + ':' + outer()"
+        ),
+        "12:41"
+    );
+}
+
+#[test]
+fn jit_cached_name_updates_and_stores_preserve_live_guards() {
+    assert_eq!(
+        run_jit(
+            "function localCase() {
+               let x=0, held={id:1}, coercions=0;
+               function post(){return x++;}
+               function pre(){return ++x;}
+               function setX(v){x=v;}
+               function current(){return x;}
+               function setHeld(v){held=v;return held;}
+               for(var i=0;i<600;i++) post();
+               var p=post(), q=pre();
+               setX({valueOf:function(){coercions++;return 9;}});
+               var r=post(), old=held, next={id:2};
+               return [p,q,r,current(),coercions,setHeld(next)===next,old.id].join(':');
+             }
+             globalThis.JIT_NAME_GLOBAL=0;
+             function setGlobal(v){JIT_NAME_GLOBAL=v;}
+             function incGlobal(){return JIT_NAME_GLOBAL++;}
+             for(var i=0;i<600;i++) setGlobal(i);
+             var before=JIT_NAME_GLOBAL, gets=0, sets=0, setterSeen=-1;
+             Object.defineProperty(globalThis,'JIT_NAME_GLOBAL',{
+               configurable:true,
+               get:function(){gets++;return 40;},
+               set:function(v){sets++;setterSeen=v;}
+             });
+             setGlobal(9);
+             var old=incGlobal();
+             var accessor=[before,setterSeen,old,JIT_NAME_GLOBAL,gets,sets].join(':');
+             Object.defineProperty(globalThis,'JIT_NAME_GLOBAL',{
+               configurable:true,value:7,writable:false
+             });
+             setGlobal(99);
+             localCase()+'|'+accessor+':'+JIT_NAME_GLOBAL"
+        ),
+        "600:602:9:10:1:true:1|599:41:40:40:2:2:7"
+    );
+}
+
+#[test]
+fn jit_array_push_pop_intrinsics_preserve_live_guards_and_ownership() {
+    assert_eq!(
+        run_jit(
+            "function pushOne(a,v){return a.push(v);}
+             function popOne(a){return a.pop();}
+             var warm=[];
+             for(var i=0;i<700;i++) pushOne(warm,{id:i});
+             for(var i=0;i<700;i++) popOne(warm);
+
+             var held={id:41}, a=[];
+             var n=pushOne(a,held), same=a[0]===held, out=popOne(a);
+
+             var generic={length:0,push:Array.prototype.push};
+             var gn=pushOne(generic,17);
+
+             var setterSeen=-1;
+             Object.defineProperty(Array.prototype,'0',{
+               configurable:true,set:function(v){setterSeen=v;}
+             });
+             var guarded=[], sn=pushOne(guarded,23);
+             delete Array.prototype[0];
+
+             var locked=[];
+             Object.defineProperty(locked,'length',{writable:false});
+             var pushThrew=false;
+             try{pushOne(locked,1);}catch(e){pushThrew=e instanceof TypeError;}
+
+             var fixed=[];
+             Object.defineProperty(fixed,'0',{
+               value:9,writable:true,enumerable:true,configurable:false
+             });
+             fixed.length=1;
+             var popThrew=false;
+             try{popOne(fixed);}catch(e){popThrew=e instanceof TypeError;}
+
+             var overridden=[];
+             overridden.push=function(v){return v+100;};
+             var override=pushOne(overridden,5);
+             [n,same,out===held,a.length,gn,generic[0],generic.length,
+              sn,setterSeen,guarded.length,guarded.hasOwnProperty('0'),
+              pushThrew,locked.length,popThrew,fixed.length,override].join(':')"
+        ),
+        "1:true:true:0:1:17:1:1:23:1:false:true:0:true:1:105"
+    );
+}
+
+#[test]
+fn jit_function_call_intrinsic_preserves_target_and_receiver_guards() {
+    assert_eq!(
+        run_jit(
+            "function target(x){this.sum+=x;return this;}
+             function via(f,t,x){return f.call(t,x);}
+             function target2(x,y){this.sum+=x*y;return this;}
+             function via2(f,t,x,y){return f.call(t,x,y);}
+             var box={sum:0}, same=true;
+             for(var i=0;i<700;i++) same=same&&(via(target,box,1)===box);
+             var pair={sum:0}, pairSame=true;
+             for(var i=0;i<700;i++) pairSame=pairSame&&(via2(target2,pair,2,3)===pair);
+
+             function closure(seed){return function(x){this.sum+=seed+x;return this;};}
+             var closed=closure(3), cbox={sum:0};
+             var cv=via(closed,cbox,4)===cbox;
+
+             function boom(x){throw x;}
+             var thrown=-1;
+             try{via(boom,box,91);}catch(e){thrown=e;}
+
+             var own=function(x){return x;};
+             own.call=function(t,x){return t.base+x+100;};
+             var overridden=via(own,{base:5},6);
+
+             var trapCount=0;
+             var prox=new Proxy(function(x){return x;},{
+               apply:function(t,receiver,args){trapCount++;return receiver.base+args[0];}
+             });
+             var proxyValue=via(prox,{base:8},9);
+             [same,box.sum,pairSame,pair.sum,cv,cbox.sum,thrown,
+              overridden,proxyValue,trapCount].join(':')"
+        ),
+        "true:700:true:4200:true:7:91:111:17:1"
     );
 }
 

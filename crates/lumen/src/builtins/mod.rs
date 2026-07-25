@@ -29,6 +29,9 @@ mod shadowrealm;
 mod typedarray;
 mod weakrefs;
 
+pub(crate) use math::nf_math_sqrt;
+pub(crate) use function_proto::nf_function_call;
+
 /// `args[i]` or `undefined`.
 fn arg(args: &[Value], i: usize) -> Value {
     args.get(i).cloned().unwrap_or(Value::Undefined)
@@ -52,6 +55,46 @@ pub(crate) fn default_has_instance(
     a: &[Value],
 ) -> Result<Value, Value> {
     Ok(Value::Bool(ab(i.ordinary_has_instance(&this, &arg(a, 0)))?))
+}
+
+/// `Function.prototype.apply` is named so the JIT call cache can recognize the unmodified
+/// intrinsic and bypass this native frame for the common dense-arguments → compiled-function
+/// case. The JIT helper falls back to this exact implementation whenever its guards do not hold.
+pub(crate) fn nf_function_apply(
+    i: &mut Interp,
+    this: Value,
+    args: &[Value],
+) -> Result<Value, Value> {
+    let this_arg = arg(args, 0);
+    let list = match arg(args, 1) {
+        Value::Undefined | Value::Null => Vec::new(),
+        Value::Obj(o) => {
+            let len = ab(i.checked_array_len(&o))?;
+            let mut v = Vec::with_capacity(len);
+            let direct_dense = i.ordinary_get_ptr(Rc::as_ptr(&o) as usize)
+                && !i.mapped_arguments.contains_key(&(Rc::as_ptr(&o) as usize));
+            for k in 0..len {
+                // Arrays and unmapped arguments objects overwhelmingly contain plain own dense
+                // entries. Read those by slot: the generic path allocates a decimal key and walks
+                // the prototype chain for every argument. Holes, accessors, proxies, typed
+                // arrays, and mapped arguments retain full [[Get]] semantics.
+                let own = direct_dense.then(|| {
+                    let b = o.borrow();
+                    b.props
+                        .get_index(k as u32)
+                        .filter(|p| !p.accessor())
+                        .map(|p| p.value())
+                });
+                match own.flatten() {
+                    Some(value) => v.push(value),
+                    None => v.push(ab(i.get_member(&Value::Obj(o.clone()), &k.to_string()))?),
+                }
+            }
+            v
+        }
+        _ => return Err(i.make_error("TypeError", "apply: argument list must be array-like")),
+    };
+    ab(i.call(this, this_arg, &list))
 }
 
 fn this_obj(this: &Value) -> Option<Gc> {
@@ -3307,15 +3350,7 @@ fn install_object(it: &mut Interp) {
         .props
         .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
 
-    it.def_method(&ctor, "hasOwn", 2, |i, _this, args| {
-        let o = match arg(args, 0) {
-            Value::Obj(o) => o,
-            _ => return Err(i.make_error("TypeError", "Object.hasOwn called on non-object")),
-        };
-        let key = ab(i.to_property_key(&arg(args, 1)))?;
-        let has = o.borrow().props.contains(&key);
-        Ok(Value::Bool(has))
-    });
+    it.def_method(&ctor, "hasOwn", 2, nf_object_has_own);
     it.def_method(&ctor, "groupBy", 2, |i, _this, args| {
         let cb = arg(args, 1);
         if !cb.is_callable() {
@@ -3739,6 +3774,21 @@ fn install_object(it: &mut Interp) {
     });
 
     set_builtin(&it.global, "Object", Value::Obj(ctor));
+}
+
+/// Named entry so the bytecode call cache can recognize and specialize `Object.hasOwn`.
+pub(crate) fn nf_object_has_own(
+    i: &mut Interp,
+    _this: Value,
+    args: &[Value],
+) -> Result<Value, Value> {
+    let o = match arg(args, 0) {
+        Value::Obj(o) => o,
+        _ => return Err(i.make_error("TypeError", "Object.hasOwn called on non-object")),
+    };
+    let key = ab(i.to_property_key(&arg(args, 1)))?;
+    let has = o.borrow().props.contains(&key);
+    Ok(Value::Bool(has))
 }
 
 /// TestIntegrityLevel: extensibility plus per-key configurability (and, for frozen, data-property
@@ -4356,110 +4406,195 @@ fn install_array(it: &mut Interp) {
             .insert(key, Property::data(Value::Obj(un), false, false, true));
     }
 
-    it.def_method(&ap, "push", 1, |i, this, args| {
-        let o = arr_to_object(i, &this)?;
-        // Dense fast path: a plain array whose `length` is a writable own data property and
-        // whose tail is exactly the dense frontier appends in place — no key strings, no
-        // existence scans, no observable coercions (a whole-number own `length` needs none).
-        if matches!(o.borrow().exotic, Exotic::Array)
-            && i.ordinary_get_ptr(Rc::as_ptr(&o) as usize)
-            && i.array_append_unshadowed(&o)
-        {
-            let mut b = o.borrow_mut();
-            let len = match b.props.length_property() {
-                Some(p) if !p.accessor() && p.writable() => match p.value() {
-                    Value::Num(n) if n.trunc() == n && (0.0..=u32::MAX as f64).contains(&n) => {
-                        Some(n as u32)
-                    }
-                    _ => None,
-                },
+    it.def_method(&ap, "push", 1, nf_array_push);
+    it.def_method(&ap, "pop", 0, nf_array_pop);
+    install_array_rest(it, &ap);
+}
+
+pub(crate) fn nf_array_push(
+    i: &mut Interp,
+    this: Value,
+    args: &[Value],
+) -> Result<Value, Value> {
+    let o = arr_to_object(i, &this)?;
+    // Dense fast path: a plain array whose `length` is a writable own data property and
+    // whose tail is exactly the dense frontier appends in place — no key strings, no
+    // existence scans, no observable coercions (a whole-number own `length` needs none).
+    if matches!(o.borrow().exotic, Exotic::Array)
+        && i.ordinary_get_ptr(Rc::as_ptr(&o) as usize)
+        && i.array_append_unshadowed(&o)
+    {
+        let mut b = o.borrow_mut();
+        let len = match b.props.length_property() {
+            Some(p) if !p.accessor() && p.writable() => match p.value() {
+                Value::Num(n) if n.trunc() == n && (0.0..=u32::MAX as f64).contains(&n) => {
+                    Some(n as u32)
+                }
                 _ => None,
-            };
-            if let Some(mut len) = len {
-                if (len as u64 + args.len() as u64) <= u32::MAX as u64 {
-                    let mut ok = true;
-                    for a in args {
-                        if b.props.append_element(len, Property::plain(a.clone())) {
-                            len += 1;
-                        } else {
-                            ok = false;
-                            break;
-                        }
-                    }
-                    // Sync length up to what actually landed (partial success still moved it).
-                    if !matches!(b.props.length_property().map(|p| p.value()),
-                                 Some(Value::Num(n)) if n == len as f64)
-                    {
-                        let s = b.props.slot_of("length").unwrap();
-                        b.props
-                            .entry_at_mut(s)
-                            .unwrap()
-                            .1
-                            .set_value(Value::Num(len as f64));
-                    }
-                    if ok {
-                        return Ok(Value::Num(len as f64));
+            },
+            _ => None,
+        };
+        if let Some(mut len) = len {
+            if (len as u64 + args.len() as u64) <= u32::MAX as u64 {
+                let mut ok = true;
+                for a in args {
+                    if b.props.append_element(len, Property::plain(a.clone())) {
+                        len += 1;
+                    } else {
+                        ok = false;
+                        break;
                     }
                 }
-            }
-        }
-        let ov = Value::Obj(o.clone());
-        // `push` only writes at the tail, so a huge array-like length is fine (use ToLength, not the
-        // engine's materialization cap).
-        let mut len = ab(i.to_length(&o))? as u64;
-        // The resulting length may not exceed 2^53-1.
-        if len + args.len() as u64 > 9007199254740991 {
-            return Err(i.make_error("TypeError", "push would exceed the maximum array length"));
-        }
-        for a in args {
-            set_throw(i, &ov, &len.to_string(), a.clone())?;
-            len += 1;
-        }
-        // Generic objects don't auto-track length the way arrays do, so set it explicitly.
-        set_throw(i, &ov, "length", Value::Num(len as f64))?;
-        Ok(Value::Num(len as f64))
-    });
-    it.def_method(&ap, "pop", 0, |i, this, _args| {
-        let o = arr_to_object(i, &this)?;
-        // Dense fast path (mirror of push's): take the last element straight off the entries
-        // tail — no key strings, no hash lookups, and crucially NO shape reset, so the array's
-        // inline caches survive a pop (stack-discipline arrays live on push/pop).
-        if matches!(o.borrow().exotic, Exotic::Array) && i.ordinary_get_ptr(Rc::as_ptr(&o) as usize)
-        {
-            let mut b = o.borrow_mut();
-            let len = match b.props.length_property() {
-                Some(p) if !p.accessor() && p.writable() => match p.value() {
-                    Value::Num(n) if n.trunc() == n && (1.0..=u32::MAX as f64).contains(&n) => {
-                        Some(n as u32)
-                    }
-                    _ => None,
-                },
-                _ => None,
-            };
-            if let Some(len) = len {
-                if let Some(v) = b.props.pop_last_element(len - 1) {
+                // Sync length up to what actually landed (partial success still moved it).
+                if !matches!(b.props.length_property().map(|p| p.value()),
+                             Some(Value::Num(n)) if n == len as f64)
+                {
                     let s = b.props.slot_of("length").unwrap();
                     b.props
                         .entry_at_mut(s)
                         .unwrap()
                         .1
-                        .set_value(Value::Num((len - 1) as f64));
-                    return Ok(v);
+                        .set_value(Value::Num(len as f64));
+                }
+                if ok {
+                    return Ok(Value::Num(len as f64));
                 }
             }
         }
-        let ov = Value::Obj(o.clone());
-        // `pop` only touches the last index, so a huge array-like length is fine (use ToLength).
-        let len = ab(i.to_length(&o))?;
-        if len == 0 {
-            set_throw(i, &ov, "length", Value::Num(0.0))?;
-            return Ok(Value::Undefined);
+    }
+    let ov = Value::Obj(o.clone());
+    // `push` only writes at the tail, so a huge array-like length is fine (use ToLength, not the
+    // engine's materialization cap).
+    let mut len = ab(i.to_length(&o))? as u64;
+    // The resulting length may not exceed 2^53-1.
+    if len + args.len() as u64 > 9007199254740991 {
+        return Err(i.make_error("TypeError", "push would exceed the maximum array length"));
+    }
+    for a in args {
+        set_throw(i, &ov, &len.to_string(), a.clone())?;
+        len += 1;
+    }
+    // Generic objects don't auto-track length the way arrays do, so set it explicitly.
+    set_throw(i, &ov, "length", Value::Num(len as f64))?;
+    Ok(Value::Num(len as f64))
+}
+
+pub(crate) fn nf_array_pop(
+    i: &mut Interp,
+    this: Value,
+    _args: &[Value],
+) -> Result<Value, Value> {
+    let o = arr_to_object(i, &this)?;
+    // Dense fast path (mirror of push's): take the last element straight off the entries
+    // tail — no key strings, no hash lookups, and crucially NO shape reset, so the array's
+    // inline caches survive a pop (stack-discipline arrays live on push/pop).
+    if matches!(o.borrow().exotic, Exotic::Array) && i.ordinary_get_ptr(Rc::as_ptr(&o) as usize) {
+        let mut b = o.borrow_mut();
+        let len = match b.props.length_property() {
+            Some(p) if !p.accessor() && p.writable() => match p.value() {
+                Value::Num(n) if n.trunc() == n && (1.0..=u32::MAX as f64).contains(&n) => {
+                    Some(n as u32)
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(len) = len {
+            if let Some(v) = b.props.pop_last_element(len - 1) {
+                let s = b.props.slot_of("length").unwrap();
+                b.props
+                    .entry_at_mut(s)
+                    .unwrap()
+                    .1
+                    .set_value(Value::Num((len - 1) as f64));
+                return Ok(v);
+            }
         }
-        let last = ab(i.get_member(&ov, &(len - 1).to_string()))?;
-        delete_or_throw(i, &ov, &(len - 1).to_string())?;
-        set_throw(i, &ov, "length", Value::Num((len - 1) as f64))?;
-        Ok(last)
-    });
+    }
+    let ov = Value::Obj(o.clone());
+    // `pop` only touches the last index, so a huge array-like length is fine (use ToLength).
+    let len = ab(i.to_length(&o))?;
+    if len == 0 {
+        set_throw(i, &ov, "length", Value::Num(0.0))?;
+        return Ok(Value::Undefined);
+    }
+    let last = ab(i.get_member(&ov, &(len - 1).to_string()))?;
+    delete_or_throw(i, &ov, &(len - 1).to_string())?;
+    set_throw(i, &ov, "length", Value::Num((len - 1) as f64))?;
+    Ok(last)
+}
+
+/// JIT-only ownership-transfer form of the one-argument dense `Array#push` case.
+///
+/// `Err(value)` means no mutation occurred and hands the argument back to the caller for the
+/// exact generic builtin path. `Ok(length)` means the argument's ownership moved into the array.
+pub(crate) fn jit_array_push_one(
+    i: &mut Interp,
+    o: &Gc,
+    value: Value,
+) -> Result<Value, Value> {
+    if !matches!(o.borrow().exotic, Exotic::Array)
+        || !i.ordinary_get_ptr(Rc::as_ptr(o) as usize)
+        || !i.array_append_unshadowed(o)
+    {
+        return Err(value);
+    }
+    let mut b = o.borrow_mut();
+    let len = match b.props.length_property() {
+        Some(p) if !p.accessor() && p.writable() => match p.value() {
+            Value::Num(n)
+                if n.trunc() == n && (0.0..u32::MAX as f64).contains(&n) =>
+            {
+                n as u32
+            }
+            _ => return Err(value),
+        },
+        _ => return Err(value),
+    };
+    match b.props.try_append_element(len, Property::plain(value)) {
+        Ok(()) => {
+            let next = len + 1;
+            let slot = b.props.slot_of("length").unwrap();
+            b.props
+                .entry_at_mut(slot)
+                .unwrap()
+                .1
+                .set_value(Value::Num(next as f64));
+            Ok(Value::Num(next as f64))
+        }
+        Err(prop) => Err(prop.into_value()),
+    }
+}
+
+/// JIT-only dense `Array#pop` form. `None` is a guard miss with no mutation.
+pub(crate) fn jit_array_pop(i: &Interp, o: &Gc) -> Option<Value> {
+    if !matches!(o.borrow().exotic, Exotic::Array)
+        || !i.ordinary_get_ptr(Rc::as_ptr(o) as usize)
+    {
+        return None;
+    }
+    let mut b = o.borrow_mut();
+    let len = match b.props.length_property() {
+        Some(p) if !p.accessor() && p.writable() => match p.value() {
+            Value::Num(n) if n.trunc() == n && (0.0..=u32::MAX as f64).contains(&n) => n as u32,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if len == 0 {
+        return Some(Value::Undefined);
+    }
+    let value = b.props.pop_last_element(len - 1)?;
+    let slot = b.props.slot_of("length").unwrap();
+    b.props
+        .entry_at_mut(slot)
+        .unwrap()
+        .1
+        .set_value(Value::Num((len - 1) as f64));
+    Some(value)
+}
+
+fn install_array_rest(it: &mut Interp, ap: &Gc) {
     it.def_method(&ap, "shift", 0, |i, this, _args| {
         let o = arr_to_object(i, &this)?;
         let ov = Value::Obj(o.clone());
@@ -5226,34 +5361,7 @@ fn install_array(it: &mut Interp) {
             .insert(Interp::sym_key(&sym), Property::builtin(values_fn));
     }
 
-    let ctor = it.make_native("Array", 1, |i, _this, args| {
-        let a = if args.len() == 1 && matches!(args[0], Value::Num(_)) {
-            // `new Array(len)` sets length without materializing elements; the length setter
-            // validates that it is a valid uint32 (else RangeError: Invalid array length).
-            let a = i.make_array(Vec::new());
-            ab(i.set_member(&a, "length", args[0].clone()))?;
-            a
-        } else {
-            i.make_array(args.to_vec())
-        };
-        // GetPrototypeFromConstructor: a subclass / cross-realm new.target redirects the
-        // instance prototype (falling back to new.target's realm's %Array.prototype%).
-        if i.constructing {
-            let nt = i.new_target.clone();
-            if let Value::Obj(_) = &nt {
-                let proto = match ab(i.get_member(&nt, "prototype"))? {
-                    Value::Obj(p) => Some(p),
-                    _ => ctor_realm_proto(i, &nt, "Array")?,
-                };
-                if let (Value::Obj(o), Some(p)) = (&a, proto) {
-                    if !Rc::ptr_eq(&p, &i.array_proto) {
-                        o.borrow_mut().proto = Some(p);
-                    }
-                }
-            }
-        }
-        Ok(a)
-    });
+    let ctor = it.make_native("Array", 1, nf_array_ctor);
     ctor.borrow_mut().props.insert(
         "prototype",
         Property::data(Value::Obj(ap.clone()), false, false, false),
@@ -5398,6 +5506,49 @@ fn install_array(it: &mut Interp) {
     it.def_method(&ctor, "fromAsync", 1, array_from_async);
     install_species(it, &ctor);
     set_builtin(&it.global, "Array", Value::Obj(ctor));
+}
+
+pub(crate) fn nf_array_ctor(
+    i: &mut Interp,
+    _this: Value,
+    args: &[Value],
+) -> Result<Value, Value> {
+    let a = if args.len() == 1 && matches!(args[0], Value::Num(_)) {
+        // `new Array(len)` sets length without materializing elements; the length setter
+        // validates that it is a valid uint32 (else RangeError: Invalid array length).
+        let a = i.make_array(Vec::new());
+        ab(i.set_member(&a, "length", args[0].clone()))?;
+        #[cfg(all(
+            target_arch = "aarch64",
+            any(target_os = "macos", target_os = "linux", target_os = "windows")
+        ))]
+        if let (Value::Obj(o), Value::Num(n)) = (&a, &args[0]) {
+            // Tiny fixed-length work arrays are commonly filled immediately. Keyless Empty
+            // slots preserve hole semantics while avoiding four separate key/entry
+            // allocations for cases such as `new Array(4)`.
+            o.borrow_mut().props.reserve_small_holes(*n as usize);
+        }
+        a
+    } else {
+        i.make_array(args.to_vec())
+    };
+    // GetPrototypeFromConstructor: a subclass / cross-realm new.target redirects the
+    // instance prototype (falling back to new.target's realm's %Array.prototype%).
+    if i.constructing {
+        let nt = i.new_target.clone();
+        if let Value::Obj(_) = &nt {
+            let proto = match ab(i.get_member(&nt, "prototype"))? {
+                Value::Obj(p) => Some(p),
+                _ => ctor_realm_proto(i, &nt, "Array")?,
+            };
+            if let (Value::Obj(o), Some(p)) = (&a, proto) {
+                if !Rc::ptr_eq(&p, &i.array_proto) {
+                    o.borrow_mut().proto = Some(p);
+                }
+            }
+        }
+    }
+    Ok(a)
 }
 
 fn array_find(
@@ -8152,35 +8303,7 @@ fn install_string(it: &mut Interp) {
             end >= nchars.len() && chars[end - nchars.len()..end] == nchars[..],
         ))
     });
-    it.def_method(&sp, "slice", 2, |i, this, args| {
-        let s = this_string(i, &this)?;
-        if let crate::interpreter::StrUnits::Ascii = i.units_of(&s) {
-            let len = s.len() as i64;
-            let start = norm_index(ab(i.to_number(&arg(args, 0)))?, len);
-            let end = match arg(args, 1) {
-                Value::Undefined => len,
-                v => norm_index(ab(i.to_number(&v))?, len),
-            };
-            return Ok(if start < end {
-                Value::str(&s[start as usize..end as usize])
-            } else {
-                Value::str("")
-            });
-        }
-        let chars = i.units_full(&s);
-        let len = chars.len() as i64;
-        let start = norm_index(ab(i.to_number(&arg(args, 0)))?, len);
-        let end = match arg(args, 1) {
-            Value::Undefined => len,
-            v => norm_index(ab(i.to_number(&v))?, len),
-        };
-        let out = if start < end {
-            crate::jstr::from_units(&chars[start as usize..end as usize])
-        } else {
-            String::new()
-        };
-        Ok(Value::from_string(out))
-    });
+    it.def_method(&sp, "slice", 2, nf_string_slice);
     it.def_method(&sp, "substring", 2, |i, this, args| {
         let s = this_string(i, &this)?;
         let chars = i.units_full(&s);
@@ -8804,6 +8927,41 @@ fn install_string(it: &mut Interp) {
         Ok(Value::from_string(s))
     });
     set_builtin(&it.global, "String", Value::Obj(ctor));
+}
+
+/// Named entry so the bytecode call cache can recognize and specialize ASCII string slicing.
+pub(crate) fn nf_string_slice(
+    i: &mut Interp,
+    this: Value,
+    args: &[Value],
+) -> Result<Value, Value> {
+    let s = this_string(i, &this)?;
+    if let crate::interpreter::StrUnits::Ascii = i.units_of(&s) {
+        let len = s.len() as i64;
+        let start = norm_index(ab(i.to_number(&arg(args, 0)))?, len);
+        let end = match arg(args, 1) {
+            Value::Undefined => len,
+            v => norm_index(ab(i.to_number(&v))?, len),
+        };
+        return Ok(if start < end {
+            Value::str(&s[start as usize..end as usize])
+        } else {
+            Value::str("")
+        });
+    }
+    let chars = i.units_full(&s);
+    let len = chars.len() as i64;
+    let start = norm_index(ab(i.to_number(&arg(args, 0)))?, len);
+    let end = match arg(args, 1) {
+        Value::Undefined => len,
+        v => norm_index(ab(i.to_number(&v))?, len),
+    };
+    let out = if start < end {
+        crate::jstr::from_units(&chars[start as usize..end as usize])
+    } else {
+        String::new()
+    };
+    Ok(Value::from_string(out))
 }
 
 /// Box a Number/String/Boolean primitive into a wrapper object (right prototype + exotic). Other

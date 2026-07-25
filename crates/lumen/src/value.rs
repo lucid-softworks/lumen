@@ -46,7 +46,7 @@ pub enum Value {
 // `Value` enum while the migration is staged; packing at the heap boundary cuts each ordinary
 // property by eight bytes without coupling the experiment to every interpreter pattern match.
 #[repr(transparent)]
-struct PackedValue(u64);
+pub(crate) struct PackedValue(u64);
 
 const PACK_PAYLOAD: u64 = 0x0000_ffff_ffff_ffff;
 pub(crate) const PACK_UNDEFINED: u64 = 0x7ff9_0000_0000_0000;
@@ -85,7 +85,7 @@ impl PackedValue {
         word
     }
 
-    unsafe fn clone_word<T: Clone>(&self) -> T {
+    unsafe fn read_word<T>(&self) -> T {
         assert!(std::mem::size_of::<T>() <= std::mem::size_of::<usize>());
         let word = (self.0 & PACK_PAYLOAD) as usize;
         let mut value = std::mem::MaybeUninit::<T>::uninit();
@@ -95,9 +95,13 @@ impl PackedValue {
                 value.as_mut_ptr() as *mut u8,
                 std::mem::size_of::<T>(),
             );
-            let value = std::mem::ManuallyDrop::new(value.assume_init());
-            T::clone(&value)
+            value.assume_init()
         }
+    }
+
+    unsafe fn clone_word<T: Clone>(&self) -> T {
+        let value = std::mem::ManuallyDrop::new(unsafe { self.read_word::<T>() });
+        T::clone(&value)
     }
 
     unsafe fn drop_word<T>(&mut self) {
@@ -114,7 +118,7 @@ impl PackedValue {
         }
     }
 
-    fn pack(value: Value) -> PackedValue {
+    pub(crate) fn pack(value: Value) -> PackedValue {
         let bits = match value {
             Value::Undefined => PACK_UNDEFINED,
             Value::Empty => PACK_EMPTY,
@@ -135,7 +139,7 @@ impl PackedValue {
         PackedValue(bits)
     }
 
-    fn unpack(&self) -> Value {
+    pub(crate) fn unpack(&self) -> Value {
         match self.tag() {
             PACK_UNDEFINED => Value::Undefined,
             PACK_EMPTY => Value::Empty,
@@ -146,6 +150,69 @@ impl PackedValue {
             PACK_SYM => Value::Sym(unsafe { self.clone_word() }),
             PACK_OBJ => Value::Obj(unsafe { self.clone_word() }),
             _ => Value::Num(f64::from_bits(self.0)),
+        }
+    }
+
+    /// Consume the packed owner without a refcount round trip. Pointer payload bits become the
+    /// returned `Value`'s ownership; `ManuallyDrop` prevents this container from releasing them.
+    pub(crate) fn into_value(self) -> Value {
+        let this = std::mem::ManuallyDrop::new(self);
+        match this.tag() {
+            PACK_UNDEFINED => Value::Undefined,
+            PACK_EMPTY => Value::Empty,
+            PACK_NULL => Value::Null,
+            PACK_BOOL => Value::Bool(this.0 & 1 != 0),
+            PACK_BIGINT => Value::BigInt(unsafe { this.read_word() }),
+            PACK_STR => Value::Str(unsafe { this.read_word() }),
+            PACK_SYM => Value::Sym(unsafe { this.read_word() }),
+            PACK_OBJ => Value::Obj(unsafe { this.read_word() }),
+            _ => Value::Num(f64::from_bits(this.0)),
+        }
+    }
+
+    /// Drop one owned packed word in raw frame storage without first widening the frame.
+    pub(crate) unsafe fn drop_raw(word: *mut u64) {
+        drop(unsafe { std::ptr::read(word as *const PackedValue) });
+    }
+
+    /// Clone one packed owner out of raw frame storage into a wide execution value.
+    pub(crate) unsafe fn clone_raw(word: *const u64) -> Value {
+        unsafe { &*(word as *const PackedValue) }.unpack()
+    }
+
+    /// Replace one packed owner with a moved wide value and drop the previous owner.
+    pub(crate) unsafe fn replace_raw(word: *mut u64, value: Value) {
+        let old = unsafe { std::ptr::replace(word as *mut PackedValue, PackedValue::pack(value)) };
+        drop(old);
+    }
+
+    /// Compact `len` initialized wide values into the first half of the same allocation. The
+    /// source stride is 16 and destination stride is 8, so a forward walk never overwrites a
+    /// source that has not been moved yet.
+    ///
+    /// # Safety
+    /// `base` must address `len` initialized contiguous `Value`s and enough aligned storage for
+    /// them. After return only `len` packed words at `base` are initialized.
+    pub(crate) unsafe fn pack_in_place(base: *mut Value, len: usize) {
+        let packed = base.cast::<PackedValue>();
+        for k in 0..len {
+            let value = unsafe { base.add(k).read() };
+            unsafe { packed.add(k).write(PackedValue::pack(value)) };
+        }
+    }
+
+    /// Expand packed frame words back into wide `Value`s without cloning reference payloads.
+    /// Expansion walks backward so each packed source is consumed before a wider destination can
+    /// overlap it.
+    ///
+    /// # Safety
+    /// `base` must address `len` initialized `PackedValue`s followed by enough aligned storage for
+    /// `len` wide values. After return only those wide values are initialized.
+    pub(crate) unsafe fn unpack_in_place(base: *mut Value, len: usize) {
+        let packed = base.cast::<PackedValue>();
+        for k in (0..len).rev() {
+            let value = unsafe { packed.add(k).read() }.into_value();
+            unsafe { base.add(k).write(value) };
         }
     }
 }
@@ -165,6 +232,71 @@ impl Drop for PackedValue {
             PACK_OBJ => unsafe { self.drop_word::<Gc>() },
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod packed_value_tests {
+    use super::*;
+
+    #[test]
+    fn packed_value_is_one_word_and_round_trips_scalars() {
+        assert_eq!(std::mem::size_of::<PackedValue>(), 8);
+        assert!(matches!(PackedValue::pack(Value::Undefined).into_value(), Value::Undefined));
+        assert!(matches!(PackedValue::pack(Value::Empty).into_value(), Value::Empty));
+        assert!(matches!(PackedValue::pack(Value::Null).into_value(), Value::Null));
+        assert!(matches!(PackedValue::pack(Value::Bool(false)).into_value(), Value::Bool(false)));
+        assert!(matches!(PackedValue::pack(Value::Bool(true)).into_value(), Value::Bool(true)));
+        for n in [0.0f64, -0.0, 42.5, f64::INFINITY, f64::NAN] {
+            let Value::Num(out) = PackedValue::pack(Value::Num(n)).into_value() else {
+                panic!("number changed kind")
+            };
+            assert!(n.is_nan() && out.is_nan() || n.to_bits() == out.to_bits());
+        }
+    }
+
+    #[test]
+    fn packed_value_moves_reference_ownership_without_a_bump() {
+        let obj = Object::new(None);
+        let before = Rc::strong_count(&obj);
+        let packed = PackedValue::pack(Value::Obj(obj.clone()));
+        assert_eq!(Rc::strong_count(&obj), before + 1);
+        let out = packed.into_value();
+        assert_eq!(Rc::strong_count(&obj), before + 1);
+        drop(out);
+        assert_eq!(Rc::strong_count(&obj), before);
+    }
+
+    #[test]
+    fn packed_frame_conversion_is_overlap_safe_and_ownership_neutral() {
+        let obj = Object::new(None);
+        let before = Rc::strong_count(&obj);
+        let mut frame: [std::mem::MaybeUninit<Value>; 5] =
+            std::array::from_fn(|_| std::mem::MaybeUninit::uninit());
+        let base = frame.as_mut_ptr().cast::<Value>();
+        unsafe {
+            base.add(0).write(Value::Num(1.5));
+            base.add(1).write(Value::Obj(obj.clone()));
+            base.add(2).write(Value::Bool(true));
+            base.add(3).write(Value::Null);
+            base.add(4).write(Value::Num(-0.0));
+        }
+        assert_eq!(Rc::strong_count(&obj), before + 1);
+        unsafe {
+            PackedValue::pack_in_place(base, 5);
+            assert_eq!(Rc::strong_count(&obj), before + 1);
+            PackedValue::unpack_in_place(base, 5);
+            assert_eq!(Rc::strong_count(&obj), before + 1);
+            assert!(matches!(&*base.add(0), Value::Num(n) if *n == 1.5));
+            assert!(matches!(&*base.add(1), Value::Obj(o) if Rc::ptr_eq(o, &obj)));
+            assert!(matches!(&*base.add(2), Value::Bool(true)));
+            assert!(matches!(&*base.add(3), Value::Null));
+            assert!(matches!(&*base.add(4), Value::Num(n) if n.to_bits() == (-0.0f64).to_bits()));
+            for k in 0..5 {
+                std::ptr::drop_in_place(base.add(k));
+            }
+        }
+        assert_eq!(Rc::strong_count(&obj), before);
     }
 }
 
@@ -216,6 +348,9 @@ pub struct JitLayout {
     pub dense_elems: usize,
     /// The `mirror` Vec header within the shared dense-buffer allocation.
     pub dense_mirror: usize,
+    /// Nullable `Box<Vec<Property>>` within the dense sidecar. When non-null the box points at
+    /// the Vec header; packed element slots use [`Value::Empty`] for holes and have no key Rc.
+    pub dense_packed: usize,
     /// The `mirror_flags` byte within `Props`.
     pub props_mirror_flags: usize,
     /// `size_of::<(Rc<str>, Property)>()` — the entry stride.
@@ -226,6 +361,12 @@ pub struct JitLayout {
     pub entry_accessor: usize,
     /// Descriptor flags byte within an entry (used to test `PROP_WRITABLE`).
     pub entry_writable: usize,
+    /// Standalone `Property` layout used by keyless packed elements (not tuple-entry offsets).
+    pub property_size: usize,
+    pub property_value: usize,
+    pub property_meta: usize,
+    /// The `Option<Box<Vec<Property>>>` niche and Vec header words matched the live probes.
+    pub packed_elems_valid: bool,
     /// `Exotic::None`'s discriminant byte (the inline path requires an ordinary object).
     pub exotic_none_tag: u8,
     /// `Exotic::Array`'s discriminant byte (the element templates also accept arrays).
@@ -239,6 +380,8 @@ pub struct JitLayout {
     pub scope_gen: usize,
     /// `value` within a `Binding` (the LoadName template's 16-byte copy source).
     pub binding_value: usize,
+    /// `mutable` within a `Binding` (free-name update/store guard).
+    pub binding_mutable: usize,
     /// `initialized` bool within a `Binding` (TDZ check).
     pub binding_init: usize,
     /// The `Rc<str>` key within an entry `(Rc<str>, Property)` (tuple field order is unstable).
@@ -333,6 +476,37 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
     let thin_none_word = unsafe { *(&thin_none as *const DenseStorage as *const usize) };
     let thin_vec_ok = thin_word == thin_expected && thin_none_word == 0;
 
+    // Keyless packed-element sidecar: probe both Option<Box<_>>'s null niche and Vec<Property>'s
+    // header words independently. The JIT follows the Box pointer, then uses the same located
+    // Vec word offsets as the classic entry/element vectors.
+    let mut pv = Vec::with_capacity(3);
+    pv.push(Property::plain(Value::Num(1.0)));
+    let pv_ptr = pv.as_ptr() as usize;
+    let pv_words = unsafe {
+        std::slice::from_raw_parts(
+            &pv as *const Vec<Property> as *const usize,
+            std::mem::size_of::<Vec<Property>>() / 8,
+        )
+    };
+    let pv_header_ok = vec_ptr_off.is_some_and(|o| pv_words[o / 8] == pv_ptr)
+        && vec_len_off.is_some_and(|o| pv_words[o / 8] == 1)
+        && vec_cap_off.is_some_and(|o| pv_words[o / 8] == 3);
+    let packed_some: Option<Box<Vec<Property>>> = Some(Box::new(pv));
+    let packed_word = unsafe {
+        *(&packed_some as *const Option<Box<Vec<Property>>> as *const usize)
+    };
+    let packed_expected = packed_some
+        .as_deref()
+        .map_or(0, |v| v as *const Vec<Property> as usize);
+    let packed_none: Option<Box<Vec<Property>>> = None;
+    let packed_none_word = unsafe {
+        *(&packed_none as *const Option<Box<Vec<Property>>> as *const usize)
+    };
+    let packed_elems_valid = pv_header_ok
+        && packed_word == packed_expected
+        && packed_word != 0
+        && packed_none_word == 0;
+
     // Exotic::None / Exotic::Array discriminants (Exotic is repr(Rust); probe to be certain).
     let none = Exotic::None;
     let exotic_none_tag = unsafe { *(&none as *const Exotic as *const u8) };
@@ -353,6 +527,7 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
         + offset_of!(crate::interpreter::Scope, vars)
         + crate::interpreter::VarMap::generation_offset();
     let binding_value = offset_of!(crate::interpreter::Binding, value);
+    let binding_mutable = offset_of!(crate::interpreter::Binding, mutable);
     let binding_init = offset_of!(crate::interpreter::Binding, initialized);
 
     let valid = strong_ok
@@ -381,6 +556,7 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
         props_elems: offset_of!(Props, elems),
         dense_elems: offset_of!(DenseBuffers, elems),
         dense_mirror: offset_of!(DenseBuffers, mirror),
+        dense_packed: offset_of!(DenseBuffers, packed),
         props_mirror_flags: offset_of!(Props, mirror_flags),
         entry_size: std::mem::size_of::<(Rc<str>, Property)>(),
         entry_key: offset_of!((Rc<str>, Property), 0),
@@ -391,11 +567,16 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
         entry_value: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, packed),
         entry_accessor: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, meta),
         entry_writable: offset_of!((Rc<str>, Property), 1) + offset_of!(Property, meta),
+        property_size: std::mem::size_of::<Property>(),
+        property_value: offset_of!(Property, packed),
+        property_meta: offset_of!(Property, meta),
+        packed_elems_valid,
         exotic_none_tag,
         exotic_array_tag,
         exotic_strwrap_tag,
         scope_gen,
         binding_value,
+        binding_mutable,
         binding_init,
         valid,
     }
@@ -619,20 +800,32 @@ impl Object {
     /// chunks derive a conservative straight-line field count, replacing the usual 1 → 2 → 4
     /// growth sequence with one exact allocation. The hint lives on shared code, not instances.
     pub(crate) fn new_with_capacity(proto: Option<Gc>, property_capacity: usize) -> Gc {
-        LIVE_OBJECTS.with(|c| c.set(c.get() + 1));
-        let obj = Rc::new(RefCell::new(Object {
-            proto,
-            props: Props::with_capacity(property_capacity),
-            extensible: true,
-            call: Callable::None,
-            exotic: Exotic::None,
-            ic_plain: Cell::new(true),
-            is_constructor: false,
-            gc_mark: Cell::new(false),
-            gc_internal: Cell::new(0),
-        }));
-        GC_REGISTRY.with(|r| {
-            let mut reg = r.borrow_mut();
+        GC_STATE.with(|state| {
+            state.live.set(state.live.get() + 1);
+            // Ordinary constructor instances dominate allocation-heavy code and usually die
+            // shortly after the benchmark iteration. Reuse their small named-property buffer:
+            // the RcBox still has ordinary Rust ownership, but the second heap allocation no
+            // longer has to pass through malloc/free for every object.
+            let entries = if property_capacity > 0 && property_capacity <= ENTRY_POOL_MAX_CAP {
+                let mut pool = state.entry_pool.borrow_mut();
+                (property_capacity..=ENTRY_POOL_MAX_CAP)
+                    .find_map(|capacity| pool[capacity].pop())
+                    .unwrap_or_else(|| Vec::with_capacity(property_capacity))
+            } else {
+                Vec::with_capacity(property_capacity)
+            };
+            let obj = Rc::new(RefCell::new(Object {
+                proto,
+                props: Props::with_entries(entries),
+                extensible: true,
+                call: Callable::None,
+                exotic: Exotic::None,
+                ic_plain: Cell::new(true),
+                is_constructor: false,
+                gc_mark: Cell::new(false),
+                gc_internal: Cell::new(0),
+            }));
+            let mut reg = state.registry.borrow_mut();
             let slot = match reg.free.pop() {
                 Some(slot) => {
                     reg.entries[slot] = Rc::as_ptr(&obj);
@@ -646,8 +839,9 @@ impl Object {
             };
             let slot: u32 = slot.try_into().expect("object registry exceeded u32 slots");
             obj.borrow().gc_internal.set(slot);
-        });
-        obj
+            drop(reg);
+            obj
+        })
     }
 }
 
@@ -657,15 +851,27 @@ impl Drop for Object {
         // is O(1), does not touch another (possibly borrowed) object, and bounds registry memory
         // by peak simultaneously-live objects instead of cumulative allocation count.
         let slot = self.gc_internal.get() as usize;
-        let _ = GC_REGISTRY.try_with(|r| {
-            let mut reg = r.borrow_mut();
+        // Move the emptyable allocation out before entering TLS. Clearing it may recursively
+        // release child objects, so no registry/pool RefCell borrow can remain live at that point.
+        let recyclable = self.props.take_recyclable_entries();
+        let _ = GC_STATE.try_with(|state| {
+            let mut reg = state.registry.borrow_mut();
             if slot < reg.entries.len() && !reg.entries[slot].is_null() {
                 reg.entries[slot] = std::ptr::null();
                 reg.free.push(slot);
             }
+            drop(reg);
+            state.live.set(state.live.get() - 1);
+            if let Some(mut entries) = recyclable {
+                let capacity = entries.capacity();
+                entries.clear();
+                let mut pool = state.entry_pool.borrow_mut();
+                if pool[capacity].len() < ENTRY_POOL_PER_CAP {
+                    pool[capacity].push(entries);
+                }
+            }
         });
         // `try_with` so a drop during thread-local teardown at process exit can't panic.
-        let _ = LIVE_OBJECTS.try_with(|c| c.set(c.get() - 1));
     }
 }
 
@@ -678,19 +884,29 @@ struct GcRegistry {
     free: Vec<usize>,
 }
 
+const ENTRY_POOL_MAX_CAP: usize = 16;
+const ENTRY_POOL_PER_CAP: usize = 64;
+
+struct GcState {
+    registry: RefCell<GcRegistry>,
+    live: Cell<i64>,
+    entry_pool: RefCell<[Vec<Vec<(Rc<str>, Property)>>; ENTRY_POOL_MAX_CAP + 1]>,
+}
+
 thread_local! {
-    static GC_REGISTRY: RefCell<GcRegistry> = const {
-        RefCell::new(GcRegistry {
+    static GC_STATE: GcState = GcState {
+        registry: RefCell::new(GcRegistry {
             entries: Vec::new(),
             free: Vec::new(),
-        })
+        }),
+        live: Cell::new(0),
+        entry_pool: RefCell::new(std::array::from_fn(|_| Vec::new())),
     };
-    static LIVE_OBJECTS: Cell<i64> = const { Cell::new(0) };
 }
 
 /// Number of live heap objects right now.
 pub fn live_objects() -> i64 {
-    LIVE_OBJECTS.with(|c| c.get())
+    GC_STATE.with(|state| state.live.get())
 }
 
 /// Stable address of this thread's live-object counter. The Rc-based runtime and its compiled
@@ -700,15 +916,15 @@ pub fn live_objects() -> i64 {
     any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
 pub(crate) fn live_objects_ptr() -> *const i64 {
-    LIVE_OBJECTS.with(Cell::as_ptr)
+    GC_STATE.with(|state| state.live.as_ptr())
 }
 
 /// Strong handles to every currently-live heap object. Registry slots are non-owning raw
 /// pointers tombstoned synchronously by `Object::drop`; while this thread-local borrow is held no
 /// object can disappear between reading a slot and incrementing its strong count.
 pub fn gc_snapshot() -> Vec<Gc> {
-    GC_REGISTRY.with(|r| {
-        let reg = r.borrow();
+    GC_STATE.with(|state| {
+        let reg = state.registry.borrow();
         let mut live = Vec::with_capacity(reg.entries.len() - reg.free.len());
         for &ptr in &reg.entries {
             if ptr.is_null() {
@@ -727,8 +943,8 @@ pub fn gc_snapshot() -> Vec<Gc> {
 /// this after marking and before sweeping side tables/properties can release the final owner of
 /// any object, so `Object::drop` always sees its stable slot.
 pub(crate) fn gc_restore_registry_slots() {
-    GC_REGISTRY.with(|r| {
-        let reg = r.borrow();
+    GC_STATE.with(|state| {
+        let reg = state.registry.borrow();
         for (slot, &ptr) in reg.entries.iter().enumerate() {
             if !ptr.is_null() {
                 let slot: u32 = slot.try_into().expect("object registry exceeded u32 slots");
@@ -740,8 +956,8 @@ pub(crate) fn gc_restore_registry_slots() {
 
 #[cfg(test)]
 pub(crate) fn gc_registry_stats() -> (usize, usize) {
-    GC_REGISTRY.with(|r| {
-        let reg = r.borrow();
+    GC_STATE.with(|state| {
+        let reg = state.registry.borrow();
         (reg.entries.len(), reg.free.len())
     })
 }
@@ -1026,7 +1242,7 @@ impl Property {
     #[inline]
     pub(crate) fn replace_value(&mut self, value: Value) -> Value {
         let old = std::mem::replace(&mut self.packed, PackedValue::pack(value));
-        old.unpack()
+        old.into_value()
     }
     #[inline]
     pub(crate) fn take_value(&mut self) -> Value {
@@ -1453,8 +1669,13 @@ impl Props {
     }
 
     pub(crate) fn with_capacity(capacity: usize) -> Props {
+        Self::with_entries(Vec::with_capacity(capacity))
+    }
+
+    fn with_entries(entries: Vec<(Rc<str>, Property)>) -> Props {
+        debug_assert!(entries.is_empty());
         Props {
-            entries: Vec::with_capacity(capacity),
+            entries,
             shape: SHAPE_EMPTY,
             elems: DenseStorage::default(),
             mirror_flags: MIRROR_OK | MIRROR_ALL_I32 | MIRROR_NO_HOLES,
@@ -1464,6 +1685,51 @@ impl Props {
             elem_mode: std::cell::Cell::new(false),
             proto_slot: std::cell::Cell::new(NO_SLOT),
             len_slot: std::cell::Cell::new(NO_SLOT),
+        }
+    }
+
+    /// Detach a small ordinary named-property buffer for the thread-local object allocator.
+    /// Dense/indexed maps keep their storage private, and large maps are returned to the system
+    /// rather than allowing one workload spike to permanently inflate the pool.
+    fn take_recyclable_entries(&mut self) -> Option<Vec<(Rc<str>, Property)>> {
+        let capacity = self.entries.capacity();
+        if self.elems.0.is_none() && capacity > 0 && capacity <= ENTRY_POOL_MAX_CAP {
+            Some(std::mem::take(&mut self.entries))
+        } else {
+            None
+        }
+    }
+
+    /// Instantiate a compiler-proved plain-data object template with its final values.
+    ///
+    /// Cloning the whole template would clone every placeholder [`PackedValue`] and then drop it
+    /// again as the caller overwrote each slot. Object-heavy parsers do this millions of times.
+    /// The key/shape and lookup sidecars are the reusable part; plain property descriptors are
+    /// cheaper and safer to construct directly around the moved values.
+    pub(crate) fn instantiate_plain<I>(&self, mut values: I) -> Props
+    where
+        I: ExactSizeIterator<Item = Value>,
+    {
+        assert_eq!(values.len(), self.entries.len(), "object-template arity");
+        let mut entries = Vec::with_capacity(self.entries.len());
+        for (key, _) in &self.entries {
+            entries.push((
+                key.clone(),
+                Property::plain(values.next().expect("object-template value")),
+            ));
+        }
+        debug_assert!(values.next().is_none());
+        Props {
+            entries,
+            proto_flag: std::cell::Cell::new(false),
+            shape: self.shape,
+            elems: self.elems.clone(),
+            mirror_flags: self.mirror_flags,
+            mirror_holes: self.mirror_holes,
+            has_far: std::cell::Cell::new(self.has_far.get()),
+            elem_mode: std::cell::Cell::new(self.elem_mode.get()),
+            proto_slot: std::cell::Cell::new(self.proto_slot.get()),
+            len_slot: std::cell::Cell::new(self.len_slot.get()),
         }
     }
 
@@ -1500,6 +1766,50 @@ impl Props {
         if numeric && self.elems.packed.is_none() {
             self.elems.mirror_reserve_exact(len);
         }
+    }
+
+    /// Represent a very small holey array with keyless packed property slots. `Value::Empty`
+    /// remains an absent property to every reflective operation, but a later indexed write can
+    /// activate the already-allocated slot without allocating an index string or growing the
+    /// entry/dense vectors. Keep this deliberately tiny: an untouched `new Array(n)` must not
+    /// turn a length word into an unbounded allocation, and eight slots cap the speculative
+    /// footprint at 128 bytes while becoming smaller than the classic representation once filled.
+    pub(crate) fn reserve_small_holes(&mut self, len: usize) {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ENABLED
+            .get_or_init(|| std::env::var_os("LUMEN_JIT_NO_PACKED_HOLES").is_none())
+            || len == 0
+            || len > 8
+            || self.elems.packed.is_some()
+        {
+            return;
+        }
+        debug_assert_eq!(self.elems.len(), 0);
+        let mut packed = Vec::with_capacity(len);
+        packed.resize_with(len, || Property::plain(Value::Empty));
+        self.elems.set_packed(Some(Box::new(packed)));
+        // The raw-f64 mirror describes classic `elems` slots, not keyless packed properties.
+        self.mirror_flags = 0;
+    }
+
+    /// Validate the storage contract used by the numeric CFG region and return the stable boxed
+    /// Vec header. The caller separately proves ordinary Array prototype semantics and keeps the
+    /// owning object rooted; no helper or vector resize may run while the returned pointer lives.
+    pub(crate) fn jit_packed_numeric_slots(&mut self, len: usize) -> Option<*mut Vec<Property>> {
+        if len == 0 || self.proto_flag.get() || self.has_far.get() {
+            return None;
+        }
+        let packed = self.elems.packed_mut()?;
+        if packed.len() < len
+            || packed[..len].iter().any(|p| {
+                p.accessor()
+                    || !p.writable()
+                    || !matches!(p.value(), Value::Empty | Value::Num(_))
+            })
+        {
+            return None;
+        }
+        Some(packed as *mut Vec<Property>)
     }
 
     /// Mark this map as an array's (see `elem_mode`). One-way, set when the owning object
@@ -1541,6 +1851,16 @@ impl Props {
     #[inline]
     pub(crate) fn shape(&self) -> u32 {
         self.shape
+    }
+    /// Final named-property count of a small ordinary instance. The construct JIT records this
+    /// after a successful call so forwarding constructors whose own bytecode has no direct
+    /// `this.x` stores can reserve the right capacity on later allocations.
+    pub(crate) fn observed_instance_capacity(&self) -> usize {
+        if self.elems.0.is_none() && self.entries.len() <= 16 {
+            self.entries.len()
+        } else {
+            0
+        }
     }
 
     /// The own property for canonical index `n`, without hashing. `None` only means "not in the
@@ -1763,17 +2083,21 @@ impl Props {
     /// whole existence scan and key-string hashing of [`Props::insert`] can be skipped. Array
     /// (`elem_mode`) maps only: the shape is untouched. Returns `false` (nothing changed) when
     /// the gates don't hold; the caller runs the generic path.
-    pub(crate) fn append_element(&mut self, n: u32, prop: Property) -> bool {
+    pub(crate) fn try_append_element(
+        &mut self,
+        n: u32,
+        prop: Property,
+    ) -> Result<(), Property> {
         if let Some(packed) = &self.elems.packed {
             if self.has_far.get() || !self.elem_mode.get() || n as usize != packed.len() {
-                return false;
+                return Err(prop);
             }
             self.note_structural();
             self.elems.packed_mut().unwrap().push(prop);
-            return true;
+            return Ok(());
         }
         if self.has_far.get() || !self.elem_mode.get() || n as usize != self.elems.len() {
-            return false;
+            return Err(prop);
         }
         self.note_structural();
         let slot = self.entries.len();
@@ -1785,7 +2109,11 @@ impl Props {
         self.entries.push((key, prop));
         self.elems.push(slot as u32);
         self.mirror_grow(0, slot);
-        true
+        Ok(())
+    }
+
+    pub(crate) fn append_element(&mut self, n: u32, prop: Property) -> bool {
+        self.try_append_element(n, prop).is_ok()
     }
 
     /// Dense tail pop: remove element `n` (the array's last) when it is also the last *entry*
@@ -2014,7 +2342,7 @@ impl Props {
                 self.elems.packed_mut().unwrap()[n] = prop;
                 return;
             }
-            if n <= packed.len() + 256 {
+            if !self.has_far.get() && n <= packed.len() + 256 {
                 self.note_structural();
                 let packed = self.elems.packed_mut().unwrap();
                 packed.resize_with(n, || Property::plain(Value::Empty));
@@ -2047,8 +2375,6 @@ impl Props {
                 self.build_index();
                 self.elems.index_mut().unwrap().insert(key.clone(), slot);
             }
-            // Extending the key sequence transitions to the (shared, memoized) child shape.
-            // Array element keys don't (see `elem_mode`): array shapes track named keys only.
             if !(self.elem_mode.get() && canonical_index(&key).is_some()) {
                 self.shape = shape_transition(self.shape, &key);
             }

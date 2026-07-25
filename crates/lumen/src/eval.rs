@@ -5171,14 +5171,9 @@ impl Interp {
         let obj = crate::value::Object::new(Some(self.object_proto.clone()));
         {
             let mut b = obj.borrow_mut();
-            b.props = map.clone();
-            for slot in 0..count {
-                b.props
-                    .entry_at_mut(slot)
-                    .expect("template slot")
-                    .1
-                    .set_value(unsafe { base.add(slot).read() });
-            }
+            b.props = map.instantiate_plain(
+                (0..count).map(|slot| unsafe { base.add(slot).read() }),
+            );
         }
         Value::Obj(obj)
     }
@@ -5204,14 +5199,7 @@ impl Interp {
         let obj = crate::value::Object::new(Some(self.object_proto.clone()));
         {
             let mut b = obj.borrow_mut();
-            b.props = map.clone();
-            for (slot, v) in values.into_iter().enumerate() {
-                b.props
-                    .entry_at_mut(slot)
-                    .expect("template slot")
-                    .1
-                    .set_value(v);
-            }
+            b.props = map.instantiate_plain(values.into_iter());
         }
         Value::Obj(obj)
     }

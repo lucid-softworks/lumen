@@ -2,6 +2,11 @@
 
 use super::*;
 
+pub(crate) fn nf_math_sqrt(i: &mut Interp, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let x = ab(i.to_number(&arg(args, 0)))?;
+    Ok(Value::Num(x.sqrt()))
+}
+
 pub(super) fn install_math(it: &mut Interp) {
     let math = it.new_object();
     // The Math constants are { writable:false, enumerable:false, configurable:false }.
@@ -52,7 +57,7 @@ pub(super) fn install_math(it: &mut Interp) {
         }
     });
     unary!("trunc", f64::trunc);
-    unary!("sqrt", f64::sqrt);
+    it.def_method(&math, "sqrt", 1, nf_math_sqrt);
     unary!("cbrt", f64::cbrt);
     unary!("sign", |x: f64| if x.is_nan() || x == 0.0 {
         x

@@ -41,6 +41,7 @@ mod interpreter;
 #[cfg(feature = "intl")]
 mod intl;
 mod jit;
+mod jit_ir;
 mod jstr;
 mod lexer;
 mod lstr;

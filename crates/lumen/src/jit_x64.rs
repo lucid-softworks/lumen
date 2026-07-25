@@ -5,8 +5,8 @@
 //! can then be ported without duplicating runtime semantics or compromising deoptimization.
 
 use super::{
-    stack_depths, sys, JitCode, COND_PEEK_NOT_NULLISH, COND_PEEK_TRUTHY, COND_POP_TRUTHY, H_CALL,
-    H_COND, H_EXEC, H_GET_PROP, H_POP_HANDLER, H_PUSH_HANDLER, H_RETURN, H_SET_PROP, H_UNWIND,
+    sys, JitCode, COND_PEEK_NOT_NULLISH, COND_PEEK_TRUTHY, COND_POP_TRUTHY, H_CALL, H_COND, H_EXEC,
+    H_GET_PROP, H_NEW, H_POP_HANDLER, H_PUSH_HANDLER, H_RETURN, H_SET_PROP, H_UNWIND,
 };
 use crate::bytecode::{Chunk, Op};
 
@@ -367,7 +367,7 @@ pub(super) fn compile(
     {
         return None;
     }
-    let max_stack = stack_depths(chunk)?;
+    let max_stack = crate::jit_ir::Cfg::build(chunk).ok()?.jit_stack_capacity();
     let mut a = Asm::new();
     let pcs: Vec<_> = (0..ops.len()).map(|_| a.label()).collect();
     let unwind = a.label();
@@ -646,6 +646,9 @@ pub(super) fn compile(
             }
             Op::Call(..) | Op::CallWithThis(..) => {
                 a.helper_spflag(H_CALL, pc as u32, unwind);
+            }
+            Op::New(argc) => {
+                a.helper_spflag(H_NEW, pc as u32 | ((*argc as u32) << 16), unwind);
             }
             Op::GetPropThis(_, cache) => {
                 let slow = a.label();

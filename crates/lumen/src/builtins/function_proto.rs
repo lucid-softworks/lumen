@@ -16,45 +16,8 @@ pub(super) fn install_function_proto(it: &mut Interp) {
         b.props
             .insert("name", Property::data(Value::str(""), false, false, true));
     }
-    it.def_method(&fp, "call", 1, |i, this, args| {
-        let this_arg = arg(args, 0);
-        let rest = if args.is_empty() { &[][..] } else { &args[1..] };
-        ab(i.call(this, this_arg, rest))
-    });
-    it.def_method(&fp, "apply", 2, |i, this, args| {
-        let this_arg = arg(args, 0);
-        let list = match arg(args, 1) {
-            Value::Undefined | Value::Null => Vec::new(),
-            Value::Obj(o) => {
-                let len = ab(i.checked_array_len(&o))?;
-                let mut v = Vec::with_capacity(len);
-                let direct_dense = i.ordinary_get_ptr(Rc::as_ptr(&o) as usize)
-                    && !i.mapped_arguments.contains_key(&(Rc::as_ptr(&o) as usize));
-                for k in 0..len {
-                    // Arrays and unmapped arguments objects overwhelmingly contain plain own
-                    // dense entries. Read those by slot: the generic path allocates a decimal
-                    // key and walks the prototype chain for every argument. Holes, accessors,
-                    // proxies, typed arrays, and mapped arguments retain full [[Get]] semantics.
-                    let own = direct_dense.then(|| {
-                        let b = o.borrow();
-                        b.props
-                            .get_index(k as u32)
-                            .filter(|p| !p.accessor())
-                            .map(|p| p.value())
-                    });
-                    match own.flatten() {
-                        Some(value) => v.push(value),
-                        None => v.push(ab(
-                            i.get_member(&Value::Obj(o.clone()), &k.to_string()),
-                        )?),
-                    }
-                }
-                v
-            }
-            _ => return Err(i.make_error("TypeError", "apply: argument list must be array-like")),
-        };
-        ab(i.call(this, this_arg, &list))
-    });
+    it.def_method(&fp, "call", 1, nf_function_call);
+    it.def_method(&fp, "apply", 2, nf_function_apply);
     it.def_method(&fp, "bind", 1, |i, this, args| {
         // Any callable (including a callable proxy) can be bound.
         let target = match &this {
@@ -200,6 +163,16 @@ pub(super) fn install_function_proto(it: &mut Interp) {
         .props
         .insert("constructor", Property::builtin(Value::Obj(ctor.clone())));
     set_builtin(&it.global, "Function", Value::Obj(ctor.clone()));
+}
+
+pub(crate) fn nf_function_call(
+    i: &mut Interp,
+    this: Value,
+    args: &[Value],
+) -> Result<Value, Value> {
+    let this_arg = arg(args, 0);
+    let rest = if args.is_empty() { &[][..] } else { &args[1..] };
+    ab(i.call(this, this_arg, rest))
 }
 
 /// The %GeneratorFunction% / %AsyncFunction% / %AsyncGeneratorFunction% intrinsics. Each is a
