@@ -3068,7 +3068,7 @@ pub fn compile(
             Op::MakeObject(..) => {
                 emit_op_helper(&mut a, H_MAKE_OBJECT, pc as u32, l_unwind);
             }
-            Op::New(argc) => {
+            Op::New(argc, _) => {
                 // H_NEW needs only the pc for optional diagnostics and the statically encoded
                 // arity. Pack both so the million-call constructor path does not reload/decode
                 // its bytecode op in Rust.
@@ -21875,6 +21875,179 @@ pub(crate) unsafe fn run_moved(
     unsafe { run_moved_inner(i, chunk, code, env, this_val, args, argc, frame, None) }
 }
 
+/// Constructor counterpart of the direct shared-context call path.
+///
+/// `Op::New` is entered through a helper because allocating the instance and validating the live
+/// `prototype` property remain Rust operations.  Once those checks have committed, however, a
+/// no-activation constructor can run on the caller's existing [`JitCtx`].  Swapping its frame
+/// fields here avoids constructing a second context and handler vector for every short-lived
+/// Vector/Cons/Node constructor while retaining the fixed-buffer moved-argument ABI.
+///
+/// # Safety
+/// Same moved-argument and environment lifetime contract as [`run_moved`]. `caller` must be the
+/// live context whose machine code invoked the constructor helper.
+#[cfg(any(
+    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")),
+    all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux", target_os = "windows"))
+))]
+pub(crate) unsafe fn run_moved_shared(
+    i: &mut Interp,
+    caller: &mut JitCtx,
+    chunk: &Rc<Chunk>,
+    code: &JitCode,
+    env: *const Env,
+    this_val: Value,
+    args: *mut Value,
+    argc: usize,
+    (n_params, n_slots): (usize, usize),
+) -> Result<Value, Abrupt> {
+    let seed = n_params.min(argc);
+    let mut legacy: Option<(Vec<Value>, Vec<Value>)> = None;
+    let (slots_ptr, stack_base) = if n_slots + code.max_stack <= FRAME_BUF {
+        let buf = i.frame_pool.pop().unwrap_or_else(|| {
+            let b: Box<[std::mem::MaybeUninit<Value>]> = Box::new_uninit_slice(FRAME_BUF);
+            std::ptr::NonNull::new(Box::into_raw(b) as *mut Value).unwrap()
+        });
+        (buf.as_ptr(), unsafe { buf.as_ptr().add(n_slots) })
+    } else {
+        let (mut slots, mut stack) = i.vm_pool.pop().unwrap_or_default();
+        slots.reserve(n_slots);
+        stack.clear();
+        stack.reserve(code.max_stack);
+        let p = (slots.as_mut_ptr(), stack.as_mut_ptr());
+        legacy = Some((slots, stack));
+        p
+    };
+    unsafe {
+        std::ptr::copy_nonoverlapping(args, slots_ptr, seed);
+        for k in seed..argc {
+            std::ptr::drop_in_place(args.add(k));
+        }
+        for k in seed..n_slots {
+            *(slots_ptr.add(k) as *mut u8) = 0;
+        }
+        for &s in chunk.jit_var_force_resets() {
+            let s = s as usize;
+            if s < seed {
+                std::ptr::drop_in_place(slots_ptr.add(s));
+                slots_ptr.add(s).write(Value::Undefined);
+            }
+        }
+    }
+
+    // Save the caller activation. The handlers allocation is deliberately shared; the callee's
+    // watermark makes an escaping throw stop before it can consume the caller's regions.
+    let old_stack_base = caller.stack_base;
+    let old_final_sp = caller.final_sp;
+    let old_slots = caller.slots;
+    let old_env_raw = caller.env_raw;
+    let old_global_body = caller.global_body;
+    let old_chunk = caller.chunk;
+    let old_n_slots = caller.n_slots;
+    let old_slots_packed = caller.slots_packed;
+    let old_handler_floor = caller.handler_floor;
+    let old_code_base = caller.code_base;
+    let old_pc_offsets = caller.pc_offsets;
+    let old_this = std::mem::replace(&mut caller.this_val, this_val);
+    let old_error = caller.error.take();
+    let old_ret = std::mem::take(&mut caller.ret);
+    let handlers_len = caller.handlers.len();
+
+    caller.stack_base = stack_base;
+    caller.final_sp = stack_base;
+    caller.slots = slots_ptr;
+    caller.env_raw = Rc::as_ptr(unsafe { &*env }) as *const u8;
+    caller.global_body = jit_global_body(i, code);
+    caller.chunk = Rc::as_ptr(chunk);
+    caller.n_slots = n_slots;
+    caller.slots_packed = false;
+    caller.handler_floor = handlers_len;
+    caller.code_base = code.mem;
+    caller.pc_offsets = code.pc_offsets.as_ptr();
+    if PACKED_LOCAL_SLOTS {
+        unsafe { caller.pack_slots() };
+    }
+
+    let entry: extern "C" fn(*mut JitCtx) -> u64 = unsafe { std::mem::transmute(code.mem) };
+    let ok = entry(caller);
+    unsafe { caller.unpack_slots() };
+    let callee_final_sp = caller.final_sp;
+    let result = if ok == 1 {
+        Ok(std::mem::take(&mut caller.ret))
+    } else {
+        Err(caller
+            .error
+            .take()
+            .unwrap_or_else(|| Abrupt::Throw(Value::Undefined)))
+    };
+
+    unsafe {
+        let mut p = stack_base;
+        while p < callee_final_sp {
+            std::ptr::drop_in_place(p);
+            p = p.add(1);
+        }
+        let rc_dec_ok = i
+            .jit_layout
+            .get()
+            .is_some_and(|l| l.valid && l.rc_strong_off == 0);
+        for k in 0..n_slots {
+            let p = slots_ptr.add(k);
+            let tag = *(p as *const u8);
+            if tag < 5 {
+                continue;
+            }
+            if rc_dec_ok && tag >= 6 {
+                let strong = *(p as *const usize).add(1) as *mut usize;
+                if *strong > 1 {
+                    *strong -= 1;
+                    continue;
+                }
+            }
+            std::ptr::drop_in_place(p);
+        }
+    }
+    match legacy {
+        None => {
+            let buf = unsafe { std::ptr::NonNull::new_unchecked(slots_ptr) };
+            if i.frame_pool.len() < 64 {
+                i.frame_pool.push(buf);
+            } else {
+                unsafe {
+                    drop(Box::from_raw(std::slice::from_raw_parts_mut(
+                        slots_ptr as *mut std::mem::MaybeUninit<Value>,
+                        FRAME_BUF,
+                    )));
+                }
+            }
+        }
+        Some((mut slots, stack)) => {
+            unsafe { slots.set_len(0) };
+            if i.vm_pool.len() < 64 {
+                i.vm_pool.push((slots, stack));
+            }
+        }
+    }
+
+    caller.handlers.truncate(handlers_len);
+    caller.stack_base = old_stack_base;
+    caller.final_sp = old_final_sp;
+    caller.slots = old_slots;
+    caller.env_raw = old_env_raw;
+    caller.global_body = old_global_body;
+    caller.chunk = old_chunk;
+    caller.n_slots = old_n_slots;
+    caller.slots_packed = old_slots_packed;
+    caller.handler_floor = old_handler_floor;
+    caller.code_base = old_code_base;
+    caller.pc_offsets = old_pc_offsets;
+    let callee_this = std::mem::replace(&mut caller.this_val, old_this);
+    drop(callee_this);
+    caller.error = old_error;
+    caller.ret = old_ret;
+    result
+}
+
 /// Moved-frame entry for a callee that needs a real activation environment. Captured parameter
 /// values are cloned exactly once into that environment; the call's owned argument values still
 /// move into the fixed frame buffer, avoiding the second full clone and both growable `Vec`s used
@@ -22096,6 +22269,25 @@ pub fn run(
 )))]
 pub(crate) unsafe fn run_moved(
     _i: &mut Interp,
+    _chunk: &Rc<Chunk>,
+    _code: &JitCode,
+    _env: *const Env,
+    _this_val: Value,
+    _args: *mut Value,
+    _argc: usize,
+    _frame: (usize, usize),
+) -> Result<Value, Abrupt> {
+    unreachable!("jit code cannot exist on this platform")
+}
+
+/// See the native-code definition; without machine code the fast constructor never commits.
+#[cfg(not(any(
+    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")),
+    all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux", target_os = "windows"))
+)))]
+pub(crate) unsafe fn run_moved_shared(
+    _i: &mut Interp,
+    _caller: &mut JitCtx,
     _chunk: &Rc<Chunk>,
     _code: &JitCode,
     _env: *const Env,

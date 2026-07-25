@@ -356,6 +356,26 @@ impl CallSite {
     }
 }
 
+/// Monomorphic `new`-site cache. Constructors are overwhelmingly fixed per source site, so this
+/// avoids the interpreter-wide constructor hash table after the first execution while retaining
+/// the same epoch/realm/prototype guards.
+#[derive(Clone, Copy)]
+pub(crate) struct ConstructSite {
+    pub call: CallIc,
+    pub prototype_shape: u32,
+    pub prototype_slot: u32,
+    pub arguments_apply_forwarder: bool,
+}
+
+impl ConstructSite {
+    const EMPTY: ConstructSite = ConstructSite {
+        call: CallIc::EMPTY,
+        prototype_shape: 0,
+        prototype_slot: 0,
+        arguments_apply_forwarder: false,
+    };
+}
+
 /// Which update `UpdateLocal` performs, and the value it leaves on the stack: `Pre*` push the
 /// updated value, `Post*` push the original (coerced) value, `*Discard` push nothing (the update
 /// is a statement or a `for` update — its value is unobservable).
@@ -568,7 +588,7 @@ pub enum Op {
     /// Reset `count` slots starting at `start` to undefined (dropping old values): a spliced
     /// callee's hoisted vars start fresh on every pass through the site.
     ResetSlots(u16, u16),
-    New(u16),
+    New(u16, u32),
     /// A regexp literal: source and flags indices in `names`. Each execution allocates a fresh
     /// JS RegExp object while `Interp::regexp_programs` shares the immutable compiled matcher.
     MakeRegExp(u32, u32),
@@ -661,6 +681,8 @@ pub struct Chunk {
     name_num_valid: Vec<std::cell::Cell<bool>>,
     /// One [`CallSite`] per `Call`/`CallWithThis` site (the JIT→JIT fast call's callee cache).
     call_caches: Vec<CallSite>,
+    /// One monomorphic identity cache per `New` site.
+    construct_caches: Vec<std::cell::Cell<ConstructSite>>,
     /// Weak handles pinning every callee address a call cache has ever recorded (see [`CallIc`]),
     /// keyed by that address — one pin per distinct callee no matter how often sites refill, so a
     /// megamorphic site can't exhaust the budget for the whole chunk.
@@ -698,6 +720,21 @@ impl Chunk {
 
     pub(crate) fn instance_capacity_hint(&self) -> usize {
         self.instance_capacity_hint as usize
+    }
+    pub(crate) fn construct_cache(&self, cache: u32) -> ConstructSite {
+        self.construct_caches[cache as usize].get()
+    }
+    pub(crate) fn fill_construct_cache(
+        &self,
+        cache: u32,
+        entry: ConstructSite,
+        constructor: &crate::value::Gc,
+    ) {
+        self.construct_caches[cache as usize].set(entry);
+        self.call_pins
+            .borrow_mut()
+            .entry(entry.call.callee)
+            .or_insert_with(|| Rc::downgrade(constructor));
     }
     /// Whether calls need a real activation environment (captured locals / lexical `this`).
     fn makes_env(&self) -> bool {
@@ -2043,6 +2080,7 @@ fn compile_inner(
         name_num_bits: c.name_num_bits,
         name_num_valid: c.name_num_valid,
         call_caches: c.call_caches,
+        construct_caches: c.construct_caches,
         call_pins: std::cell::RefCell::new(c.call_pins),
         inline_targets: c.inline_targets,
         jit_runs: std::cell::Cell::new(0),
@@ -2259,6 +2297,7 @@ struct Compiler {
     name_num_valid: Vec<std::cell::Cell<bool>>,
     name_seed_stack: Vec<(Vec<NameSeed>, usize)>,
     call_caches: Vec<CallSite>,
+    construct_caches: Vec<std::cell::Cell<ConstructSite>>,
     call_pins: crate::fasthash::FastMap<usize, CallPin>,
     /// Polymorphic call feedback for the source frame currently being recompiled. Like property
     /// seeds, this is a compile-time stack: speculative child splices consume their own original
@@ -2548,6 +2587,12 @@ impl Compiler {
         };
         self.call_caches.push(site);
         (self.call_caches.len() - 1) as u32
+    }
+    fn new_construct_cache(&mut self) -> u32 {
+        let cache = self.construct_caches.len() as u32;
+        self.construct_caches
+            .push(std::cell::Cell::new(ConstructSite::EMPTY));
+        cache
     }
 
     /// The current frame's plan entry for the NEXT call site (call before `new_call_cache`).
@@ -4541,7 +4586,8 @@ impl Compiler {
                     };
                     self.expr(a)?;
                 }
-                self.emit(Op::New(args.len() as u16));
+                let cache = self.new_construct_cache();
+                self.emit(Op::New(args.len() as u16, cache));
                 Ok(())
             }
             Expr::Regex { body, flags } => {
@@ -5616,7 +5662,7 @@ fn run_vm(
                 stack.truncate(at - 2);
                 stack.push(v);
             }
-            Op::New(argc) => {
+            Op::New(argc, _) => {
                 let at = stack.len() - argc as usize;
                 let callee = stack[at - 1].clone();
                 let v = i.construct(callee, &stack[at..])?;
@@ -6492,7 +6538,7 @@ impl Chunk {
             Op::Call(argc, _) => (*argc as usize + 1, 1),
             Op::LoadNameForCall(..) => (0, 2),
             Op::CallWithThis(argc, _) => (*argc as usize + 2, 1),
-            Op::New(argc) => (*argc as usize + 1, 1),
+            Op::New(argc, _) => (*argc as usize + 1, 1),
             Op::MakeRegExp(..) => (0, 1),
             Op::MakeArray(n) => (*n as usize, 1),
             Op::MakeObject(_, count, _) => (*count as usize, 1),
@@ -7044,9 +7090,22 @@ pub(crate) unsafe extern "C" fn jit_new(
     jit_opstat(ctx, pc);
     debug_assert!(matches!(
         (&*ctx.chunk).ops[pc as usize],
-        Op::New(n) if n as u32 == argc
+        Op::New(n, _) if n as u32 == argc
     ));
-    match unsafe { jit_new_inner(&mut *ctx.interp, argc as usize, &mut sp) } {
+    let i = unsafe { &mut *ctx.interp };
+    let cache = match (&*ctx.chunk).ops[pc as usize] {
+        Op::New(_, cache) => cache,
+        _ => unreachable!(),
+    };
+    match unsafe {
+        jit_new_inner(
+            i,
+            Some(ctx as *mut crate::jit::JitCtx),
+            Some((&*ctx.chunk, cache)),
+            argc as usize,
+            &mut sp,
+        )
+    } {
         Ok(()) => crate::jit::SpFlag { sp, flag: 0 },
         Err(ab) => {
             ctx.error = Some(ab);
@@ -7057,13 +7116,23 @@ pub(crate) unsafe extern "C" fn jit_new(
 
 unsafe fn jit_new_inner(
     i: &mut Interp,
+    caller_ctx: Option<*mut crate::jit::JitCtx>,
+    site: Option<(&Chunk, u32)>,
     argc: usize,
     sp: &mut *mut Value,
 ) -> Result<(), Abrupt> {
     let args_ptr = unsafe { sp.sub(argc) };
     // Identity-cached construct: on Some the arguments were MOVED into the callee's frame — pop
     // them virtually and drop only the callee slot.
-    if let Some(r) = unsafe { i.construct_jit_fast(&*sp.sub(argc + 1), args_ptr, argc) } {
+    if let Some(r) = unsafe {
+        i.construct_jit_fast(
+            &*sp.sub(argc + 1),
+            args_ptr,
+            argc,
+            caller_ctx,
+            site,
+        )
+    } {
         *sp = unsafe { args_ptr.sub(1) };
         match unsafe { sp.read() } {
             Value::Obj(o) => {
@@ -8329,8 +8398,10 @@ unsafe fn jit_exec_inner(
             *sp = jit_consume(*sp, argc + 2);
             push!(v);
         }
-        Op::New(argc) => {
-            unsafe { jit_new_inner(i, argc as usize, sp) }?;
+        Op::New(argc, cache) => {
+            unsafe {
+                jit_new_inner(i, None, Some((chunk, cache)), argc as usize, sp)
+            }?;
         }
         Op::MakeRegExp(body, flags) => {
             push!(i.make_regexp(

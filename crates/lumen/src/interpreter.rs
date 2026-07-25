@@ -847,6 +847,9 @@ struct ConstructIc {
     /// without invalidation; the shape guard only removes the repeated string-map lookup.
     prototype_shape: u32,
     prototype_slot: u32,
+    /// The constructor's immutable chunk has the exact Prototype.js
+    /// `this.initialize.apply(this, arguments)` forwarding body.
+    arguments_apply_forwarder: bool,
 }
 
 pub struct Interp {
@@ -5862,24 +5865,105 @@ impl Interp {
         callee: &Value,
         args: *mut Value,
         argc: usize,
+        caller_ctx: Option<*mut crate::jit::JitCtx>,
+        site: Option<(&crate::bytecode::Chunk, u32)>,
     ) -> Option<Result<Value, Abrupt>> {
         if !self.proxies.is_empty() {
             return None;
         }
         let Value::Obj(o) = callee else { return None };
+        // Native constructors do not need an ordinary instance or a JS activation: they build
+        // their result in the native body.  Keep them on the moved-argument contract too, so hot
+        // `new Array()` / `new Date()` sites avoid the full IsConstructor → realm →
+        // construct-dispatch stack on every iteration.  Cross-realm calls retain the layered
+        // path because the callee's intrinsics must be installed before its native body runs.
+        let native = if !self.multi_realm() {
+            let b = o.borrow();
+            if b.is_constructor || b.props.contains("prototype") {
+                match &b.call {
+                    Callable::Native(_) | Callable::NativeData(_) => Some(b.call.clone()),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(call) = native {
+            self.depth += 1;
+            if self.depth > MAX_EVAL_DEPTH {
+                self.depth -= 1;
+                unsafe {
+                    for k in 0..argc {
+                        std::ptr::drop_in_place(args.add(k));
+                    }
+                }
+                return Some(Err(
+                    self.throw("RangeError", "Maximum call stack size exceeded")
+                ));
+            }
+            let saved_ctor = std::mem::replace(&mut self.constructing, true);
+            let saved_nt = std::mem::replace(&mut self.new_target, callee.clone());
+            let args_ref = unsafe { std::slice::from_raw_parts(args, argc) };
+            let r = self
+                .dispatch_native(&call, Value::Undefined, args_ref)
+                .map_err(Abrupt::Throw);
+            self.constructing = saved_ctor;
+            self.new_target = saved_nt;
+            unsafe {
+                for k in 0..argc {
+                    std::ptr::drop_in_place(args.add(k));
+                }
+            }
+            self.depth -= 1;
+            return Some(r);
+        }
         let key = Rc::as_ptr(o) as usize;
         let epoch = crate::bytecode::CALL_IC_EPOCH.load(std::sync::atomic::Ordering::Relaxed);
         let genv = Rc::as_ptr(&self.global_env) as usize;
-        let (ic, prototype_shape, prototype_slot) = match self.construct_ics.get(&key) {
+        let cached_site = site
+            .map(|(chunk, cache)| chunk.construct_cache(cache))
+            .filter(|entry| {
+                entry.call.callee == key
+                    && entry.call.epoch == epoch
+                    && entry.call.global_env == genv
+            });
+        let (ic, prototype_shape, prototype_slot, arguments_apply_forwarder) =
+            match cached_site {
+                Some(entry) => (
+                    entry.call,
+                    entry.prototype_shape,
+                    entry.prototype_slot,
+                    entry.arguments_apply_forwarder,
+                ),
+                None => match self.construct_ics.get(&key) {
             Some(entry)
                 if entry.pin.as_ptr() == Rc::as_ptr(o)
                     && entry.call.epoch == epoch
                     && entry.call.global_env == genv =>
             {
-                (entry.call, entry.prototype_shape, entry.prototype_slot)
+                (
+                    entry.call,
+                    entry.prototype_shape,
+                    entry.prototype_slot,
+                    entry.arguments_apply_forwarder,
+                )
             }
             _ => self.construct_ic_fill(o, key, epoch, genv)?,
+                },
         };
+        let site_state = crate::bytecode::ConstructSite {
+            call: ic,
+            prototype_shape,
+            prototype_slot,
+            arguments_apply_forwarder,
+        };
+        if cached_site.is_none() {
+            if let Some((chunk, cache)) = site {
+                chunk.fill_construct_cache(cache, site_state, o);
+            }
+        }
         // OrdinaryCreateFromConstructor: the instance prototype is the constructor's LIVE
         // `prototype` own data property; anything else (accessor, non-object, absent) → generic.
         let proto = {
@@ -5899,12 +5983,19 @@ impl Interp {
                 _ => return None,
             }
         };
-        let this = crate::value::Object::new_with_capacity(
-            Some(proto),
-            unsafe { &*ic.chunk }
-                .instance_capacity_hint()
-                .max(self.learned_construct_capacity(o)),
-        );
+        let chunk = unsafe { &*ic.chunk };
+        let static_capacity = chunk.instance_capacity_hint();
+        // A non-zero chunk hint is already the exact straight-line `this.x = ...` prefix that
+        // dominates ordinary constructors. Avoid two constructor-identity hash probes per
+        // allocation (read learned hint now, observe/write it after return) in that common case.
+        // Dynamic/forwarding constructors have a zero static hint and retain the learned path.
+        let instance_capacity = if static_capacity != 0 {
+            static_capacity
+        } else {
+            self.learned_construct_capacity(o)
+        };
+        let this =
+            crate::value::Object::new_with_capacity(Some(proto), instance_capacity);
         let this_val = Value::Obj(this.clone());
         // --- committed: identical shape to call_jit_cached's committed path ---
         self.depth += 1;
@@ -5940,16 +6031,17 @@ impl Interp {
             extra: None,
         });
         let env = std::mem::ManuallyDrop::new(unsafe { Rc::from_raw(ic.env) });
-        let chunk = unsafe { &*ic.chunk };
         let code = unsafe { &*ic.code };
         let tv = if ic.uses_this {
             this_val.clone()
         } else {
             Value::Undefined
         };
-        let forwarded = unsafe {
-            self.construct_arguments_apply_forwarder(chunk, &this, &this_val, args, argc)
-        };
+        let forwarded = arguments_apply_forwarder
+            .then(|| unsafe {
+                self.construct_arguments_apply_forwarder(chunk, &this, &this_val, args, argc)
+            })
+            .flatten();
         let mut r = if let Some(r) = forwarded {
             r
         } else if ic.direct & crate::bytecode::CALL_IC_NEEDS_ENV != 0 {
@@ -5966,17 +6058,32 @@ impl Interp {
                 )
             }
         } else {
-            unsafe {
-                crate::jit::run_moved(
-                    self,
-                    chunk,
-                    code,
-                    &*env as *const Env,
-                    tv,
-                    args,
-                    argc,
-                    (ic.n_params as usize, ic.n_slots as usize),
-                )
+            match caller_ctx {
+                Some(caller_ctx) => unsafe {
+                    crate::jit::run_moved_shared(
+                        self,
+                        &mut *caller_ctx,
+                        chunk,
+                        code,
+                        &*env as *const Env,
+                        tv,
+                        args,
+                        argc,
+                        (ic.n_params as usize, ic.n_slots as usize),
+                    )
+                },
+                None => unsafe {
+                    crate::jit::run_moved(
+                        self,
+                        chunk,
+                        code,
+                        &*env as *const Env,
+                        tv,
+                        args,
+                        argc,
+                        (ic.n_params as usize, ic.n_slots as usize),
+                    )
+                },
             }
         };
         self.fn_frames.pop();
@@ -5996,7 +6103,7 @@ impl Interp {
             }
         }
         self.depth -= 1;
-        if r.is_ok() {
+        if r.is_ok() && static_capacity == 0 {
             self.observe_construct_capacity(o, &this);
         }
         // A constructor explicitly returning an object overrides the instance.
@@ -6015,7 +6122,7 @@ impl Interp {
         key: usize,
         epoch: u32,
         genv: usize,
-    ) -> Option<(crate::bytecode::CallIc, u32, u32)> {
+    ) -> Option<(crate::bytecode::CallIc, u32, u32, bool)> {
         let (func, env) = match &o.borrow().call {
             Callable::User(user) => (user.func.clone(), user.env.clone()),
             _ => return None,
@@ -6062,6 +6169,7 @@ impl Interp {
             Some(Some(c)) => c,
             _ => return None,
         };
+        let arguments_apply_forwarder = chunk.jit_arguments_apply_forwarder().is_some();
         // Activation-requiring chunks use the same moved-frame entry as cached ordinary calls:
         // it materializes captured bindings / `arguments` before transferring argument ownership.
         let needs_env = !chunk.jit_no_activation();
@@ -6111,9 +6219,15 @@ impl Interp {
                 pin: Rc::downgrade(o),
                 prototype_shape,
                 prototype_slot,
+                arguments_apply_forwarder,
             },
         );
-        Some((ic, prototype_shape, prototype_slot))
+        Some((
+            ic,
+            prototype_shape,
+            prototype_slot,
+            arguments_apply_forwarder,
+        ))
     }
 
     pub(crate) unsafe fn call_jit_fast(
