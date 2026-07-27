@@ -498,7 +498,7 @@ impl Api {
             if code == 0 {
                 break;
             }
-            let mut buffer = [0i8; 256];
+            let mut buffer = [0 as c_char; 256];
             unsafe { (self.err_error_string)(code, buffer.as_mut_ptr(), buffer.len()) };
             messages.push(
                 unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) }
