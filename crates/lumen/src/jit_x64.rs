@@ -647,7 +647,7 @@ pub(super) fn compile(
             Op::Call(..) | Op::CallWithThis(..) => {
                 a.helper_spflag(H_CALL, pc as u32, unwind);
             }
-            Op::New(argc) => {
+            Op::New(argc, _) => {
                 a.helper_spflag(H_NEW, pc as u32 | ((*argc as u32) << 16), unwind);
             }
             Op::GetPropThis(_, cache) => {
