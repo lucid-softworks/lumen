@@ -16,12 +16,16 @@ impl Write for Captured {
         self.0.borrow_mut().extend_from_slice(buf);
         Ok(buf.len())
     }
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]
 fn certificate_parses_and_verifies_openssl_spkac() {
-    if Command::new("openssl").arg("version").output().is_err() { return; }
+    if Command::new("openssl").arg("version").output().is_err() {
+        return;
+    }
     let directory = std::env::temp_dir().join(format!(
         "lumen-node-spkac-{}-{}",
         std::process::id(),
@@ -31,7 +35,14 @@ fn certificate_parses_and_verifies_openssl_spkac() {
     let key = directory.join("key.pem");
     let spkac = directory.join("spkac.txt");
     let generated = Command::new("openssl")
-        .args(["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:1024", "-out"])
+        .args([
+            "genpkey",
+            "-algorithm",
+            "RSA",
+            "-pkeyopt",
+            "rsa_keygen_bits:1024",
+            "-out",
+        ])
         .arg(&key)
         .output()
         .unwrap();
@@ -51,7 +62,8 @@ fn certificate_parses_and_verifies_openssl_spkac() {
         out: Box::new(out.clone()),
         err: Box::new(Captured::default()),
     });
-    let source = format!(r#"
+    let source = format!(
+        r#"
       const fs = require("node:fs"), {{ Certificate }} = require("node:crypto");
       const encoded = fs.readFileSync({spkac:?}, "utf8").trim();
       const value = encoded.slice(encoded.indexOf("=") + 1);
@@ -61,7 +73,8 @@ fn certificate_parses_and_verifies_openssl_spkac() {
       const corrupt = Buffer.from(value, "base64");
       corrupt[corrupt.length - 1] ^= 1;
       console.log("invalid", Certificate.verifySpkac(corrupt), Certificate.exportChallenge("invalid").length);
-    "#);
+    "#
+    );
     match rt.eval(&source).expect("SPKAC script parses") {
         Completion::Value(_) => {}
         Completion::Throw { name, message } => panic!("uncaught {name}: {message}"),
@@ -69,9 +82,12 @@ fn certificate_parses_and_verifies_openssl_spkac() {
     let _ = std::fs::remove_dir_all(directory);
 
     let text = String::from_utf8(out.0.borrow().clone()).unwrap();
-    assert_eq!(text.lines().collect::<Vec<_>>(), [
-        "static true lumen-challenge",
-        "instance true true",
-        "invalid false 0",
-    ]);
+    assert_eq!(
+        text.lines().collect::<Vec<_>>(),
+        [
+            "static true lumen-challenge",
+            "instance true true",
+            "invalid false 0",
+        ]
+    );
 }

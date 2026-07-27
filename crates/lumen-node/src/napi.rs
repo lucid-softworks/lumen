@@ -52,8 +52,7 @@ pub type napi_status = c_int;
 /// `napi_handle_scope` — opaque; our arena makes scopes no-ops, so this is a non-null token.
 pub type napi_handle_scope = *mut c_void;
 /// The addon's C callback: `(env, info) -> return value`.
-pub type napi_callback =
-    Option<unsafe extern "C" fn(napi_env, napi_callback_info) -> napi_value>;
+pub type napi_callback = Option<unsafe extern "C" fn(napi_env, napi_callback_info) -> napi_value>;
 
 // napi_status values (subset of the C enum).
 const NAPI_OK: napi_status = 0;
@@ -92,7 +91,11 @@ pub struct Env {
 
 impl Env {
     fn new(interp: *mut Ctx) -> Env {
-        Env { interp, handles: Vec::new(), pending: None }
+        Env {
+            interp,
+            handles: Vec::new(),
+            pending: None,
+        }
     }
 
     /// Box a value into the arena and return a stable `napi_value` handle to it.
@@ -175,7 +178,11 @@ fn invoke_napi_callback(
         None => return Ok(Value::Undefined),
     };
     let mut env = Env::new(ip as *mut Ctx);
-    let mut info = CbInfo { this, args: args.to_vec(), data };
+    let mut info = CbInfo {
+        this,
+        args: args.to_vec(),
+        data,
+    };
     let ret = unsafe { cb(&mut env as *mut Env, &mut info as *mut CbInfo) };
     if let Some(err) = env.pending.take() {
         return Err(err);
@@ -309,7 +316,11 @@ pub fn op_load_addon(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Valu
     let exports_handle = env.handle(exports.clone());
     let ret = unsafe { register(&mut env as *mut Env, exports_handle) };
     let pending = env.pending.take();
-    let result = if ret.is_null() { exports } else { unsafe { value_of(ret) } };
+    let result = if ret.is_null() {
+        exports
+    } else {
+        unsafe { value_of(ret) }
+    };
 
     // Retain the library so its code stays mapped for the process lifetime.
     if ctx.host_mut::<AddonRegistry>().is_none() {
@@ -745,7 +756,10 @@ pub unsafe extern "C" fn napi_set_element(
 ) -> napi_status {
     let env = &mut *env;
     let obj = value_of(object);
-    match env.interp().member_set(&obj, &index.to_string(), value_of(value)) {
+    match env
+        .interp()
+        .member_set(&obj, &index.to_string(), value_of(value))
+    {
         Ok(()) => NAPI_OK,
         Err(e) => {
             env.pending = Some(e);
@@ -1007,7 +1021,10 @@ pub unsafe extern "C" fn napi_create_reference(
     let env = &mut *env;
     let v = value_of(value);
     let state = env.napi_state();
-    let entry = RefEntry { value: v, count: initial_refcount };
+    let entry = RefEntry {
+        value: v,
+        count: initial_refcount,
+    };
     let idx = match state.ref_free.pop() {
         Some(i) => {
             state.refs[i] = Some(entry);
@@ -1127,7 +1144,12 @@ pub unsafe extern "C" fn napi_unwrap(
     let Some(addr) = env.interp().object_addr(&obj) else {
         return NAPI_INVALID_ARG;
     };
-    *result = env.napi_state().wraps.get(&addr).copied().unwrap_or(std::ptr::null_mut());
+    *result = env
+        .napi_state()
+        .wraps
+        .get(&addr)
+        .copied()
+        .unwrap_or(std::ptr::null_mut());
     NAPI_OK
 }
 
@@ -1142,7 +1164,11 @@ pub unsafe extern "C" fn napi_remove_wrap(
     let Some(addr) = env.interp().object_addr(&obj) else {
         return NAPI_INVALID_ARG;
     };
-    let data = env.napi_state().wraps.remove(&addr).unwrap_or(std::ptr::null_mut());
+    let data = env
+        .napi_state()
+        .wraps
+        .remove(&addr)
+        .unwrap_or(std::ptr::null_mut());
     if !result.is_null() {
         *result = data;
     }
@@ -1187,7 +1213,11 @@ pub unsafe extern "C" fn napi_define_class(
     // `napi_static` members).
     for i in 0..property_count {
         let d = &*properties.add(i);
-        let target = if d.attributes & NAPI_STATIC != 0 { ctor.clone() } else { proto.clone() };
+        let target = if d.attributes & NAPI_STATIC != 0 {
+            ctor.clone()
+        } else {
+            proto.clone()
+        };
         let pname = if !d.utf8name.is_null() {
             read_utf8(d.utf8name, NAPI_AUTO_LENGTH)
         } else {
@@ -1202,9 +1232,14 @@ pub unsafe extern "C" fn napi_define_class(
             let f = make_callback_fn(env.interp(), &pname, d.method, d.data);
             let _ = env.interp().member_set(&target, &pname, f);
         } else if d.getter.is_some() || d.setter.is_some() {
-            let g = d.getter.map(|_| make_callback_fn(env.interp(), &pname, d.getter, d.data));
-            let s = d.setter.map(|_| make_callback_fn(env.interp(), &pname, d.setter, d.data));
-            env.interp().define_accessor_value(&target, &pname, g, s, enumerable);
+            let g = d
+                .getter
+                .map(|_| make_callback_fn(env.interp(), &pname, d.getter, d.data));
+            let s = d
+                .setter
+                .map(|_| make_callback_fn(env.interp(), &pname, d.setter, d.data));
+            env.interp()
+                .define_accessor_value(&target, &pname, g, s, enumerable);
         } else if !d.value.is_null() {
             let _ = env.interp().member_set(&target, &pname, value_of(d.value));
         }
@@ -1261,8 +1296,10 @@ pub unsafe extern "C" fn napi_create_promise(
 
     // Capture the executor's (resolve, reject) — the Promise constructor calls the executor
     // synchronously, so the slot is populated by the time `construct_value` returns.
-    let slot: Rc<std::cell::RefCell<(Value, Value)>> =
-        Rc::new(std::cell::RefCell::new((Value::Undefined, Value::Undefined)));
+    let slot: Rc<std::cell::RefCell<(Value, Value)>> = Rc::new(std::cell::RefCell::new((
+        Value::Undefined,
+        Value::Undefined,
+    )));
     let slot2 = slot.clone();
     let executor = interp.new_native_fn(
         "",
@@ -1295,15 +1332,28 @@ pub unsafe extern "C" fn napi_create_promise(
 }
 
 /// Shared body for resolve/reject: invoke the stored settler with `value` and consume the deferred.
-unsafe fn settle_deferred(env: napi_env, deferred: napi_deferred, value: napi_value, reject: bool) -> napi_status {
+unsafe fn settle_deferred(
+    env: napi_env,
+    deferred: napi_deferred,
+    value: napi_value,
+    reject: bool,
+) -> napi_status {
     let env = &mut *env;
     let settler = decode_slot(deferred)
-        .and_then(|idx| env.napi_state().deferreds.get_mut(idx).and_then(|d| d.take()))
+        .and_then(|idx| {
+            env.napi_state()
+                .deferreds
+                .get_mut(idx)
+                .and_then(|d| d.take())
+        })
         .map(|d| if reject { d.reject } else { d.resolve });
     let Some(settler) = settler else {
         return NAPI_INVALID_ARG;
     };
-    match env.interp().invoke(settler, Value::Undefined, &[value_of(value)]) {
+    match env
+        .interp()
+        .invoke(settler, Value::Undefined, &[value_of(value)])
+    {
         Ok(_) => NAPI_OK,
         Err(e) => {
             env.pending = Some(e);
@@ -1446,7 +1496,11 @@ pub unsafe extern "C" fn napi_create_async_work(
 ) -> napi_status {
     let env = &mut *env;
     let state = env.napi_state();
-    state.async_works.push(Some(AsyncWork { execute, complete, data }));
+    state.async_works.push(Some(AsyncWork {
+        execute,
+        complete,
+        data,
+    }));
     *result = encode_slot(state.async_works.len() - 1);
     NAPI_OK
 }
@@ -1458,7 +1512,10 @@ pub unsafe extern "C" fn napi_queue_async_work(
 ) -> napi_status {
     let env = &mut *env;
     let Some(w) = decode_slot(work).and_then(|idx| {
-        env.napi_state().async_works.get_mut(idx).and_then(|w| w.take())
+        env.napi_state()
+            .async_works
+            .get_mut(idx)
+            .and_then(|w| w.take())
     }) else {
         return NAPI_INVALID_ARG;
     };

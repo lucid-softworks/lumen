@@ -32,13 +32,19 @@ pub enum Type {
     String,
     StringLiteral(String),
     NumberLiteral(f64),
-    Reference { name: String, arguments: Vec<Type> },
+    Reference {
+        name: String,
+        arguments: Vec<Type>,
+    },
     Array(Box<Type>),
     Tuple(Vec<Type>),
     Union(Vec<Type>),
     Intersection(Vec<Type>),
     Object(Vec<Property>),
-    Function { parameters: Vec<Type>, returns: Box<Type> },
+    Function {
+        parameters: Vec<Type>,
+        returns: Box<Type>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -54,41 +60,72 @@ pub struct Property {
 /// `Array<T>` is normalized against `T[]`; user aliases are resolved by the checker before this
 /// function is called.
 pub fn is_assignable(source: &Type, target: &Type) -> bool {
-    if source == target || matches!(source, Type::Never | Type::Any) || matches!(target, Type::Any | Type::Unknown) {
+    if source == target
+        || matches!(source, Type::Never | Type::Any)
+        || matches!(target, Type::Any | Type::Unknown)
+    {
         return true;
     }
     match (source, target) {
         (_, Type::Union(targets)) => targets.iter().any(|target| is_assignable(source, target)),
         (Type::Union(sources), _) => sources.iter().all(|source| is_assignable(source, target)),
-        (_, Type::Intersection(targets)) => targets.iter().all(|target| is_assignable(source, target)),
-        (Type::Intersection(sources), _) => sources.iter().any(|source| is_assignable(source, target)),
+        (_, Type::Intersection(targets)) => {
+            targets.iter().all(|target| is_assignable(source, target))
+        }
+        (Type::Intersection(sources), _) => {
+            sources.iter().any(|source| is_assignable(source, target))
+        }
         (Type::StringLiteral(_), Type::String) => true,
         (Type::NumberLiteral(_), Type::Number) => true,
         (Type::Undefined, Type::Void) => true,
         (Type::Array(source), Type::Array(target)) => is_assignable(source, target),
-        (Type::Reference { name, arguments }, Type::Array(target)) if name == "Array" && arguments.len() == 1 => {
+        (Type::Reference { name, arguments }, Type::Array(target))
+            if name == "Array" && arguments.len() == 1 =>
+        {
             is_assignable(&arguments[0], target)
         }
-        (Type::Array(source), Type::Reference { name, arguments }) if name == "Array" && arguments.len() == 1 => {
+        (Type::Array(source), Type::Reference { name, arguments })
+            if name == "Array" && arguments.len() == 1 =>
+        {
             is_assignable(source, &arguments[0])
         }
         (
-            Type::Reference { name: source_name, arguments: source_arguments },
-            Type::Reference { name: target_name, arguments: target_arguments },
+            Type::Reference {
+                name: source_name,
+                arguments: source_arguments,
+            },
+            Type::Reference {
+                name: target_name,
+                arguments: target_arguments,
+            },
         ) => {
             source_name == target_name
                 && source_arguments.len() == target_arguments.len()
-                && source_arguments.iter().zip(target_arguments).all(|(source, target)| is_assignable(source, target))
+                && source_arguments
+                    .iter()
+                    .zip(target_arguments)
+                    .all(|(source, target)| is_assignable(source, target))
         }
         (Type::Tuple(sources), Type::Tuple(targets)) => {
             sources.len() == targets.len()
-                && sources.iter().zip(targets).all(|(source, target)| is_assignable(source, target))
+                && sources
+                    .iter()
+                    .zip(targets)
+                    .all(|(source, target)| is_assignable(source, target))
         }
-        (Type::Tuple(sources), Type::Array(target)) => sources.iter().all(|source| is_assignable(source, target)),
+        (Type::Tuple(sources), Type::Array(target)) => {
+            sources.iter().all(|source| is_assignable(source, target))
+        }
         (Type::Object(sources), Type::Object(targets)) => object_assignable(sources, targets),
         (
-            Type::Function { parameters: source_parameters, returns: source_return },
-            Type::Function { parameters: target_parameters, returns: target_return },
+            Type::Function {
+                parameters: source_parameters,
+                returns: source_return,
+            },
+            Type::Function {
+                parameters: target_parameters,
+                returns: target_return,
+            },
         ) => {
             source_parameters.len() == target_parameters.len()
                 // Parameter positions are contravariant; returns are covariant.
@@ -101,7 +138,9 @@ pub fn is_assignable(source: &Type, target: &Type) -> bool {
 
 fn object_assignable(source: &[Property], target: &[Property]) -> bool {
     target.iter().all(|expected| {
-        let actual = source.iter().find(|property| property.name == expected.name);
+        let actual = source
+            .iter()
+            .find(|property| property.name == expected.name);
         match actual {
             Some(actual) => {
                 (!actual.optional || expected.optional) && is_assignable(&actual.ty, &expected.ty)
@@ -144,18 +183,31 @@ fn tokenize(source: &str) -> Result<Vec<Token>, Diagnostic> {
     while index < chars.len() {
         let ch = chars[index];
         if ch.is_whitespace() {
-            if ch == '\n' { line += 1; column = 1; } else { column += 1; }
+            if ch == '\n' {
+                line += 1;
+                column = 1;
+            } else {
+                column += 1;
+            }
             index += 1;
             continue;
         }
         if ch == '/' && chars.get(index + 1) == Some(&'/') {
             index += 2;
             column += 2;
-            while index < chars.len() && chars[index] != '\n' { index += 1; column += 1; }
+            while index < chars.len() && chars[index] != '\n' {
+                index += 1;
+                column += 1;
+            }
             continue;
         }
         if ch == '/' && chars.get(index + 1) == Some(&'*') {
-            let start = Span { start: index, end: index + 2, line, column };
+            let start = Span {
+                start: index,
+                end: index + 2,
+                line,
+                column,
+            };
             index += 2;
             column += 2;
             let mut closed = false;
@@ -166,10 +218,17 @@ fn tokenize(source: &str) -> Result<Vec<Token>, Diagnostic> {
                     closed = true;
                     break;
                 }
-                if chars[index] == '\n' { line += 1; column = 1; } else { column += 1; }
+                if chars[index] == '\n' {
+                    line += 1;
+                    column = 1;
+                } else {
+                    column += 1;
+                }
                 index += 1;
             }
-            if !closed { return Err(diagnostic(1010, "Unterminated comment", start)); }
+            if !closed {
+                return Err(diagnostic(1010, "Unterminated comment", start));
+            }
             continue;
         }
         let start = index;
@@ -178,7 +237,10 @@ fn tokenize(source: &str) -> Result<Vec<Token>, Diagnostic> {
         let kind = if is_ident_start(ch) {
             index += 1;
             column += 1;
-            while index < chars.len() && is_ident_part(chars[index]) { index += 1; column += 1; }
+            while index < chars.len() && is_ident_part(chars[index]) {
+                index += 1;
+                column += 1;
+            }
             Kind::Ident(chars[start..index].iter().collect())
         } else if ch.is_ascii_digit() {
             index += 1;
@@ -188,9 +250,18 @@ fn tokenize(source: &str) -> Result<Vec<Token>, Diagnostic> {
                 column += 1;
             }
             let text: String = chars[start..index].iter().collect();
-            let value = text.parse().map_err(|_| diagnostic(1005, "Invalid numeric literal", Span {
-                start, end: index, line: token_line, column: token_column,
-            }))?;
+            let value = text.parse().map_err(|_| {
+                diagnostic(
+                    1005,
+                    "Invalid numeric literal",
+                    Span {
+                        start,
+                        end: index,
+                        line: token_line,
+                        column: token_column,
+                    },
+                )
+            })?;
             Kind::Number(value)
         } else if ch == '\'' || ch == '"' {
             let quote = ch;
@@ -200,20 +271,41 @@ fn tokenize(source: &str) -> Result<Vec<Token>, Diagnostic> {
             let mut closed = false;
             while index < chars.len() {
                 let current = chars[index];
-                if current == quote { index += 1; column += 1; closed = true; break; }
+                if current == quote {
+                    index += 1;
+                    column += 1;
+                    closed = true;
+                    break;
+                }
                 if current == '\\' {
                     index += 1;
                     column += 1;
-                    let Some(escaped) = chars.get(index).copied() else { break };
-                    value.push(match escaped { 'n' => '\n', 'r' => '\r', 't' => '\t', other => other });
-                } else { value.push(current); }
+                    let Some(escaped) = chars.get(index).copied() else {
+                        break;
+                    };
+                    value.push(match escaped {
+                        'n' => '\n',
+                        'r' => '\r',
+                        't' => '\t',
+                        other => other,
+                    });
+                } else {
+                    value.push(current);
+                }
                 index += 1;
                 column += 1;
             }
             if !closed {
-                return Err(diagnostic(1002, "Unterminated string literal", Span {
-                    start, end: index, line: token_line, column: token_column,
-                }));
+                return Err(diagnostic(
+                    1002,
+                    "Unterminated string literal",
+                    Span {
+                        start,
+                        end: index,
+                        line: token_line,
+                        column: token_column,
+                    },
+                ));
             }
             Kind::String(value)
         } else if ch == '=' && chars.get(index + 1) == Some(&'>') {
@@ -225,13 +317,36 @@ fn tokenize(source: &str) -> Result<Vec<Token>, Diagnostic> {
             column += 1;
             Kind::Punct(ch)
         } else {
-            return Err(diagnostic(1127, format!("Invalid character '{ch}'"), Span {
-                start, end: start + 1, line: token_line, column: token_column,
-            }));
+            return Err(diagnostic(
+                1127,
+                format!("Invalid character '{ch}'"),
+                Span {
+                    start,
+                    end: start + 1,
+                    line: token_line,
+                    column: token_column,
+                },
+            ));
         };
-        tokens.push(Token { kind, span: Span { start, end: index, line: token_line, column: token_column } });
+        tokens.push(Token {
+            kind,
+            span: Span {
+                start,
+                end: index,
+                line: token_line,
+                column: token_column,
+            },
+        });
     }
-    tokens.push(Token { kind: Kind::Eof, span: Span { start: chars.len(), end: chars.len(), line, column } });
+    tokens.push(Token {
+        kind: Kind::Eof,
+        span: Span {
+            start: chars.len(),
+            end: chars.len(),
+            line,
+            column,
+        },
+    });
     Ok(tokens)
 }
 
@@ -241,27 +356,56 @@ struct Parser {
 }
 
 impl Parser {
-    fn current(&self) -> &Token { &self.tokens[self.cursor] }
-    fn advance(&mut self) -> Token { let token = self.current().clone(); self.cursor += 1; token }
+    fn current(&self) -> &Token {
+        &self.tokens[self.cursor]
+    }
+    fn advance(&mut self) -> Token {
+        let token = self.current().clone();
+        self.cursor += 1;
+        token
+    }
     fn error(&self, code: u16, message: impl Into<String>) -> Diagnostic {
         diagnostic(code, message, self.current().span)
     }
     fn eat_punct(&mut self, punct: char) -> bool {
-        if self.current().kind == Kind::Punct(punct) { self.advance(); true } else { false }
+        if self.current().kind == Kind::Punct(punct) {
+            self.advance();
+            true
+        } else {
+            false
+        }
     }
     fn expect_punct(&mut self, punct: char) -> Result<(), Diagnostic> {
-        if self.eat_punct(punct) { Ok(()) } else { Err(self.error(1005, format!("Expected '{punct}'"))) }
+        if self.eat_punct(punct) {
+            Ok(())
+        } else {
+            Err(self.error(1005, format!("Expected '{punct}'")))
+        }
     }
-    fn parse_type(&mut self) -> Result<Type, Diagnostic> { self.parse_union() }
+    fn parse_type(&mut self) -> Result<Type, Diagnostic> {
+        self.parse_union()
+    }
     fn parse_union(&mut self) -> Result<Type, Diagnostic> {
         let mut members = vec![self.parse_intersection()?];
-        while self.eat_punct('|') { members.push(self.parse_intersection()?); }
-        Ok(if members.len() == 1 { members.pop().unwrap() } else { Type::Union(members) })
+        while self.eat_punct('|') {
+            members.push(self.parse_intersection()?);
+        }
+        Ok(if members.len() == 1 {
+            members.pop().unwrap()
+        } else {
+            Type::Union(members)
+        })
     }
     fn parse_intersection(&mut self) -> Result<Type, Diagnostic> {
         let mut members = vec![self.parse_postfix()?];
-        while self.eat_punct('&') { members.push(self.parse_postfix()?); }
-        Ok(if members.len() == 1 { members.pop().unwrap() } else { Type::Intersection(members) })
+        while self.eat_punct('&') {
+            members.push(self.parse_postfix()?);
+        }
+        Ok(if members.len() == 1 {
+            members.pop().unwrap()
+        } else {
+            Type::Intersection(members)
+        })
     }
     fn parse_postfix(&mut self) -> Result<Type, Diagnostic> {
         let mut ty = self.parse_primary()?;
@@ -284,17 +428,28 @@ impl Parser {
     }
     fn parse_named(&mut self, name: String) -> Result<Type, Diagnostic> {
         let primitive = match name.as_str() {
-            "any" => Some(Type::Any), "unknown" => Some(Type::Unknown), "never" => Some(Type::Never),
-            "void" => Some(Type::Void), "undefined" => Some(Type::Undefined), "null" => Some(Type::Null),
-            "boolean" => Some(Type::Boolean), "number" => Some(Type::Number), "bigint" => Some(Type::BigInt),
-            "string" => Some(Type::String), _ => None,
+            "any" => Some(Type::Any),
+            "unknown" => Some(Type::Unknown),
+            "never" => Some(Type::Never),
+            "void" => Some(Type::Void),
+            "undefined" => Some(Type::Undefined),
+            "null" => Some(Type::Null),
+            "boolean" => Some(Type::Boolean),
+            "number" => Some(Type::Number),
+            "bigint" => Some(Type::BigInt),
+            "string" => Some(Type::String),
+            _ => None,
         };
-        if let Some(ty) = primitive { return Ok(ty); }
+        if let Some(ty) = primitive {
+            return Ok(ty);
+        }
         let mut arguments = Vec::new();
         if self.eat_punct('<') {
             loop {
                 arguments.push(self.parse_type()?);
-                if !self.eat_punct(',') { break; }
+                if !self.eat_punct(',') {
+                    break;
+                }
             }
             self.expect_punct('>')?;
         }
@@ -304,7 +459,10 @@ impl Parser {
         let mut elements = Vec::new();
         while !self.eat_punct(']') {
             elements.push(self.parse_type()?);
-            if !self.eat_punct(',') { self.expect_punct(']')?; break; }
+            if !self.eat_punct(',') {
+                self.expect_punct(']')?;
+                break;
+            }
         }
         Ok(Type::Tuple(elements))
     }
@@ -319,7 +477,10 @@ impl Parser {
             self.expect_punct(':')?;
             let ty = self.parse_type()?;
             properties.push(Property { name, optional, ty });
-            if !self.eat_punct(';') && !self.eat_punct(',') { self.expect_punct('}')?; break; }
+            if !self.eat_punct(';') && !self.eat_punct(',') {
+                self.expect_punct('}')?;
+                break;
+            }
         }
         Ok(Type::Object(properties))
     }
@@ -328,16 +489,28 @@ impl Parser {
         let mut parameters = Vec::new();
         let mut function_shape = true;
         while !self.eat_punct(')') {
-            if !matches!(self.current().kind, Kind::Ident(_)) { function_shape = false; break; }
+            if !matches!(self.current().kind, Kind::Ident(_)) {
+                function_shape = false;
+                break;
+            }
             self.advance();
             self.eat_punct('?');
-            if !self.eat_punct(':') { function_shape = false; break; }
+            if !self.eat_punct(':') {
+                function_shape = false;
+                break;
+            }
             parameters.push(self.parse_type()?);
-            if !self.eat_punct(',') { self.expect_punct(')')?; break; }
+            if !self.eat_punct(',') {
+                self.expect_punct(')')?;
+                break;
+            }
         }
         if function_shape && matches!(self.current().kind, Kind::Arrow) {
             self.advance();
-            return Ok(Type::Function { parameters, returns: Box::new(self.parse_type()?) });
+            return Ok(Type::Function {
+                parameters,
+                returns: Box::new(self.parse_type()?),
+            });
         }
         self.cursor = saved;
         let ty = self.parse_type()?;
@@ -347,11 +520,19 @@ impl Parser {
 }
 
 fn diagnostic(code: u16, message: impl Into<String>, span: Span) -> Diagnostic {
-    Diagnostic { code, message: message.into(), span }
+    Diagnostic {
+        code,
+        message: message.into(),
+        span,
+    }
 }
 
-fn is_ident_start(ch: char) -> bool { ch == '_' || ch == '$' || ch.is_ascii_alphabetic() }
-fn is_ident_part(ch: char) -> bool { is_ident_start(ch) || ch.is_ascii_digit() }
+fn is_ident_start(ch: char) -> bool {
+    ch == '_' || ch == '$' || ch.is_ascii_alphabetic()
+}
+fn is_ident_part(ch: char) -> bool {
+    is_ident_start(ch) || ch.is_ascii_digit()
+}
 
 #[cfg(test)]
 mod tests {
@@ -360,14 +541,27 @@ mod tests {
     #[test]
     fn parses_composite_types() {
         assert_eq!(
-            parse_type_expression("{ id: number; label?: string; tags: Array<string> } | null").unwrap(),
+            parse_type_expression("{ id: number; label?: string; tags: Array<string> } | null")
+                .unwrap(),
             Type::Union(vec![
                 Type::Object(vec![
-                    Property { name: "id".into(), optional: false, ty: Type::Number },
-                    Property { name: "label".into(), optional: true, ty: Type::String },
                     Property {
-                        name: "tags".into(), optional: false,
-                        ty: Type::Reference { name: "Array".into(), arguments: vec![Type::String] },
+                        name: "id".into(),
+                        optional: false,
+                        ty: Type::Number
+                    },
+                    Property {
+                        name: "label".into(),
+                        optional: true,
+                        ty: Type::String
+                    },
+                    Property {
+                        name: "tags".into(),
+                        optional: false,
+                        ty: Type::Reference {
+                            name: "Array".into(),
+                            arguments: vec![Type::String]
+                        },
                     },
                 ]),
                 Type::Null,
@@ -380,7 +574,10 @@ mod tests {
         assert_eq!(
             parse_type_expression("(value: [number, string[]]) => boolean").unwrap(),
             Type::Function {
-                parameters: vec![Type::Tuple(vec![Type::Number, Type::Array(Box::new(Type::String))])],
+                parameters: vec![Type::Tuple(vec![
+                    Type::Number,
+                    Type::Array(Box::new(Type::String))
+                ])],
                 returns: Box::new(Type::Boolean),
             }
         );

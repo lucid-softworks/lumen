@@ -187,7 +187,11 @@ fn parse_int(s: &str, mut radix: u32) -> f64 {
     if !any {
         return f64::NAN;
     }
-    if neg { -acc } else { acc }
+    if neg {
+        -acc
+    } else {
+        acc
+    }
 }
 
 fn parse_float(s: &str) -> f64 {

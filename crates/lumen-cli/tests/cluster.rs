@@ -47,7 +47,10 @@ fn cluster_fork_runs_real_worker_process() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        String::from_utf8(output.stdout).unwrap().lines().collect::<Vec<_>>(),
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
         ["message 1 42 true", "exit 0 worker 1 true 41"]
     );
 }

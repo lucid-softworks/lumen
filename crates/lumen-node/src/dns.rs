@@ -40,9 +40,7 @@ pub fn op_lookup(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, V
         .host_mut::<TaskRegistry>()
         .expect("runtime installs the registry")
         .register(resolve, Some(reject), decode_addr_list);
-    spawn_handle(ctx).spawn_blocking(id, move || {
-        Box::new(system_lookup(&hostname, family))
-    });
+    spawn_handle(ctx).spawn_blocking(id, move || Box::new(system_lookup(&hostname, family)));
     Ok(Value::Undefined)
 }
 
@@ -71,7 +69,10 @@ fn decode_addr_list(
     ctx: &mut Ctx,
     payload: Box<dyn std::any::Any + Send>,
 ) -> Result<Vec<Value>, Value> {
-    match *payload.downcast::<Result<Vec<(String, u8)>, String>>().expect("lookup payload") {
+    match *payload
+        .downcast::<Result<Vec<(String, u8)>, String>>()
+        .expect("lookup payload")
+    {
         Ok(list) => {
             let items = list
                 .into_iter()
@@ -243,15 +244,21 @@ fn parse_answers(buf: &[u8], qtype: u16) -> Result<Vec<Rec>, String> {
 fn parse_rdata(buf: &[u8], start: usize, len: usize, rtype: u16) -> Option<Rec> {
     let rdata = &buf[start..start + len];
     match rtype {
-        1 if len == 4 => Some(Rec::Str(format!("{}.{}.{}.{}", rdata[0], rdata[1], rdata[2], rdata[3]))),
+        1 if len == 4 => Some(Rec::Str(format!(
+            "{}.{}.{}.{}",
+            rdata[0], rdata[1], rdata[2], rdata[3]
+        ))),
         28 if len == 16 => {
             let mut seg = [0u16; 8];
             for (i, s) in seg.iter_mut().enumerate() {
                 *s = u16::from_be_bytes([rdata[i * 2], rdata[i * 2 + 1]]);
             }
-            Some(Rec::Str(std::net::Ipv6Addr::new(
-                seg[0], seg[1], seg[2], seg[3], seg[4], seg[5], seg[6], seg[7],
-            ).to_string()))
+            Some(Rec::Str(
+                std::net::Ipv6Addr::new(
+                    seg[0], seg[1], seg[2], seg[3], seg[4], seg[5], seg[6], seg[7],
+                )
+                .to_string(),
+            ))
         }
         5 | 2 | 12 => Some(Rec::Str(read_name(buf, start).0)), // CNAME / NS / PTR
         15 if len >= 3 => {
@@ -346,7 +353,10 @@ fn decode_records(
     ctx: &mut Ctx,
     payload: Box<dyn std::any::Any + Send>,
 ) -> Result<Vec<Value>, Value> {
-    match *payload.downcast::<Result<Vec<Rec>, String>>().expect("resolve payload") {
+    match *payload
+        .downcast::<Result<Vec<Rec>, String>>()
+        .expect("resolve payload")
+    {
         Ok(records) => {
             let items = records
                 .into_iter()
@@ -372,7 +382,9 @@ fn decode_records(
 // ---- shared helpers --------------------------------------------------------------------------
 
 fn arg_str(ctx: &mut Ctx, args: &[Value], i: usize) -> Result<String, Value> {
-    Ok(ctx.coerce_string(args.get(i).unwrap_or(&Value::Undefined))?.to_string())
+    Ok(ctx
+        .coerce_string(args.get(i).unwrap_or(&Value::Undefined))?
+        .to_string())
 }
 
 fn arg_num(args: &[Value], i: usize) -> f64 {
@@ -380,7 +392,12 @@ fn arg_num(args: &[Value], i: usize) -> f64 {
 }
 
 /// The trailing `(resolve, reject)` callback pair the glue passes at index `at`.
-fn settle_pair(ctx: &mut Ctx, args: &[Value], at: usize, who: &str) -> Result<(Value, Value), Value> {
+fn settle_pair(
+    ctx: &mut Ctx,
+    args: &[Value],
+    at: usize,
+    who: &str,
+) -> Result<(Value, Value), Value> {
     match (args.get(at), args.get(at + 1)) {
         (Some(res), Some(rej)) if res.is_callable() && rej.is_callable() => {
             Ok((res.clone(), rej.clone()))

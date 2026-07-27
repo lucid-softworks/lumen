@@ -140,7 +140,10 @@ impl NetStream {
         match self {
             Self::Tcp(stream) => stream.set_nodelay(on),
             #[cfg(unix)]
-            Self::Unix(_) => Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "TCP_NODELAY is not available for Unix sockets")),
+            Self::Unix(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "TCP_NODELAY is not available for Unix sockets",
+            )),
         }
     }
 
@@ -353,7 +356,9 @@ fn register_stream(ctx: &mut Ctx, stream: NetStream) -> Result<Vec<Value>, Value
     let peer = stream
         .peer_addr()
         .map_err(|e| ctx.make_error("Error", format!("peer_addr: {e}")))?;
-    let reg = ctx.host_mut::<NetRegistry>().expect("net registry installed");
+    let reg = ctx
+        .host_mut::<NetRegistry>()
+        .expect("net registry installed");
     let id = reg.next_socket;
     reg.next_socket += 1;
     reg.sockets.insert(
@@ -373,24 +378,46 @@ fn register_stream(ctx: &mut Ctx, stream: NetStream) -> Result<Vec<Value>, Value
             Value::Num(peer.port() as f64),
             Value::str(family_of(&peer)),
         ]),
-        _ => Ok(vec![Value::Num(id as f64), Value::Undefined, Value::Undefined, Value::Undefined, Value::Undefined, Value::Undefined]),
+        _ => Ok(vec![
+            Value::Num(id as f64),
+            Value::Undefined,
+            Value::Undefined,
+            Value::Undefined,
+            Value::Undefined,
+            Value::Undefined,
+        ]),
     }
 }
 
 pub(crate) fn take_stream(ctx: &mut Ctx, id: u64) -> Result<TcpStream, Value> {
-    let entry = ctx.host_mut::<NetRegistry>().expect("net registry installed").sockets.remove(&id)
+    let entry = ctx
+        .host_mut::<NetRegistry>()
+        .expect("net registry installed")
+        .sockets
+        .remove(&id)
         .ok_or_else(|| ctx.make_error("Error", "TCP socket is not available for TLS upgrade"))?;
-    match Arc::try_unwrap(entry.stream)
-        .map_err(|_| ctx.make_error("Error", "TCP socket has an active read and cannot be upgraded to TLS"))?
-    {
+    match Arc::try_unwrap(entry.stream).map_err(|_| {
+        ctx.make_error(
+            "Error",
+            "TCP socket has an active read and cannot be upgraded to TLS",
+        )
+    })? {
         NetStream::Tcp(stream) => Ok(stream),
         #[cfg(unix)]
-        NetStream::Unix(_) => Err(ctx.make_error("Error", "Unix sockets cannot be upgraded to TLS")),
+        NetStream::Unix(_) => {
+            Err(ctx.make_error("Error", "Unix sockets cannot be upgraded to TLS"))
+        }
     }
 }
 
 fn path_err(syscall: &'static str, path: String, error: std::io::Error) -> NetErr {
-    NetErr { code: io_code(&error), syscall, message: error.to_string(), address: Some(path), port: None }
+    NetErr {
+        code: io_code(&error),
+        syscall,
+        message: error.to_string(),
+        address: Some(path),
+        port: None,
+    }
 }
 
 // ---- TCP client ops -----------------------------------------------------------------------------
@@ -404,10 +431,11 @@ fn op_connect(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> 
     let port = arg_u64(args, 1) as u16;
     let (resolve, reject) = take_resolve_reject(ctx, args.get(2), args.get(3))?;
 
-    let id = ctx
-        .host_mut::<TaskRegistry>()
-        .expect("registry")
-        .register(resolve, Some(reject), decode_connect);
+    let id = ctx.host_mut::<TaskRegistry>().expect("registry").register(
+        resolve,
+        Some(reject),
+        decode_connect,
+    );
     completions(ctx).run_blocking(id, move || {
         let result: Result<NetStream, NetErr> = (|| {
             let addrs: Vec<SocketAddr> = match (host.as_str(), port).to_socket_addrs() {
@@ -444,18 +472,27 @@ fn decode_connect(
     ctx: &mut Ctx,
     payload: Box<dyn std::any::Any + Send>,
 ) -> Result<Vec<Value>, Value> {
-    match *payload.downcast::<Result<NetStream, NetErr>>().expect("connect payload") {
+    match *payload
+        .downcast::<Result<NetStream, NetErr>>()
+        .expect("connect payload")
+    {
         Ok(stream) => register_stream(ctx, stream),
         Err(e) => Err(net_error_value(ctx, &e)),
     }
 }
 
 fn op_connect_path(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
-    let path = ctx.coerce_string(args.first().unwrap_or(&Value::Undefined))?.to_string();
+    let path = ctx
+        .coerce_string(args.first().unwrap_or(&Value::Undefined))?
+        .to_string();
     let (resolve, reject) = take_resolve_reject(ctx, args.get(1), args.get(2))?;
     #[cfg(unix)]
     {
-        let id = ctx.host_mut::<TaskRegistry>().expect("registry").register(resolve, Some(reject), decode_connect);
+        let id = ctx.host_mut::<TaskRegistry>().expect("registry").register(
+            resolve,
+            Some(reject),
+            decode_connect,
+        );
         completions(ctx).run_blocking(id, move || {
             let result = UnixStream::connect(&path)
                 .map(NetStream::Unix)
@@ -467,7 +504,10 @@ fn op_connect_path(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Va
     #[cfg(not(unix))]
     {
         let _ = (resolve, reject);
-        Err(ctx.make_error("Error", format!("Unix-domain sockets are not supported on this platform: {path}")))
+        Err(ctx.make_error(
+            "Error",
+            format!("Unix-domain sockets are not supported on this platform: {path}"),
+        ))
     }
 }
 
@@ -493,7 +533,10 @@ fn op_read(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
     if unref {
         reg.set_unref(id);
     }
-    if let Some(e) = ctx.host_mut::<NetRegistry>().and_then(|r| r.sockets.get_mut(&sid)) {
+    if let Some(e) = ctx
+        .host_mut::<NetRegistry>()
+        .and_then(|r| r.sockets.get_mut(&sid))
+    {
         e.pending = Some(id);
     }
     completions(ctx).run_blocking(id, move || {
@@ -513,7 +556,10 @@ fn op_read(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
 }
 
 fn decode_read(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<Vec<Value>, Value> {
-    match *payload.downcast::<Result<Vec<u8>, NetErr>>().expect("read payload") {
+    match *payload
+        .downcast::<Result<Vec<u8>, NetErr>>()
+        .expect("read payload")
+    {
         Ok(bytes) if bytes.is_empty() => Ok(vec![Value::Null]),
         Ok(bytes) => Ok(vec![ctx.make_uint8array(&bytes)?]),
         Err(e) => Err(net_error_value(ctx, &e)),
@@ -547,10 +593,11 @@ fn op_write(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
         return Ok(Value::Undefined);
     };
 
-    let id = ctx
-        .host_mut::<TaskRegistry>()
-        .expect("registry")
-        .register(resolve, Some(reject), decode_write);
+    let id = ctx.host_mut::<TaskRegistry>().expect("registry").register(
+        resolve,
+        Some(reject),
+        decode_write,
+    );
     completions(ctx).run_blocking(id, move || {
         let mut s: &NetStream = &stream;
         let result: Result<(), NetErr> = s
@@ -562,8 +609,14 @@ fn op_write(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
     Ok(Value::Undefined)
 }
 
-fn decode_write(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<Vec<Value>, Value> {
-    match *payload.downcast::<Result<(), NetErr>>().expect("write payload") {
+fn decode_write(
+    ctx: &mut Ctx,
+    payload: Box<dyn std::any::Any + Send>,
+) -> Result<Vec<Value>, Value> {
+    match *payload
+        .downcast::<Result<(), NetErr>>()
+        .expect("write payload")
+    {
         Ok(()) => Ok(vec![]),
         Err(e) => Err(net_error_value(ctx, &e)),
     }
@@ -572,7 +625,10 @@ fn decode_write(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result
 /// `(socketId)` — half-close: shut the write half so the peer sees EOF; our read half stays open.
 fn op_end_writable(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
     let sid = arg_u64(args, 0);
-    if let Some(e) = ctx.host_mut::<NetRegistry>().and_then(|r| r.sockets.get(&sid)) {
+    if let Some(e) = ctx
+        .host_mut::<NetRegistry>()
+        .and_then(|r| r.sockets.get(&sid))
+    {
         let _ = e.stream.shutdown(Shutdown::Write);
     }
     Ok(Value::Undefined)
@@ -614,7 +670,12 @@ fn op_set_keep_alive(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, 
     let Some(stream) = stream else {
         return Ok(Value::Bool(false));
     };
-    Ok(Value::Bool(stream.tcp().map(|tcp| set_keep_alive(tcp, on, (delay_ms / 1000.0) as i32)).unwrap_or(false)))
+    Ok(Value::Bool(
+        stream
+            .tcp()
+            .map(|tcp| set_keep_alive(tcp, on, (delay_ms / 1000.0) as i32))
+            .unwrap_or(false),
+    ))
 }
 
 /// `(socketId)` — `socket.address()`; `null` if the socket is gone.
@@ -676,7 +737,9 @@ fn op_listen(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
         .local_addr()
         .map_err(|e| ctx.make_error("Error", format!("local_addr: {e}")))?;
 
-    let reg = ctx.host_mut::<NetRegistry>().expect("net registry installed");
+    let reg = ctx
+        .host_mut::<NetRegistry>()
+        .expect("net registry installed");
     let id = reg.next_server;
     reg.next_server += 1;
     reg.servers.insert(
@@ -692,28 +755,39 @@ fn op_listen(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
 
     let o = Value::Obj(ctx.new_object());
     let _ = ctx.set_member(&o, "serverId", Value::Num(id as f64));
-    let _ = ctx.set_member(&o, "address", Value::from_string(local_addr.ip().to_string()));
+    let _ = ctx.set_member(
+        &o,
+        "address",
+        Value::from_string(local_addr.ip().to_string()),
+    );
     let _ = ctx.set_member(&o, "port", Value::Num(local_addr.port() as f64));
     let _ = ctx.set_member(&o, "family", Value::str(family_of(&local_addr)));
     Ok(o)
 }
 
 fn op_listen_path(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
-    let path = ctx.coerce_string(args.first().unwrap_or(&Value::Undefined))?.to_string();
+    let path = ctx
+        .coerce_string(args.first().unwrap_or(&Value::Undefined))?
+        .to_string();
     #[cfg(unix)]
     {
         let listener = UnixListener::bind(&path)
             .map_err(|error| net_error_value(ctx, &path_err("listen", path.clone(), error)))?;
-        let reg = ctx.host_mut::<NetRegistry>().expect("net registry installed");
+        let reg = ctx
+            .host_mut::<NetRegistry>()
+            .expect("net registry installed");
         let id = reg.next_server;
         reg.next_server += 1;
-        reg.servers.insert(id, ServerEntry {
-            listener: Arc::new(NetListener::Unix(listener)),
-            closed: Arc::new(AtomicBool::new(false)),
-            local_addr: ServerAddress::Unix(path.clone()),
-            unref: false,
-            pending: None,
-        });
+        reg.servers.insert(
+            id,
+            ServerEntry {
+                listener: Arc::new(NetListener::Unix(listener)),
+                closed: Arc::new(AtomicBool::new(false)),
+                local_addr: ServerAddress::Unix(path.clone()),
+                unref: false,
+                pending: None,
+            },
+        );
         let object = Value::Obj(ctx.new_object());
         let _ = ctx.set_member(&object, "serverId", Value::Num(id as f64));
         let _ = ctx.set_member(&object, "address", Value::from_string(path));
@@ -721,7 +795,10 @@ fn op_listen_path(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Val
     }
     #[cfg(not(unix))]
     {
-        Err(ctx.make_error("Error", format!("Unix-domain sockets are not supported on this platform: {path}")))
+        Err(ctx.make_error(
+            "Error",
+            format!("Unix-domain sockets are not supported on this platform: {path}"),
+        ))
     }
 }
 
@@ -749,7 +826,10 @@ fn op_accept(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
     if unref {
         reg.set_unref(id);
     }
-    if let Some(e) = ctx.host_mut::<NetRegistry>().and_then(|r| r.servers.get_mut(&sid)) {
+    if let Some(e) = ctx
+        .host_mut::<NetRegistry>()
+        .and_then(|r| r.servers.get_mut(&sid))
+    {
         e.pending = Some(id);
     }
     completions(ctx).run_blocking(id, move || {
@@ -796,9 +876,15 @@ fn op_close_server(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Va
         match local_addr {
             ServerAddress::Tcp(local_addr) => {
                 let wake = if local_addr.ip().is_unspecified() {
-                    let ip = if local_addr.is_ipv6() { IpAddr::V6(Ipv6Addr::LOCALHOST) } else { IpAddr::V4(Ipv4Addr::LOCALHOST) };
+                    let ip = if local_addr.is_ipv6() {
+                        IpAddr::V6(Ipv6Addr::LOCALHOST)
+                    } else {
+                        IpAddr::V4(Ipv4Addr::LOCALHOST)
+                    };
                     SocketAddr::new(ip, local_addr.port())
-                } else { local_addr };
+                } else {
+                    local_addr
+                };
                 let _ = TcpStream::connect(wake);
             }
             #[cfg(unix)]
@@ -880,7 +966,9 @@ fn op_udp_bind(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value>
         .local_addr()
         .map_err(|e| ctx.make_error("Error", format!("local_addr: {e}")))?;
 
-    let reg = ctx.host_mut::<DgramRegistry>().expect("dgram registry installed");
+    let reg = ctx
+        .host_mut::<DgramRegistry>()
+        .expect("dgram registry installed");
     let id = reg.next;
     reg.next += 1;
     reg.sockets.insert(
@@ -926,7 +1014,10 @@ fn op_udp_recv(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value>
     if unref {
         reg.set_unref(id);
     }
-    if let Some(e) = ctx.host_mut::<DgramRegistry>().and_then(|r| r.sockets.get_mut(&sid)) {
+    if let Some(e) = ctx
+        .host_mut::<DgramRegistry>()
+        .and_then(|r| r.sockets.get_mut(&sid))
+    {
         e.pending = Some(id);
     }
     completions(ctx).run_blocking(id, move || {
@@ -1014,10 +1105,11 @@ fn op_udp_send(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value>
         return Ok(Value::Undefined);
     };
 
-    let id = ctx
-        .host_mut::<TaskRegistry>()
-        .expect("registry")
-        .register(resolve, Some(reject), decode_send);
+    let id = ctx.host_mut::<TaskRegistry>().expect("registry").register(
+        resolve,
+        Some(reject),
+        decode_send,
+    );
     completions(ctx).run_blocking(id, move || {
         let result: Result<usize, NetErr> = (address.as_str(), port)
             .to_socket_addrs()
@@ -1041,7 +1133,10 @@ fn op_udp_send(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value>
 }
 
 fn decode_send(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<Vec<Value>, Value> {
-    match *payload.downcast::<Result<usize, NetErr>>().expect("send payload") {
+    match *payload
+        .downcast::<Result<usize, NetErr>>()
+        .expect("send payload")
+    {
         Ok(n) => Ok(vec![Value::Num(n as f64)]),
         Err(e) => Err(net_error_value(ctx, &e)),
     }
@@ -1128,7 +1223,9 @@ fn op_udp_set_multicast_ttl(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<
             "dgram.setMulticastTTL is not supported for udp6 in lumen (std exposes no IPv6 multicast-hops setter)",
         ));
     }
-    with_udp(ctx, sid, "setMulticastTTL", |s, _| s.set_multicast_ttl_v4(ttl))
+    with_udp(ctx, sid, "setMulticastTTL", |s, _| {
+        s.set_multicast_ttl_v4(ttl)
+    })
 }
 
 fn op_udp_set_multicast_loop(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
@@ -1143,16 +1240,26 @@ fn op_udp_set_multicast_loop(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result
     })
 }
 
-fn op_udp_set_multicast_interface(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
+fn op_udp_set_multicast_interface(
+    ctx: &mut Ctx,
+    _t: Value,
+    args: &[Value],
+) -> Result<Value, Value> {
     let sid = arg_u64(args, 0);
-    let interface = ctx.coerce_string(args.get(1).unwrap_or(&Value::Undefined))?.to_string();
+    let interface = ctx
+        .coerce_string(args.get(1).unwrap_or(&Value::Undefined))?
+        .to_string();
     with_udp(ctx, sid, "setMulticastInterface", |socket, kind6| {
         set_multicast_interface(socket, kind6, &interface)
     })
 }
 
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
-fn set_multicast_interface(socket: &UdpSocket, kind6: bool, interface: &str) -> std::io::Result<()> {
+fn set_multicast_interface(
+    socket: &UdpSocket,
+    kind6: bool,
+    interface: &str,
+) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
 
     const IPPROTO_IP: i32 = 0;
@@ -1166,29 +1273,65 @@ fn set_multicast_interface(socket: &UdpSocket, kind6: bool, interface: &str) -> 
     #[cfg(target_os = "macos")]
     const IPV6_MULTICAST_IF: i32 = 9;
     extern "C" {
-        fn setsockopt(socket: i32, level: i32, name: i32, value: *const std::os::raw::c_void, length: u32) -> i32;
+        fn setsockopt(
+            socket: i32,
+            level: i32,
+            name: i32,
+            value: *const std::os::raw::c_void,
+            length: u32,
+        ) -> i32;
     }
     let (level, option, value) = if kind6 {
-        let index = interface.trim_start_matches('%').parse::<u32>().map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "IPv6 multicast interface must be a numeric index")
-        })?;
+        let index = interface
+            .trim_start_matches('%')
+            .parse::<u32>()
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "IPv6 multicast interface must be a numeric index",
+                )
+            })?;
         (IPPROTO_IPV6, IPV6_MULTICAST_IF, index)
     } else {
         let address = interface.parse::<Ipv4Addr>().map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "IPv4 multicast interface must be an IPv4 address")
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "IPv4 multicast interface must be an IPv4 address",
+            )
         })?;
-        (IPPROTO_IP, IP_MULTICAST_IF, u32::from_ne_bytes(address.octets()))
+        (
+            IPPROTO_IP,
+            IP_MULTICAST_IF,
+            u32::from_ne_bytes(address.octets()),
+        )
     };
     // SAFETY: the socket fd is live and value points to a valid 32-bit socket-option payload.
     let result = unsafe {
-        setsockopt(socket.as_raw_fd(), level, option, &value as *const u32 as *const _, std::mem::size_of::<u32>() as u32)
+        setsockopt(
+            socket.as_raw_fd(),
+            level,
+            option,
+            &value as *const u32 as *const _,
+            std::mem::size_of::<u32>() as u32,
+        )
     };
-    if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 #[cfg(not(all(unix, any(target_os = "macos", target_os = "linux"))))]
-fn set_multicast_interface(_socket: &UdpSocket, _kind6: bool, _interface: &str) -> std::io::Result<()> {
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "multicast interface selection is unavailable"))
+fn set_multicast_interface(
+    _socket: &UdpSocket,
+    _kind6: bool,
+    _interface: &str,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "multicast interface selection is unavailable",
+    ))
 }
 
 fn parse_v4(s: &str) -> Result<Ipv4Addr, ()> {
@@ -1217,39 +1360,80 @@ fn op_udp_drop_source_membership(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Re
 
 fn udp_source_membership(ctx: &mut Ctx, args: &[Value], join: bool) -> Result<Value, Value> {
     let sid = arg_u64(args, 0);
-    let source_text = ctx.coerce_string(args.get(1).unwrap_or(&Value::Undefined))?.to_string();
-    let group_text = ctx.coerce_string(args.get(2).unwrap_or(&Value::Undefined))?.to_string();
+    let source_text = ctx
+        .coerce_string(args.get(1).unwrap_or(&Value::Undefined))?
+        .to_string();
+    let group_text = ctx
+        .coerce_string(args.get(2).unwrap_or(&Value::Undefined))?
+        .to_string();
     let interface_text = match args.get(3) {
         Some(Value::Undefined) | Some(Value::Null) | None => String::new(),
         Some(value) => ctx.coerce_string(value)?.to_string(),
     };
-    let source = parse_v4(&source_text)
-        .map_err(|_| ctx.make_error("TypeError", format!("Invalid source address: {source_text}")))?;
-    let group = parse_v4(&group_text)
-        .map_err(|_| ctx.make_error("TypeError", format!("Invalid multicast address: {group_text}")))?;
+    let source = parse_v4(&source_text).map_err(|_| {
+        ctx.make_error(
+            "TypeError",
+            format!("Invalid source address: {source_text}"),
+        )
+    })?;
+    let group = parse_v4(&group_text).map_err(|_| {
+        ctx.make_error(
+            "TypeError",
+            format!("Invalid multicast address: {group_text}"),
+        )
+    })?;
     if !group.is_multicast() {
-        return Err(ctx.make_error("TypeError", format!("Invalid multicast address: {group_text}")));
+        return Err(ctx.make_error(
+            "TypeError",
+            format!("Invalid multicast address: {group_text}"),
+        ));
     }
-    let interface = if interface_text.is_empty() { Ipv4Addr::UNSPECIFIED } else {
-        parse_v4(&interface_text)
-            .map_err(|_| ctx.make_error("TypeError", format!("Invalid interface address: {interface_text}")))?
+    let interface = if interface_text.is_empty() {
+        Ipv4Addr::UNSPECIFIED
+    } else {
+        parse_v4(&interface_text).map_err(|_| {
+            ctx.make_error(
+                "TypeError",
+                format!("Invalid interface address: {interface_text}"),
+            )
+        })?
     };
-    let kind6 = ctx.host_mut::<DgramRegistry>()
+    let kind6 = ctx
+        .host_mut::<DgramRegistry>()
         .and_then(|registry| registry.sockets.get(&sid))
         .map(|entry| entry.kind6)
         .unwrap_or(false);
     if kind6 {
-        return Err(ctx.make_error("Error", "source-specific multicast is only supported for udp4 sockets"));
+        return Err(ctx.make_error(
+            "Error",
+            "source-specific multicast is only supported for udp4 sockets",
+        ));
     }
-    let syscall = if join { "addSourceSpecificMembership" } else { "dropSourceSpecificMembership" };
-    with_udp(ctx, sid, syscall, |socket, _| set_source_membership(socket, source, group, interface, join))
+    let syscall = if join {
+        "addSourceSpecificMembership"
+    } else {
+        "dropSourceSpecificMembership"
+    };
+    with_udp(ctx, sid, syscall, |socket, _| {
+        set_source_membership(socket, source, group, interface, join)
+    })
 }
 
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
-fn set_source_membership(socket: &UdpSocket, source: Ipv4Addr, group: Ipv4Addr, interface: Ipv4Addr, join: bool) -> std::io::Result<()> {
+fn set_source_membership(
+    socket: &UdpSocket,
+    source: Ipv4Addr,
+    group: Ipv4Addr,
+    interface: Ipv4Addr,
+    join: bool,
+) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
     #[repr(C)]
-    struct IpMreqSource { group: u32, source: u32, interface: u32 }
+    struct IpMreqSource {
+        group: u32,
+        source: u32,
+        interface: u32,
+    }
     const IPPROTO_IP: i32 = 0;
     #[cfg(target_os = "linux")]
     const IP_ADD_SOURCE_MEMBERSHIP: i32 = 39;
@@ -1260,23 +1444,52 @@ fn set_source_membership(socket: &UdpSocket, source: Ipv4Addr, group: Ipv4Addr, 
     #[cfg(target_os = "macos")]
     const IP_DROP_SOURCE_MEMBERSHIP: i32 = 71;
     extern "C" {
-        fn setsockopt(socket: i32, level: i32, name: i32, value: *const std::os::raw::c_void, length: u32) -> i32;
+        fn setsockopt(
+            socket: i32,
+            level: i32,
+            name: i32,
+            value: *const std::os::raw::c_void,
+            length: u32,
+        ) -> i32;
     }
     let request = IpMreqSource {
         group: u32::from_ne_bytes(group.octets()),
         source: u32::from_ne_bytes(source.octets()),
         interface: u32::from_ne_bytes(interface.octets()),
     };
-    let option = if join { IP_ADD_SOURCE_MEMBERSHIP } else { IP_DROP_SOURCE_MEMBERSHIP };
-    let result = unsafe {
-        setsockopt(socket.as_raw_fd(), IPPROTO_IP, option, &request as *const IpMreqSource as *const _, std::mem::size_of::<IpMreqSource>() as u32)
+    let option = if join {
+        IP_ADD_SOURCE_MEMBERSHIP
+    } else {
+        IP_DROP_SOURCE_MEMBERSHIP
     };
-    if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    let result = unsafe {
+        setsockopt(
+            socket.as_raw_fd(),
+            IPPROTO_IP,
+            option,
+            &request as *const IpMreqSource as *const _,
+            std::mem::size_of::<IpMreqSource>() as u32,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 #[cfg(not(all(unix, any(target_os = "macos", target_os = "linux"))))]
-fn set_source_membership(_socket: &UdpSocket, _source: Ipv4Addr, _group: Ipv4Addr, _interface: Ipv4Addr, _join: bool) -> std::io::Result<()> {
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "source-specific multicast is unavailable on this platform"))
+fn set_source_membership(
+    _socket: &UdpSocket,
+    _source: Ipv4Addr,
+    _group: Ipv4Addr,
+    _interface: Ipv4Addr,
+    _join: bool,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "source-specific multicast is unavailable on this platform",
+    ))
 }
 
 fn udp_membership(ctx: &mut Ctx, args: &[Value], join: bool) -> Result<Value, Value> {
@@ -1293,11 +1506,16 @@ fn udp_membership(ctx: &mut Ctx, args: &[Value], join: bool) -> Result<Value, Va
         .and_then(|r| r.sockets.get(&sid))
         .map(|e| e.kind6)
         .unwrap_or(false);
-    let syscall = if join { "addMembership" } else { "dropMembership" };
+    let syscall = if join {
+        "addMembership"
+    } else {
+        "dropMembership"
+    };
 
     if kind6 {
-        let group = parse_v6(&mcast)
-            .map_err(|_| ctx.make_error("TypeError", format!("Invalid multicast address: {mcast}")))?;
+        let group = parse_v6(&mcast).map_err(|_| {
+            ctx.make_error("TypeError", format!("Invalid multicast address: {mcast}"))
+        })?;
         let idx = iface.parse::<u32>().unwrap_or(0);
         return with_udp(ctx, sid, syscall, |s, _| {
             if join {
@@ -1312,8 +1530,9 @@ fn udp_membership(ctx: &mut Ctx, args: &[Value], join: bool) -> Result<Value, Va
     let iface_addr = if iface.is_empty() {
         Ipv4Addr::UNSPECIFIED
     } else {
-        parse_v4(&iface)
-            .map_err(|_| ctx.make_error("TypeError", format!("Invalid interface address: {iface}")))?
+        parse_v4(&iface).map_err(|_| {
+            ctx.make_error("TypeError", format!("Invalid interface address: {iface}"))
+        })?
     };
     with_udp(ctx, sid, syscall, |s, _| {
         if join {
@@ -1409,7 +1628,11 @@ fn socket_buffer_size(socket: &UdpSocket, receive: bool) -> std::io::Result<i32>
             &mut length,
         )
     };
-    if result == 0 { Ok(value) } else { Err(std::io::Error::last_os_error()) }
+    if result == 0 {
+        Ok(value)
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
@@ -1448,17 +1671,27 @@ fn set_socket_buffer_size(socket: &UdpSocket, receive: bool, size: i32) -> std::
             std::mem::size_of::<i32>() as u32,
         )
     };
-    if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 #[cfg(not(all(unix, any(target_os = "macos", target_os = "linux"))))]
 fn socket_buffer_size(_socket: &UdpSocket, _receive: bool) -> std::io::Result<i32> {
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "socket buffer sizes are unavailable"))
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "socket buffer sizes are unavailable",
+    ))
 }
 
 #[cfg(not(all(unix, any(target_os = "macos", target_os = "linux"))))]
 fn set_socket_buffer_size(_socket: &UdpSocket, _receive: bool, _size: i32) -> std::io::Result<()> {
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "socket buffer sizes are unavailable"))
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "socket buffer sizes are unavailable",
+    ))
 }
 
 // ---- IPV6_UNICAST_HOPS via setsockopt (std exposes no IPv6 hop-limit setter) --------------------

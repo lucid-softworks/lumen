@@ -16,12 +16,16 @@ impl Write for Captured {
         self.0.borrow_mut().extend_from_slice(buf);
         Ok(buf.len())
     }
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]
 fn x509_parses_and_verifies_openssl_certificate() {
-    if Command::new("openssl").arg("version").output().is_err() { return; }
+    if Command::new("openssl").arg("version").output().is_err() {
+        return;
+    }
     let dir = std::env::temp_dir().join(format!(
         "lumen-x509-test-{}-{}",
         std::process::id(),

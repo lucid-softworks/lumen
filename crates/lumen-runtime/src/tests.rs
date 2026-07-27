@@ -210,7 +210,15 @@ fn process_basics() {
         console.log(typeof process.setuid, typeof process.setgid, Array.isArray(process.getgroups()));
         "#,
     );
-    assert_eq!(out.lines(), ["string true", "true string", "object string", "function function true"]);
+    assert_eq!(
+        out.lines(),
+        [
+            "string true",
+            "true string",
+            "object string",
+            "function function true"
+        ]
+    );
 }
 
 #[test]
@@ -228,7 +236,10 @@ fn process_reports_native_cpu_and_memory_metrics() {
         console.log(process.availableMemory() > 0, process.constrainedMemory() >= 0);
         "#,
     );
-    assert_eq!(out.lines(), ["true true", "true true true", "true true true", "true true"]);
+    assert_eq!(
+        out.lines(),
+        ["true true", "true true true", "true true true", "true true"]
+    );
 }
 
 #[test]
@@ -450,13 +461,10 @@ struct TempDir(std::path::PathBuf);
 
 impl TempDir {
     fn new(tag: &str) -> TempDir {
-        static NEXT_TEMP_DIR: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(1);
+        static NEXT_TEMP_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let id = NEXT_TEMP_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "lumen-fs-test-{tag}-{}-{id}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("lumen-fs-test-{tag}-{}-{id}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("mkdir tempdir");
         TempDir(dir)
     }
@@ -897,7 +905,9 @@ const BEYOND_MINIMUM: &[&str] = &[
 #[test]
 fn wintertc_minimum_common_api() {
     let (mut rt, out, _err) = test_runtime();
-    let all = [WINTERTC_SUPPORTED, WINTERTC_NOT_YET, BEYOND_MINIMUM].concat().join(",");
+    let all = [WINTERTC_SUPPORTED, WINTERTC_NOT_YET, BEYOND_MINIMUM]
+        .concat()
+        .join(",");
     eval_ok(
         &mut rt,
         &format!(
@@ -998,7 +1008,10 @@ fn error_reporting_globals() {
     );
     assert_eq!(
         err.lines(),
-        ["Uncaught TypeError: boom-default", "Uncaught (in promise) loud"]
+        [
+            "Uncaught TypeError: boom-default",
+            "Uncaught (in promise) loud"
+        ]
     );
 }
 
@@ -1115,7 +1128,8 @@ fn sse_drive(mode: SseMode, conns: usize, script: &str) -> Vec<String> {
     let port = spawn_sse(mode, conns);
     let (mut rt, out, _err) = test_runtime();
     let src = script.replace("{PORT}", &port.to_string());
-    rt.eval(&src).expect("sse script parses and runs to quiescence");
+    rt.eval(&src)
+        .expect("sse script parses and runs to quiescence");
     out.lines()
 }
 
@@ -1276,7 +1290,8 @@ fn worker_drive(files: &[(&str, &str)], main_src: &str) -> Vec<String> {
     }
     let (mut rt, out, _err) = test_runtime();
     let src = main_src.replace("{DIR}", &dir.0.to_string_lossy());
-    rt.eval(&src).expect("worker main parses and runs to quiescence");
+    rt.eval(&src)
+        .expect("worker main parses and runs to quiescence");
     out.lines()
 }
 
@@ -1334,7 +1349,10 @@ fn worker_bidirectional_conversation() {
         w.postMessage(send[i++]);
         "#,
     );
-    assert_eq!(lines, ["running total 1", "running total 3", "running total 6"]);
+    assert_eq!(
+        lines,
+        ["running total 1", "running total 3", "running total 6"]
+    );
 }
 
 #[test]
@@ -1419,7 +1437,8 @@ fn ws_drive(mode: WsMode, script: &str) -> Vec<String> {
     let port = spawn_echo(mode, 1);
     let (mut rt, out, _err) = test_runtime();
     let src = script.replace("{PORT}", &port.to_string());
-    rt.eval(&src).expect("ws script parses and runs to quiescence");
+    rt.eval(&src)
+        .expect("ws script parses and runs to quiescence");
     out.lines()
 }
 
@@ -1534,7 +1553,13 @@ fn websocket_constructor_validation() {
     );
     assert_eq!(
         out.lines(),
-        ["SyntaxError", "SyntaxError", "SyntaxError", "SyntaxError", "0 1 2 3"]
+        [
+            "SyntaxError",
+            "SyntaxError",
+            "SyntaxError",
+            "SyntaxError",
+            "0 1 2 3"
+        ]
     );
 }
 

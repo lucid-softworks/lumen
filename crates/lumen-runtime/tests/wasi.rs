@@ -12,7 +12,9 @@ impl Write for Captured {
         self.0.borrow_mut().extend_from_slice(buffer);
         Ok(buffer.len())
     }
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]
@@ -20,7 +22,8 @@ fn preview1_imports_read_and_write_guest_memory() {
     let mut runtime = Runtime::new();
     let out = Captured::default();
     runtime.engine().ctx().op_state().put(ConsoleOut {
-        out: Box::new(out.clone()), err: Box::new(Captured::default()),
+        out: Box::new(out.clone()),
+        err: Box::new(Captured::default()),
     });
     let source = r#"
         const { WASI } = require("node:wasi");
@@ -49,7 +52,10 @@ fn preview1_imports_read_and_write_guest_memory() {
         Completion::Throw { name, message } => panic!("uncaught {name}: {message}"),
     }
     assert_eq!(
-        String::from_utf8(out.0.borrow().clone()).unwrap().lines().collect::<Vec<_>>(),
+        String::from_utf8(out.0.borrow().clone())
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
         [
             "sizes 0 2 10",
             "args app value",
@@ -76,9 +82,11 @@ fn preview1_preopens_confine_and_access_files() {
     let mut runtime = Runtime::new();
     let out = Captured::default();
     runtime.engine().ctx().op_state().put(ConsoleOut {
-        out: Box::new(out.clone()), err: Box::new(Captured::default()),
+        out: Box::new(out.clone()),
+        err: Box::new(Captured::default()),
     });
-    let source = format!(r#"
+    let source = format!(
+        r#"
         const {{ WASI }} = require("node:wasi");
         const wasi = new WASI({{ version: "preview1", preopens: {{ "/sandbox": {directory:?} }} }});
         const memory = new WebAssembly.Memory({{ initial: 1 }});
@@ -101,14 +109,29 @@ fn preview1_preopens_confine_and_access_files() {
         b.set(Buffer.from("escape-link"), 256);
         console.log("symlink", i.path_open(3, 0, 256, 11, 0, 0n, 0n, 0, 272));
         console.log("close", i.fd_close(fd), i.fd_read(fd, 56, 1, 64));
-    "#);
+    "#
+    );
     match runtime.eval(&source).expect("source parses") {
         Completion::Value(_) => {}
         Completion::Throw { name, message } => panic!("uncaught {name}: {message}"),
     }
     assert_eq!(
-        String::from_utf8(out.0.borrow().clone()).unwrap().lines().collect::<Vec<_>>(),
-        ["prestat 0 8", "name /sandbox", "open 0", "read 0 hello", "seek 0", "write 0 5", "stat 0 5", "escape 76", "symlink 76", "close 0 8"]
+        String::from_utf8(out.0.borrow().clone())
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        [
+            "prestat 0 8",
+            "name /sandbox",
+            "open 0",
+            "read 0 hello",
+            "seek 0",
+            "write 0 5",
+            "stat 0 5",
+            "escape 76",
+            "symlink 76",
+            "close 0 8"
+        ]
     );
     assert_eq!(std::fs::read(directory.join("data.txt")).unwrap(), b"HELLO");
     let _ = std::fs::remove_dir_all(directory);

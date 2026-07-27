@@ -147,7 +147,10 @@ mod city {
     #[inline]
     fn mur(a: u32, h: u32) -> u32 {
         let a = a.wrapping_mul(C1).rotate_right(17).wrapping_mul(C2);
-        (h ^ a).rotate_right(19).wrapping_mul(5).wrapping_add(0xe6546b64)
+        (h ^ a)
+            .rotate_right(19)
+            .wrapping_mul(5)
+            .wrapping_add(0xe6546b64)
     }
 
     fn hash32_len_0_to_4(s: &[u8]) -> u32 {
@@ -201,11 +204,26 @@ mod city {
         let mut g = C1.wrapping_mul(len);
         let mut f = g;
 
-        let a0 = r32(s, n - 4).wrapping_mul(C1).rotate_right(17).wrapping_mul(C2);
-        let a1 = r32(s, n - 8).wrapping_mul(C1).rotate_right(17).wrapping_mul(C2);
-        let a2 = r32(s, n - 16).wrapping_mul(C1).rotate_right(17).wrapping_mul(C2);
-        let a3 = r32(s, n - 12).wrapping_mul(C1).rotate_right(17).wrapping_mul(C2);
-        let a4 = r32(s, n - 20).wrapping_mul(C1).rotate_right(17).wrapping_mul(C2);
+        let a0 = r32(s, n - 4)
+            .wrapping_mul(C1)
+            .rotate_right(17)
+            .wrapping_mul(C2);
+        let a1 = r32(s, n - 8)
+            .wrapping_mul(C1)
+            .rotate_right(17)
+            .wrapping_mul(C2);
+        let a2 = r32(s, n - 16)
+            .wrapping_mul(C1)
+            .rotate_right(17)
+            .wrapping_mul(C2);
+        let a3 = r32(s, n - 12)
+            .wrapping_mul(C1)
+            .rotate_right(17)
+            .wrapping_mul(C2);
+        let a4 = r32(s, n - 20)
+            .wrapping_mul(C1)
+            .rotate_right(17)
+            .wrapping_mul(C2);
 
         h ^= a0;
         h = h.rotate_right(19).wrapping_mul(5).wrapping_add(0xe6546b64);
@@ -215,21 +233,35 @@ mod city {
         g = g.rotate_right(19).wrapping_mul(5).wrapping_add(0xe6546b64);
         g ^= a3;
         g = g.rotate_right(19).wrapping_mul(5).wrapping_add(0xe6546b64);
-        f = f.wrapping_add(a4).rotate_right(19).wrapping_mul(5).wrapping_add(0xe6546b64);
+        f = f
+            .wrapping_add(a4)
+            .rotate_right(19)
+            .wrapping_mul(5)
+            .wrapping_add(0xe6546b64);
 
         let mut iters = (n - 1) / 20;
         let mut p = 0usize;
         while iters != 0 {
             let b0 = r32(s, p).wrapping_mul(C1).rotate_right(17).wrapping_mul(C2);
             let b1 = r32(s, p + 4);
-            let b2 = r32(s, p + 8).wrapping_mul(C1).rotate_right(17).wrapping_mul(C2);
-            let b3 = r32(s, p + 12).wrapping_mul(C1).rotate_right(17).wrapping_mul(C2);
+            let b2 = r32(s, p + 8)
+                .wrapping_mul(C1)
+                .rotate_right(17)
+                .wrapping_mul(C2);
+            let b3 = r32(s, p + 12)
+                .wrapping_mul(C1)
+                .rotate_right(17)
+                .wrapping_mul(C2);
             let b4 = r32(s, p + 16);
 
             h ^= b0;
             h = h.rotate_right(18).wrapping_mul(5).wrapping_add(0xe6546b64);
             f = f.wrapping_add(b1).rotate_right(19).wrapping_mul(C1);
-            g = g.wrapping_add(b2).rotate_right(18).wrapping_mul(5).wrapping_add(0xe6546b64);
+            g = g
+                .wrapping_add(b2)
+                .rotate_right(18)
+                .wrapping_mul(5)
+                .wrapping_add(0xe6546b64);
             h ^= b3.wrapping_add(b1);
             h = h.rotate_right(19).wrapping_mul(5).wrapping_add(0xe6546b64);
             g ^= b4;
@@ -319,7 +351,8 @@ mod city {
                 .rotate_right(43)
                 .wrapping_add(c.rotate_right(30))
                 .wrapping_add(d),
-            a.wrapping_add(b.wrapping_add(K2).rotate_right(18)).wrapping_add(c),
+            a.wrapping_add(b.wrapping_add(K2).rotate_right(18))
+                .wrapping_add(c),
             mul,
         )
     }
@@ -342,7 +375,11 @@ mod city {
             .rotate_right(43)
             .wrapping_add(b.rotate_right(30).wrapping_add(c).wrapping_mul(9));
         let v = ((a.wrapping_add(g)) ^ d).wrapping_add(f).wrapping_add(1);
-        let w = u.wrapping_add(v).wrapping_mul(mul).swap_bytes().wrapping_add(h);
+        let w = u
+            .wrapping_add(v)
+            .wrapping_mul(mul)
+            .swap_bytes()
+            .wrapping_add(h);
         let x = e.wrapping_add(f).rotate_right(42).wrapping_add(c);
         let y = v
             .wrapping_add(w)
@@ -358,7 +395,10 @@ mod city {
             .swap_bytes()
             .wrapping_add(b);
         let b1 = shiftmix(
-            z.wrapping_add(a1).wrapping_mul(mul).wrapping_add(d).wrapping_add(h),
+            z.wrapping_add(a1)
+                .wrapping_mul(mul)
+                .wrapping_add(d)
+                .wrapping_add(h),
         )
         .wrapping_mul(mul);
         b1.wrapping_add(x)
@@ -367,7 +407,12 @@ mod city {
     /// `weakHashLen32WithSeeds` — returns (first, second).
     #[inline]
     fn weak_hash_len_32(s: &[u8], off: usize, a: u64, b: u64) -> (u64, u64) {
-        let (w, x, y, z) = (r64(s, off), r64(s, off + 8), r64(s, off + 16), r64(s, off + 24));
+        let (w, x, y, z) = (
+            r64(s, off),
+            r64(s, off + 8),
+            r64(s, off + 16),
+            r64(s, off + 24),
+        );
         let mut a1 = a.wrapping_add(w);
         let b1 = b.wrapping_add(a1).wrapping_add(z).rotate_right(21);
         let c = a1;
@@ -414,7 +459,12 @@ mod city {
             y = y.wrapping_add(v.0.wrapping_add(r64(s, p + 40)));
             z = z.wrapping_add(w.0).rotate_right(33).wrapping_mul(K1);
             v = weak_hash_len_32(s, p, v.1.wrapping_mul(K1), x.wrapping_add(w.0));
-            w = weak_hash_len_32(s, p + 32, z.wrapping_add(w.1), y.wrapping_add(r64(s, p + 16)));
+            w = weak_hash_len_32(
+                s,
+                p + 32,
+                z.wrapping_add(w.1),
+                y.wrapping_add(r64(s, p + 16)),
+            );
             std::mem::swap(&mut z, &mut x);
             p += 64;
             len -= 64;
@@ -458,7 +508,9 @@ mod xx {
     }
     #[inline]
     fn merge64(acc: u64, other: u64) -> u64 {
-        (acc ^ round64(0, other)).wrapping_mul(P64_1).wrapping_add(P64_4)
+        (acc ^ round64(0, other))
+            .wrapping_mul(P64_1)
+            .wrapping_add(P64_4)
     }
     #[inline]
     fn avalanche64(v: u64) -> u64 {
@@ -740,7 +792,11 @@ mod xx3 {
         let mut out = DEFAULT_SECRET;
         if seed != 0 {
             for j in 0..24usize {
-                let add = if j % 2 == 0 { seed } else { seed.wrapping_neg() };
+                let add = if j % 2 == 0 {
+                    seed
+                } else {
+                    seed.wrapping_neg()
+                };
                 let v = r64(&DEFAULT_SECRET, j * 8).wrapping_add(add);
                 out[j * 8..j * 8 + 8].copy_from_slice(&v.to_le_bytes());
             }
@@ -771,8 +827,8 @@ mod xx3 {
             }
             for l in 0..LANES {
                 let mixed = data[l] ^ r64(&self.secret, sc_off + l * 8);
-                self.state[l] = self.state[l]
-                    .wrapping_add((mixed & 0xffffffff).wrapping_mul(mixed >> 32));
+                self.state[l] =
+                    self.state[l].wrapping_add((mixed & 0xffffffff).wrapping_mul(mixed >> 32));
             }
             // state += shuffle(data, [1,0,3,2,5,4,7,6])
             for l in 0..LANES {
@@ -927,7 +983,10 @@ mod murmur {
         let len = s.len() as u32;
         let mut h1 = seed;
         for i in 0..(len >> 2) as usize {
-            let k1 = r32(s, i * 4).wrapping_mul(C1).rotate_left(15).wrapping_mul(C2);
+            let k1 = r32(s, i * 4)
+                .wrapping_mul(C1)
+                .rotate_left(15)
+                .wrapping_mul(C2);
             h1 ^= k1;
             h1 = h1.rotate_left(13).wrapping_mul(5).wrapping_add(0xe6546b64);
         }
@@ -1170,7 +1229,11 @@ mod tests {
             "ff64" => vec![0xffu8; 64],
             "utf8" => "héllo wörld 你好 🌍 café Ⓐ ∑∫ 𝕳𝖊𝖑𝖑𝖔".as_bytes().to_vec(),
             _ => {
-                let n: usize = id.strip_prefix("len").expect("known input id").parse().unwrap();
+                let n: usize = id
+                    .strip_prefix("len")
+                    .expect("known input id")
+                    .parse()
+                    .unwrap();
                 pat(n)
             }
         }
@@ -1224,12 +1287,26 @@ mod tests {
         }
         // Every family must actually appear (guards against a truncated fixture).
         for fam in [
-            "wyhash", "default", "cityHash32", "cityHash64", "xxHash32", "xxHash64", "xxHash3",
-            "murmur32v3", "murmur32v2", "murmur64v2", "rapidhash", "crc32", "adler32",
+            "wyhash",
+            "default",
+            "cityHash32",
+            "cityHash64",
+            "xxHash32",
+            "xxHash64",
+            "xxHash3",
+            "murmur32v3",
+            "murmur32v2",
+            "murmur64v2",
+            "rapidhash",
+            "crc32",
+            "adler32",
         ] {
             assert!(by_family.contains_key(fam), "oracle has no rows for {fam}");
         }
-        assert!(checked > 10_000, "oracle matrix suspiciously small: {checked}");
+        assert!(
+            checked > 10_000,
+            "oracle matrix suspiciously small: {checked}"
+        );
     }
 
     /// Zig stdlib's own wyhash test vectors (upstream wyhash final v4.2 `test_vector.cpp`).
@@ -1241,7 +1318,11 @@ mod tests {
             (2, 0x32dd92e4b2915153, "abc"),
             (3, 0x8619124089a3a16b, "message digest"),
             (4, 0x7a43afb61d7f5f40, "abcdefghijklmnopqrstuvwxyz"),
-            (5, 0xff42329b90e50d58, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"),
+            (
+                5,
+                0xff42329b90e50d58,
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+            ),
             (
                 6,
                 0xc39cab13b115aad3,
@@ -1249,7 +1330,11 @@ mod tests {
             ),
         ];
         for (seed, expect, input) in vs {
-            assert_eq!(wyhash(seed, input.as_bytes()), expect, "wyhash({seed}, {input:?})");
+            assert_eq!(
+                wyhash(seed, input.as_bytes()),
+                expect,
+                "wyhash({seed}, {input:?})"
+            );
         }
     }
 
@@ -1275,7 +1360,11 @@ mod tests {
             0x4b575f5bf25600d6,
         ];
         for (n, expect) in sizes.iter().zip(outcomes) {
-            assert_eq!(rapidhash(RAPID_SEED, &bytes[..*n]), expect, "rapidhash len {n}");
+            assert_eq!(
+                rapidhash(RAPID_SEED, &bytes[..*n]),
+                expect,
+                "rapidhash len {n}"
+            );
         }
     }
 }

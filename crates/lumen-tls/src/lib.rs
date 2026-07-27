@@ -38,7 +38,8 @@ type VerifyResult = unsafe extern "C" fn(*const Ssl) -> c_long;
 type SslAccept = unsafe extern "C" fn(*mut Ssl) -> c_int;
 type BioNewMem = unsafe extern "C" fn(*const c_void, c_int) -> *mut c_void;
 type BioFree = unsafe extern "C" fn(*mut c_void) -> c_int;
-type PemRead = unsafe extern "C" fn(*mut c_void, *mut *mut c_void, *const c_void, *mut c_void) -> *mut c_void;
+type PemRead =
+    unsafe extern "C" fn(*mut c_void, *mut *mut c_void, *const c_void, *mut c_void) -> *mut c_void;
 type CtxUseObject = unsafe extern "C" fn(*mut SslCtx, *mut c_void) -> c_int;
 type CtxCheckKey = unsafe extern "C" fn(*const SslCtx) -> c_int;
 type ObjectFree = unsafe extern "C" fn(*mut c_void);
@@ -47,7 +48,8 @@ type SslGetCipher = unsafe extern "C" fn(*const Ssl) -> *const c_void;
 type CipherGetName = unsafe extern "C" fn(*const c_void) -> *const c_char;
 type SslSetAlpn = unsafe extern "C" fn(*mut Ssl, *const u8, u32) -> c_int;
 type SslGetAlpn = unsafe extern "C" fn(*const Ssl, *mut *const u8, *mut u32);
-type AlpnSelectCallback = unsafe extern "C" fn(*mut Ssl, *mut *const u8, *mut u8, *const u8, u32, *mut c_void) -> c_int;
+type AlpnSelectCallback =
+    unsafe extern "C" fn(*mut Ssl, *mut *const u8, *mut u8, *const u8, u32, *mut c_void) -> c_int;
 type CtxSetAlpnSelect = unsafe extern "C" fn(*mut SslCtx, Option<AlpnSelectCallback>, *mut c_void);
 type ErrGetError = unsafe extern "C" fn() -> u64;
 type ErrErrorString = unsafe extern "C" fn(u64, *mut c_char, usize);
@@ -96,11 +98,15 @@ impl Api {
         let ssl = Library::open_candidates(ssl_candidates())?;
         unsafe {
             let init: InitSsl = ssl.function("OPENSSL_init_ssl")?;
-            if init(0, std::ptr::null()) != 1 { return Err("OPENSSL_init_ssl failed".into()); }
+            if init(0, std::ptr::null()) != 1 {
+                return Err("OPENSSL_init_ssl failed".into());
+            }
             let method: ClientMethod = ssl.function("TLS_client_method")?;
             let ctx_new: CtxNew = ssl.function("SSL_CTX_new")?;
             // Ensure the method symbol is callable before returning the table.
-            if method().is_null() { return Err("TLS_client_method returned null".into()); }
+            if method().is_null() {
+                return Err("TLS_client_method returned null".into());
+            }
             Ok(Self {
                 ctx_new,
                 ctx_free: ssl.function("SSL_CTX_free")?,
@@ -160,7 +166,9 @@ unsafe extern "C" fn select_alpn(
     input_length: u32,
     argument: *mut c_void,
 ) -> c_int {
-    if input.is_null() || argument.is_null() { return 3; }
+    if input.is_null() || argument.is_null() {
+        return 3;
+    }
     let offered = unsafe { std::slice::from_raw_parts(input, input_length as usize) };
     let configured = unsafe { &*(argument as *const AlpnConfig) };
     for protocol in &configured.0 {
@@ -168,9 +176,14 @@ unsafe extern "C" fn select_alpn(
         while offset < offered.len() {
             let length = offered[offset] as usize;
             offset += 1;
-            if offset + length > offered.len() { return 2; }
+            if offset + length > offered.len() {
+                return 2;
+            }
             if &offered[offset..offset + length] == protocol {
-                unsafe { *output = protocol.as_ptr(); *output_length = protocol.len() as u8; }
+                unsafe {
+                    *output = protocol.as_ptr();
+                    *output_length = protocol.len() as u8;
+                }
                 return 0;
             }
             offset += length;
@@ -188,15 +201,26 @@ impl TlsStream {
         Self::connect_with_options(stream, hostname, &[], true)
     }
 
-    pub fn connect_with_alpn(stream: TcpStream, hostname: &str, protocols: &[String]) -> Result<Self, String> {
+    pub fn connect_with_alpn(
+        stream: TcpStream,
+        hostname: &str,
+        protocols: &[String],
+    ) -> Result<Self, String> {
         Self::connect_with_options(stream, hostname, protocols, true)
     }
 
-    pub fn connect_with_options(stream: TcpStream, hostname: &str, protocols: &[String], verify_peer: bool) -> Result<Self, String> {
+    pub fn connect_with_options(
+        stream: TcpStream,
+        hostname: &str,
+        protocols: &[String],
+        verify_peer: bool,
+    ) -> Result<Self, String> {
         let api = Api::load()?;
         let method: ClientMethod = unsafe { api._ssl_lib.function("TLS_client_method")? };
         let context = unsafe { (api.ctx_new)(method()) };
-        if context.is_null() { return Err("SSL_CTX_new failed".into()); }
+        if context.is_null() {
+            return Err("SSL_CTX_new failed".into());
+        }
         unsafe { (api.ctx_set_verify)(context, if verify_peer { 1 } else { 0 }, std::ptr::null()) };
         if verify_peer && unsafe { (api.ctx_default_paths)(context) } != 1 {
             unsafe { (api.ctx_free)(context) };
@@ -211,7 +235,10 @@ impl TlsStream {
         let mut alpn = Vec::new();
         for protocol in protocols {
             if protocol.is_empty() || protocol.len() > u8::MAX as usize {
-                unsafe { (api.ssl_free)(ssl); (api.ctx_free)(context); }
+                unsafe {
+                    (api.ssl_free)(ssl);
+                    (api.ctx_free)(context);
+                }
                 return Err("TLS ALPN protocol names must contain 1 to 255 bytes".into());
             }
             alpn.push(protocol.len() as u8);
@@ -219,46 +246,86 @@ impl TlsStream {
         }
         const SSL_CTRL_SET_TLSEXT_HOSTNAME: c_int = 55;
         const TLSEXT_NAMETYPE_HOST_NAME: c_long = 0;
-        if (!alpn.is_empty() && unsafe { (api.ssl_set_alpn)(ssl, alpn.as_ptr(), alpn.len() as u32) } != 0)
-            || unsafe { (api.ssl_ctrl)(ssl, SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_HOST_NAME, host.as_ptr() as *mut _) } != 1
+        if (!alpn.is_empty()
+            && unsafe { (api.ssl_set_alpn)(ssl, alpn.as_ptr(), alpn.len() as u32) } != 0)
+            || unsafe {
+                (api.ssl_ctrl)(
+                    ssl,
+                    SSL_CTRL_SET_TLSEXT_HOSTNAME,
+                    TLSEXT_NAMETYPE_HOST_NAME,
+                    host.as_ptr() as *mut _,
+                )
+            } != 1
             || (verify_peer && unsafe { (api.ssl_set_host)(ssl, host.as_ptr()) } != 1)
             || unsafe { (api.ssl_set_fd)(ssl, stream.as_raw_fd()) } != 1
         {
-            unsafe { (api.ssl_free)(ssl); (api.ctx_free)(context); }
+            unsafe {
+                (api.ssl_free)(ssl);
+                (api.ctx_free)(context);
+            }
             return Err("failed to configure TLS hostname or socket".into());
         }
         let result = unsafe { (api.ssl_connect)(ssl) };
         if result != 1 {
             let code = unsafe { (api.ssl_get_error)(ssl, result) };
             let detail = api.error_queue();
-            unsafe { (api.ssl_free)(ssl); (api.ctx_free)(context); }
+            unsafe {
+                (api.ssl_free)(ssl);
+                (api.ctx_free)(context);
+            }
             return Err(format!("TLS handshake failed (SSL error {code}: {detail})"));
         }
         let verify = unsafe { (api.verify_result)(ssl) };
         if verify_peer && verify != 0 {
-            unsafe { (api.ssl_free)(ssl); (api.ctx_free)(context); }
+            unsafe {
+                (api.ssl_free)(ssl);
+                (api.ctx_free)(context);
+            }
             return Err(format!("TLS certificate verification failed ({verify})"));
         }
-        Ok(Self { stream, api, context, ssl, _alpn_config: None })
+        Ok(Self {
+            stream,
+            api,
+            context,
+            ssl,
+            _alpn_config: None,
+        })
     }
 
-    pub fn accept(stream: TcpStream, certificate_pem: &[u8], private_key_pem: &[u8]) -> Result<Self, String> {
+    pub fn accept(
+        stream: TcpStream,
+        certificate_pem: &[u8],
+        private_key_pem: &[u8],
+    ) -> Result<Self, String> {
         Self::accept_with_alpn(stream, certificate_pem, private_key_pem, &[])
     }
 
-    pub fn accept_with_alpn(stream: TcpStream, certificate_pem: &[u8], private_key_pem: &[u8], protocols: &[String]) -> Result<Self, String> {
+    pub fn accept_with_alpn(
+        stream: TcpStream,
+        certificate_pem: &[u8],
+        private_key_pem: &[u8],
+        protocols: &[String],
+    ) -> Result<Self, String> {
         let api = Api::load()?;
         let method: ServerMethod = unsafe { api._ssl_lib.function("TLS_server_method")? };
         let context = unsafe { (api.ctx_new)(method()) };
-        if context.is_null() { return Err("SSL_CTX_new failed".into()); }
+        if context.is_null() {
+            return Err("SSL_CTX_new failed".into());
+        }
         let certificate = match api.read_pem(certificate_pem, true) {
             Ok(value) => value,
-            Err(error) => { unsafe { (api.ctx_free)(context) }; return Err(error); }
+            Err(error) => {
+                unsafe { (api.ctx_free)(context) };
+                return Err(error);
+            }
         };
         let private_key = match api.read_pem(private_key_pem, false) {
             Ok(value) => value,
             Err(error) => {
-                unsafe { (api.cert_free)(certificate); (api.ctx_free)(context); }
+                unsafe {
+                    (api.cert_free)(certificate);
+                    (api.ctx_free)(context);
+                }
                 return Err(error);
             }
         };
@@ -273,19 +340,33 @@ impl TlsStream {
         if !configured {
             let detail = api.error_queue();
             unsafe { (api.ctx_free)(context) };
-            return Err(format!("TLS certificate/private key configuration failed: {detail}"));
+            return Err(format!(
+                "TLS certificate/private key configuration failed: {detail}"
+            ));
         }
         let mut alpn_config = if protocols.is_empty() {
             None
         } else {
-            let values = protocols.iter().map(|protocol| {
-                if protocol.is_empty() || protocol.len() > u8::MAX as usize { Err("TLS ALPN protocol names must contain 1 to 255 bytes".to_string()) }
-                else { Ok(protocol.as_bytes().to_vec()) }
-            }).collect::<Result<Vec<_>, _>>()?;
+            let values = protocols
+                .iter()
+                .map(|protocol| {
+                    if protocol.is_empty() || protocol.len() > u8::MAX as usize {
+                        Err("TLS ALPN protocol names must contain 1 to 255 bytes".to_string())
+                    } else {
+                        Ok(protocol.as_bytes().to_vec())
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             Some(Box::new(AlpnConfig(values)))
         };
         if let Some(config) = &mut alpn_config {
-            unsafe { (api.ctx_set_alpn_select)(context, Some(select_alpn), config.as_mut() as *mut AlpnConfig as *mut c_void) };
+            unsafe {
+                (api.ctx_set_alpn_select)(
+                    context,
+                    Some(select_alpn),
+                    config.as_mut() as *mut AlpnConfig as *mut c_void,
+                )
+            };
         }
         let ssl = unsafe { (api.ssl_new)(context) };
         if ssl.is_null() {
@@ -293,17 +374,31 @@ impl TlsStream {
             return Err("SSL_new failed".into());
         }
         if unsafe { (api.ssl_set_fd)(ssl, stream.as_raw_fd()) } != 1 {
-            unsafe { (api.ssl_free)(ssl); (api.ctx_free)(context); }
+            unsafe {
+                (api.ssl_free)(ssl);
+                (api.ctx_free)(context);
+            }
             return Err("failed to configure TLS server socket".into());
         }
         let result = unsafe { (api.ssl_accept)(ssl) };
         if result != 1 {
             let code = unsafe { (api.ssl_get_error)(ssl, result) };
             let detail = api.error_queue();
-            unsafe { (api.ssl_free)(ssl); (api.ctx_free)(context); }
-            return Err(format!("TLS server handshake failed (SSL error {code}: {detail})"));
+            unsafe {
+                (api.ssl_free)(ssl);
+                (api.ctx_free)(context);
+            }
+            return Err(format!(
+                "TLS server handshake failed (SSL error {code}: {detail})"
+            ));
         }
-        Ok(Self { stream, api, context, ssl, _alpn_config: alpn_config })
+        Ok(Self {
+            stream,
+            api,
+            context,
+            ssl,
+            _alpn_config: alpn_config,
+        })
     }
 
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
@@ -312,75 +407,143 @@ impl TlsStream {
 
     pub fn protocol(&self) -> String {
         let value = unsafe { (self.api.ssl_get_version)(self.ssl) };
-        if value.is_null() { String::new() } else { unsafe { std::ffi::CStr::from_ptr(value) }.to_string_lossy().into_owned() }
+        if value.is_null() {
+            String::new()
+        } else {
+            unsafe { std::ffi::CStr::from_ptr(value) }
+                .to_string_lossy()
+                .into_owned()
+        }
     }
 
     pub fn cipher(&self) -> String {
         let cipher = unsafe { (self.api.ssl_get_cipher)(self.ssl) };
-        if cipher.is_null() { return String::new(); }
+        if cipher.is_null() {
+            return String::new();
+        }
         let value = unsafe { (self.api.cipher_get_name)(cipher) };
-        if value.is_null() { String::new() } else { unsafe { std::ffi::CStr::from_ptr(value) }.to_string_lossy().into_owned() }
+        if value.is_null() {
+            String::new()
+        } else {
+            unsafe { std::ffi::CStr::from_ptr(value) }
+                .to_string_lossy()
+                .into_owned()
+        }
     }
 
     pub fn alpn_protocol(&self) -> String {
         let mut data = std::ptr::null();
         let mut length = 0;
         unsafe { (self.api.ssl_get_alpn)(self.ssl, &mut data, &mut length) };
-        if data.is_null() || length == 0 { return String::new(); }
-        String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(data, length as usize) }).into_owned()
+        if data.is_null() || length == 0 {
+            return String::new();
+        }
+        String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(data, length as usize) })
+            .into_owned()
     }
 
     fn io_error(&self, result: c_int) -> std::io::Error {
         let code = unsafe { (self.api.ssl_get_error)(self.ssl, result) };
         if matches!(code, 2 | 3 | 5) {
-            return std::io::Error::new(std::io::ErrorKind::Interrupted, "TLS operation should retry");
+            return std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "TLS operation should retry",
+            );
         }
-        std::io::Error::other(format!("OpenSSL I/O error {code}: {}", self.api.error_queue()))
+        std::io::Error::other(format!(
+            "OpenSSL I/O error {code}: {}",
+            self.api.error_queue()
+        ))
     }
 }
 
 impl Api {
     fn read_pem(&self, bytes: &[u8], certificate: bool) -> Result<*mut c_void, String> {
-        let length = c_int::try_from(bytes.len()).map_err(|_| "PEM input is too large".to_string())?;
+        let length =
+            c_int::try_from(bytes.len()).map_err(|_| "PEM input is too large".to_string())?;
         let bio = unsafe { (self.bio_new_mem)(bytes.as_ptr() as *const _, length) };
-        if bio.is_null() { return Err("BIO_new_mem_buf failed".into()); }
+        if bio.is_null() {
+            return Err("BIO_new_mem_buf failed".into());
+        }
         let value = unsafe {
-            let value = if certificate { (self.pem_read_cert)(bio, std::ptr::null_mut(), std::ptr::null(), std::ptr::null_mut()) }
-                else { (self.pem_read_key)(bio, std::ptr::null_mut(), std::ptr::null(), std::ptr::null_mut()) };
+            let value = if certificate {
+                (self.pem_read_cert)(
+                    bio,
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                )
+            } else {
+                (self.pem_read_key)(
+                    bio,
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                )
+            };
             (self.bio_free)(bio);
             value
         };
-        if value.is_null() { Err(format!("invalid PEM: {}", self.error_queue())) } else { Ok(value) }
+        if value.is_null() {
+            Err(format!("invalid PEM: {}", self.error_queue()))
+        } else {
+            Ok(value)
+        }
     }
 
     fn error_queue(&self) -> String {
         let mut messages = Vec::new();
         loop {
             let code = unsafe { (self.err_get_error)() };
-            if code == 0 { break; }
+            if code == 0 {
+                break;
+            }
             let mut buffer = [0i8; 256];
             unsafe { (self.err_error_string)(code, buffer.as_mut_ptr(), buffer.len()) };
-            messages.push(unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) }.to_string_lossy().into_owned());
+            messages.push(
+                unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned(),
+            );
         }
-        if messages.is_empty() { "no OpenSSL detail".into() } else { messages.join("; ") }
+        if messages.is_empty() {
+            "no OpenSSL detail".into()
+        } else {
+            messages.join("; ")
+        }
     }
 }
 
 impl Read for TlsStream {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         let length = buffer.len().min(c_int::MAX as usize);
-        let result = unsafe { (self.api.ssl_read)(self.ssl, buffer.as_mut_ptr() as *mut _, length as c_int) };
-        if result > 0 { Ok(result as usize) } else if result == 0 { Ok(0) } else { Err(self.io_error(result)) }
+        let result = unsafe {
+            (self.api.ssl_read)(self.ssl, buffer.as_mut_ptr() as *mut _, length as c_int)
+        };
+        if result > 0 {
+            Ok(result as usize)
+        } else if result == 0 {
+            Ok(0)
+        } else {
+            Err(self.io_error(result))
+        }
     }
 }
 
 impl Write for TlsStream {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
         let length = buffer.len().min(c_int::MAX as usize);
-        let result = unsafe { (self.api.ssl_write)(self.ssl, buffer.as_ptr() as *const _, length as c_int) };
-        if result > 0 { Ok(result as usize) } else { Err(self.io_error(result)) }
+        let result =
+            unsafe { (self.api.ssl_write)(self.ssl, buffer.as_ptr() as *const _, length as c_int) };
+        if result > 0 {
+            Ok(result as usize)
+        } else {
+            Err(self.io_error(result))
+        }
     }
-    fn flush(&mut self) -> std::io::Result<()> { self.stream.flush() }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
+    }
 }
 
 impl Drop for TlsStream {
@@ -395,39 +558,75 @@ impl Drop for TlsStream {
 
 fn ssl_candidates() -> &'static [&'static str] {
     #[cfg(target_os = "macos")]
-    { &["/opt/homebrew/lib/libssl.3.dylib", "/usr/local/lib/libssl.3.dylib", "libssl.3.dylib"] }
+    {
+        &[
+            "/opt/homebrew/lib/libssl.3.dylib",
+            "/usr/local/lib/libssl.3.dylib",
+            "libssl.3.dylib",
+        ]
+    }
     #[cfg(target_os = "linux")]
-    { &["libssl.so.3", "libssl.so"] }
+    {
+        &["libssl.so.3", "libssl.so"]
+    }
 }
 fn crypto_candidates() -> &'static [&'static str] {
     #[cfg(target_os = "macos")]
-    { &["/opt/homebrew/lib/libcrypto.3.dylib", "/usr/local/lib/libcrypto.3.dylib", "libcrypto.3.dylib"] }
+    {
+        &[
+            "/opt/homebrew/lib/libcrypto.3.dylib",
+            "/usr/local/lib/libcrypto.3.dylib",
+            "libcrypto.3.dylib",
+        ]
+    }
     #[cfg(target_os = "linux")]
-    { &["libcrypto.so.3", "libcrypto.so"] }
+    {
+        &["libcrypto.so.3", "libcrypto.so"]
+    }
 }
 
-struct Library { handle: *mut c_void }
+struct Library {
+    handle: *mut c_void,
+}
 impl Library {
     fn open_candidates(paths: &[&str]) -> Result<Self, String> {
         let mut errors = Vec::new();
         for path in paths {
-            match Self::open(path) { Ok(lib) => return Ok(lib), Err(error) => errors.push(error) }
+            match Self::open(path) {
+                Ok(lib) => return Ok(lib),
+                Err(error) => errors.push(error),
+            }
         }
-        Err(format!("no compatible OpenSSL library found: {}", errors.join("; ")))
+        Err(format!(
+            "no compatible OpenSSL library found: {}",
+            errors.join("; ")
+        ))
     }
     fn open(path: &str) -> Result<Self, String> {
         let path = CString::new(path).map_err(|_| "library path contains NUL".to_string())?;
         let handle = unsafe { dlopen(path.as_ptr(), 2) };
-        if handle.is_null() { Err(format!("cannot load {}", path.to_string_lossy())) } else { Ok(Self { handle }) }
+        if handle.is_null() {
+            Err(format!("cannot load {}", path.to_string_lossy()))
+        } else {
+            Ok(Self { handle })
+        }
     }
     unsafe fn function<T: Copy>(&self, name: &str) -> Result<T, String> {
         let name = CString::new(name).map_err(|_| "symbol contains NUL".to_string())?;
         let symbol = dlsym(self.handle, name.as_ptr());
-        if symbol.is_null() { return Err(format!("missing OpenSSL symbol {}", name.to_string_lossy())); }
+        if symbol.is_null() {
+            return Err(format!("missing OpenSSL symbol {}", name.to_string_lossy()));
+        }
         Ok(std::mem::transmute_copy(&symbol))
     }
 }
-impl Drop for Library { fn drop(&mut self) { unsafe { dlclose(self.handle); } } }
+impl Drop for Library {
+    fn drop(&mut self) {
+        unsafe {
+            dlclose(self.handle);
+        }
+    }
+}
 
 extern "C" {
     fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;
@@ -443,20 +642,39 @@ mod tests {
 
     static NEXT_DIR: AtomicU64 = AtomicU64::new(1);
     #[test]
-    fn loads_verified_client_api() { Api::load().expect("system OpenSSL should load"); }
+    fn loads_verified_client_api() {
+        Api::load().expect("system OpenSSL should load");
+    }
 
     #[test]
     fn accepts_local_tls_connection() {
-        if Command::new("openssl").arg("version").output().is_err() { return; }
-        let directory = std::env::temp_dir().join(format!("lumen-tls-server-{}-{}", std::process::id(), NEXT_DIR.fetch_add(1, Ordering::Relaxed)));
+        if Command::new("openssl").arg("version").output().is_err() {
+            return;
+        }
+        let directory = std::env::temp_dir().join(format!(
+            "lumen-tls-server-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&directory).unwrap();
         let certificate = directory.join("cert.pem");
         let key = directory.join("key.pem");
         let generated = Command::new("openssl")
-            .args(["req", "-x509", "-newkey", "rsa:2048", "-sha256", "-days", "1", "-nodes"])
-            .arg("-keyout").arg(&key).arg("-out").arg(&certificate)
-            .args(["-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost"])
-            .output().unwrap();
+            .args([
+                "req", "-x509", "-newkey", "rsa:2048", "-sha256", "-days", "1", "-nodes",
+            ])
+            .arg("-keyout")
+            .arg(&key)
+            .arg("-out")
+            .arg(&certificate)
+            .args([
+                "-subj",
+                "/CN=localhost",
+                "-addext",
+                "subjectAltName=DNS:localhost",
+            ])
+            .output()
+            .unwrap();
         assert!(generated.status.success());
         let cert_bytes = std::fs::read(&certificate).unwrap();
         let key_bytes = std::fs::read(&key).unwrap();
@@ -471,8 +689,21 @@ mod tests {
             tls.write_all(b"pong").unwrap();
         });
         let mut client = Command::new("openssl")
-            .args(["s_client", "-quiet", "-connect", &format!("127.0.0.1:{port}"), "-servername", "localhost", "-CAfile"])
-            .arg(&certificate).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+            .args([
+                "s_client",
+                "-quiet",
+                "-connect",
+                &format!("127.0.0.1:{port}"),
+                "-servername",
+                "localhost",
+                "-CAfile",
+            ])
+            .arg(&certificate)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
         client.stdin.as_mut().unwrap().write_all(b"ping").unwrap();
         let output = client.wait_with_output().unwrap();
         server.join().unwrap();

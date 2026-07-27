@@ -124,7 +124,10 @@ fn net_binary_integrity_64k() {
         });
         "#,
     );
-    assert_eq!(out.lines(), ["intact: true bytesRead: true bytesWritten: true"]);
+    assert_eq!(
+        out.lines(),
+        ["intact: true bytesRead: true bytesWritten: true"]
+    );
 }
 
 #[test]
@@ -201,9 +204,18 @@ fn net_econnrefused_and_eaddrinuse() {
         ),
     );
     let lines = out.lines();
-    assert!(lines.contains(&"error: ECONNREFUSED connect 127.0.0.1 true".to_string()), "{lines:?}");
-    assert!(lines.contains(&"close hadError: true".to_string()), "{lines:?}");
-    assert!(lines.contains(&"listen error: EADDRINUSE".to_string()), "{lines:?}");
+    assert!(
+        lines.contains(&"error: ECONNREFUSED connect 127.0.0.1 true".to_string()),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"close hadError: true".to_string()),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"listen error: EADDRINUSE".to_string()),
+        "{lines:?}"
+    );
 }
 
 #[test]
@@ -344,7 +356,8 @@ fn net_unix_path_accept_and_cleanup() {
     let (mut rt, out) = test_runtime();
     eval_ok(
         &mut rt,
-        &format!(r#"
+        &format!(
+            r#"
           const fs = require("node:fs"), net = require("node:net"), path = {path:?};
           const server = net.createServer(socket => {{
             console.log("accepted", socket.remoteAddress === undefined);
@@ -359,16 +372,20 @@ fn net_unix_path_accept_and_cleanup() {
           server.listen(path, () => {{
             console.log("listening", server.address() === path, fs.existsSync(path));
           }});
-        "#),
+        "#
+        ),
     );
     peer.join().unwrap();
     let _ = std::fs::remove_file(&path);
-    assert_eq!(out.lines(), [
-        "listening true true",
-        "accepted true",
-        "received ping",
-        "closed false",
-    ]);
+    assert_eq!(
+        out.lines(),
+        [
+            "listening true true",
+            "accepted true",
+            "received ping",
+            "closed false",
+        ]
+    );
 }
 
 #[cfg(unix)]
@@ -388,7 +405,10 @@ fn net_unix_path_client_writes_to_std_peer() {
         assert_eq!(&bytes, b"ping");
     });
     let (mut rt, out) = test_runtime();
-    eval_ok(&mut rt, &format!(r#"
+    eval_ok(
+        &mut rt,
+        &format!(
+            r#"
       const net = require("node:net");
       const client = new net.Socket({{ _deferRead: true }});
       client.connect({path:?}, () => {{
@@ -396,7 +416,9 @@ fn net_unix_path_client_writes_to_std_peer() {
         client.write("ping");
         setTimeout(() => client.destroy(), 20);
       }});
-    "#));
+    "#
+        ),
+    );
     peer.join().unwrap();
     let _ = std::fs::remove_file(path);
     assert_eq!(out.lines(), ["connected true"]);
@@ -462,11 +484,7 @@ fn dgram_connected_mode_and_offsets() {
     );
     assert_eq!(
         out.lines(),
-        [
-            "remote: 127.0.0.1 IPv4 number",
-            "err: null",
-            "got: HELLO",
-        ]
+        ["remote: 127.0.0.1 IPv4 number", "err: null", "got: HELLO",]
     );
 }
 

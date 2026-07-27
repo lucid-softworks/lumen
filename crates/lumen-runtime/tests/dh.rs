@@ -12,7 +12,9 @@ impl Write for Captured {
         self.0.borrow_mut().extend_from_slice(buf);
         Ok(buf.len())
     }
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]
@@ -48,5 +50,8 @@ fn finite_field_dh_matches_node_vector_and_modp14() {
     }
 
     let lines = String::from_utf8(out.0.borrow().clone()).unwrap();
-    assert_eq!(lines.lines().collect::<Vec<_>>(), ["small 08 13 02 02", "modp14 512 02 true"]);
+    assert_eq!(
+        lines.lines().collect::<Vec<_>>(),
+        ["small 08 13 02 02", "modp14 512 02 true"]
+    );
 }

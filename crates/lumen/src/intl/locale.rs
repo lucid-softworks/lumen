@@ -3,7 +3,7 @@
 use super::{ab, coerce_options, def_getter, make_service};
 use crate::interpreter::Interp;
 use crate::intl::tags;
-use crate::value::{Gc, Value, set_builtin, set_data};
+use crate::value::{set_builtin, set_data, Gc, Value};
 
 /// Whether a canonical tag is serviced by our (minimal) locale data.
 #[allow(dead_code)]

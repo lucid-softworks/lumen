@@ -2548,7 +2548,11 @@ impl Interp {
                 let v = self.eval(inner, env);
                 let short = self.short_circuit;
                 self.short_circuit = saved;
-                if short { Ok(Value::Undefined) } else { v }
+                if short {
+                    Ok(Value::Undefined)
+                } else {
+                    v
+                }
             }
             Expr::Member {
                 obj,
@@ -5171,9 +5175,8 @@ impl Interp {
         let obj = crate::value::Object::new(Some(self.object_proto.clone()));
         {
             let mut b = obj.borrow_mut();
-            b.props = map.instantiate_plain(
-                (0..count).map(|slot| unsafe { base.add(slot).read() }),
-            );
+            b.props =
+                map.instantiate_plain((0..count).map(|slot| unsafe { base.add(slot).read() }));
         }
         Value::Obj(obj)
     }
@@ -6670,7 +6673,11 @@ impl Interp {
                 )
             }
         };
-        if neg { format!("-{body}") } else { body }
+        if neg {
+            format!("-{body}")
+        } else {
+            body
+        }
     }
 
     pub(crate) fn strict_equals(&self, a: &Value, b: &Value) -> bool {

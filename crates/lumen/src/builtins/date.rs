@@ -127,7 +127,11 @@ fn make_day(y: f64, m: f64, d: f64) -> f64 {
 
 fn make_date(day: f64, time: f64) -> f64 {
     let t = day * 86_400_000.0 + time;
-    if t.is_finite() { t } else { f64::NAN }
+    if t.is_finite() {
+        t
+    } else {
+        f64::NAN
+    }
 }
 
 /// TimeClip: NaN outside ±8.64e15 ms; -0 normalizes to +0.

@@ -43,12 +43,24 @@ const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012
 pub(crate) fn base64(data: &[u8]) -> String {
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = u32::from_be_bytes([0, b[0], b[1], b[2]]);
         out.push(B64[(n >> 18) as usize & 63] as char);
         out.push(B64[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { B64[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { B64[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            B64[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            B64[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -134,7 +146,8 @@ struct RawFrame {
 
 fn read_exact_buf(r: &mut impl Read, n: usize) -> Result<Vec<u8>, WsError> {
     let mut buf = vec![0u8; n];
-    r.read_exact(&mut buf).map_err(|e| WsError::Io(e.to_string()))?;
+    r.read_exact(&mut buf)
+        .map_err(|e| WsError::Io(e.to_string()))?;
     Ok(buf)
 }
 
@@ -142,7 +155,10 @@ fn read_raw_frame(r: &mut impl Read, max: usize) -> Result<RawFrame, WsError> {
     let head = read_exact_buf(r, 2)?;
     let fin = head[0] & 0x80 != 0;
     if head[0] & 0x70 != 0 {
-        return Err(WsError::Protocol(1002, "reserved bits set (no extension negotiated)"));
+        return Err(WsError::Protocol(
+            1002,
+            "reserved bits set (no extension negotiated)",
+        ));
     }
     let opcode = head[0] & 0x0f;
     let masked = head[1] & 0x80 != 0;
@@ -176,7 +192,11 @@ fn read_raw_frame(r: &mut impl Read, max: usize) -> Result<RawFrame, WsError> {
             *b ^= m[i % 4];
         }
     }
-    Ok(RawFrame { fin, opcode, payload })
+    Ok(RawFrame {
+        fin,
+        opcode,
+        payload,
+    })
 }
 
 /// The reader half: owns the read stream plus cross-message fragmentation state, and a write
@@ -191,9 +211,19 @@ impl Read for SharedStream {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         let result = self.0.lock().unwrap().read(buffer);
         match result {
-            Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) =>
+            {
                 std::thread::yield_now();
-                Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "WebSocket read should retry"))
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "WebSocket read should retry",
+                ))
             }
             other => other,
         }
@@ -203,7 +233,9 @@ impl Write for SharedStream {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
         self.0.lock().unwrap().write(buffer)
     }
-    fn flush(&mut self) -> std::io::Result<()> { self.0.lock().unwrap().flush() }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.lock().unwrap().flush()
+    }
 }
 
 pub(crate) struct WsReader {
@@ -218,8 +250,13 @@ impl WsReader {
     fn next_mask(&mut self) -> [u8; 4] {
         // Mask keys need unpredictability only against proxies (RFC 6455 §10.3); a cheap LCG
         // seeded from the handshake's CSPRNG key is fine and keeps the reader self-contained.
-        self.mask_seed = self.mask_seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        (self.mask_seed >> 24).to_be_bytes()[4..8].try_into().unwrap()
+        self.mask_seed = self
+            .mask_seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.mask_seed >> 24).to_be_bytes()[4..8]
+            .try_into()
+            .unwrap()
     }
 
     /// Block until one complete MESSAGE (or close), answering pings and skipping pongs inline.
@@ -236,7 +273,9 @@ impl WsReader {
                     } else {
                         encode_frame_unmasked(0xA, &frame.payload)
                     };
-                    self.writer.write_all(&pong).map_err(|e| WsError::Io(e.to_string()))?;
+                    self.writer
+                        .write_all(&pong)
+                        .map_err(|e| WsError::Io(e.to_string()))?;
                 }
                 0xA => {} // unsolicited pong: ignore (§5.5.3)
                 0x8 => {
@@ -252,7 +291,10 @@ impl WsReader {
                 }
                 0x1 | 0x2 => {
                     if partial.is_some() {
-                        return Err(WsError::Protocol(1002, "new data frame during fragmented message"));
+                        return Err(WsError::Protocol(
+                            1002,
+                            "new data frame during fragmented message",
+                        ));
                     }
                     if frame.fin {
                         return finish_message(frame.opcode, frame.payload);
@@ -329,7 +371,8 @@ struct ReadResult {
 }
 
 fn ws_registry(ctx: &mut Ctx) -> &mut WsRegistry {
-    ctx.host_mut::<WsRegistry>().expect("web installs WsRegistry")
+    ctx.host_mut::<WsRegistry>()
+        .expect("web installs WsRegistry")
 }
 
 /// `__ws.connect(url, protocolsJoined, dispatch)` → id. The handshake runs on the pool; the
@@ -352,7 +395,10 @@ pub(crate) fn op_ws_connect(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Resu
     match u.scheme.as_str() {
         "ws" | "wss" => {}
         other => {
-            return Err(ctx.make_error("SyntaxError", format!("WebSocket: unsupported scheme '{other}'")))
+            return Err(ctx.make_error(
+                "SyntaxError",
+                format!("WebSocket: unsupported scheme '{other}'"),
+            ))
         }
     }
 
@@ -408,14 +454,20 @@ fn handshake(u: &url::Url, key: &str, protocols: &str) -> Result<ConnectedSocket
     tcp.set_read_timeout(Some(Duration::from_millis(100))).ok();
     let mut stream: Box<dyn WsStream> = if u.scheme == "wss" {
         Box::new(lumen_tls::TlsStream::connect(tcp, host)?)
-    } else { Box::new(tcp) };
+    } else {
+        Box::new(tcp)
+    };
 
     let host_header = if u.port.is_some() && u.port != Some(80) {
         format!("{}:{}", u.host, port)
     } else {
         u.host.clone()
     };
-    let mut path = if u.path.is_empty() { "/".to_string() } else { u.path.clone() };
+    let mut path = if u.path.is_empty() {
+        "/".to_string()
+    } else {
+        u.path.clone()
+    };
     path.push_str(&u.query); // `query` already carries its leading '?' when present
     let mut req = format!(
         "GET {path} HTTP/1.1\r\nHost: {host_header}\r\nUpgrade: websocket\r\n\
@@ -425,7 +477,9 @@ fn handshake(u: &url::Url, key: &str, protocols: &str) -> Result<ConnectedSocket
         req.push_str(&format!("Sec-WebSocket-Protocol: {protocols}\r\n"));
     }
     req.push_str("\r\n");
-    stream.write_all(req.as_bytes()).map_err(|e| format!("handshake write: {e}"))?;
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| format!("handshake write: {e}"))?;
 
     // Read the 101 response head. BufReader over a clone would over-read into the frame stream,
     // so read byte-wise until CRLFCRLF (the head is tiny).
@@ -435,7 +489,8 @@ fn handshake(u: &url::Url, key: &str, protocols: &str) -> Result<ConnectedSocket
         if head.len() > 64 << 10 {
             return Err("handshake response too large".into());
         }
-        stream.read_exact(&mut byte)
+        stream
+            .read_exact(&mut byte)
             .map_err(|e| format!("handshake read: {e}"))?;
         head.push(byte[0]);
     }
@@ -449,7 +504,9 @@ fn handshake(u: &url::Url, key: &str, protocols: &str) -> Result<ConnectedSocket
     let mut upgrade_ok = false;
     let mut protocol = String::new();
     for line in lines {
-        let Some((k, v)) = line.split_once(':') else { continue };
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
         let (k, v) = (k.trim(), v.trim());
         if k.eq_ignore_ascii_case("sec-websocket-accept") {
             accept = Some(v.to_string());
@@ -472,12 +529,17 @@ fn handshake(u: &url::Url, key: &str, protocols: &str) -> Result<ConnectedSocket
             .map(str::trim)
             .any(|p| p.eq_ignore_ascii_case(&protocol))
     {
-        return Err(format!("server selected unrequested subprotocol '{protocol}'"));
+        return Err(format!(
+            "server selected unrequested subprotocol '{protocol}'"
+        ));
     }
     Ok(ConnectedSocket { stream, protocol })
 }
 
-fn decode_connect(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<Vec<Value>, Value> {
+fn decode_connect(
+    ctx: &mut Ctx,
+    payload: Box<dyn std::any::Any + Send>,
+) -> Result<Vec<Value>, Value> {
     let ConnectResult { id, outcome } = *payload.downcast::<ConnectResult>().expect("ws payload");
     match outcome {
         Err(msg) => {
@@ -485,7 +547,10 @@ fn decode_connect(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Resu
                 e.dead = true;
             }
             ws_registry(ctx).socks.remove(&id);
-            Ok(vec![Value::from_string("error".into()), Value::from_string(msg)])
+            Ok(vec![
+                Value::from_string("error".into()),
+                Value::from_string(msg),
+            ])
         }
         Ok(ConnectedSocket { stream, protocol }) => {
             let writer = SharedStream(Arc::new(Mutex::new(stream)));
@@ -504,7 +569,10 @@ fn decode_connect(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Resu
                 masked: true,
             };
             arm_read(ctx, id, reader);
-            Ok(vec![Value::from_string("open".into()), Value::from_string(protocol)])
+            Ok(vec![
+                Value::from_string("open".into()),
+                Value::from_string(protocol),
+            ])
         }
     }
 }
@@ -535,13 +603,20 @@ fn arm_read(ctx: &mut Ctx, id: u64, mut reader: WsReader) {
 }
 
 fn decode_read(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<Vec<Value>, Value> {
-    let ReadResult { id, outcome, reader } = *payload.downcast::<ReadResult>().expect("ws payload");
+    let ReadResult {
+        id,
+        outcome,
+        reader,
+    } = *payload.downcast::<ReadResult>().expect("ws payload");
     match outcome {
         Ok(WsEvent::Text(s)) => {
             if let Some(r) = reader {
                 arm_read(ctx, id, r);
             }
-            Ok(vec![Value::from_string("text".into()), Value::from_string(s)])
+            Ok(vec![
+                Value::from_string("text".into()),
+                Value::from_string(s),
+            ])
         }
         Ok(WsEvent::Binary(b)) => {
             let arr = ctx.make_uint8array(&b)?;
@@ -595,7 +670,10 @@ fn decode_read(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<
         }
         Err(WsError::Io(msg)) => {
             ws_registry(ctx).socks.remove(&id);
-            Ok(vec![Value::from_string("io".into()), Value::from_string(msg)])
+            Ok(vec![
+                Value::from_string("io".into()),
+                Value::from_string(msg),
+            ])
         }
     }
 }
@@ -639,7 +717,8 @@ pub(crate) fn op_ws_send(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<
         None => encode_frame_unmasked(opcode, &bytes),
     };
     let mut writer = writer;
-    writer.write_all(&frame)
+    writer
+        .write_all(&frame)
         .map_err(|e| ctx.make_error("Error", format!("WebSocket send: {e}")))?;
     Ok(Value::Bool(true))
 }
@@ -714,7 +793,10 @@ pub(crate) fn op_ws_upgrade(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Resu
         .and_then(|rc| rc.downcast::<TcpStream>().ok())
         .and_then(|rc| std::rc::Rc::try_unwrap(rc).ok());
     let Some(stream) = stream else {
-        return Err(ctx.make_error("TypeError", "upgrade: unknown or already-answered connection"));
+        return Err(ctx.make_error(
+            "TypeError",
+            "upgrade: unknown or already-answered connection",
+        ));
     };
 
     // The accept loop set a read timeout to bound header parsing; a WebSocket idles legitimately.
@@ -809,7 +891,9 @@ pub mod testing {
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
             for _ in 0..conns {
-                let Ok((stream, _)) = listener.accept() else { return };
+                let Ok((stream, _)) = listener.accept() else {
+                    return;
+                };
                 let _ = serve_one(stream, mode);
             }
         });
@@ -829,7 +913,9 @@ pub mod testing {
             .lines()
             .find_map(|l| {
                 let (k, v) = l.split_once(':')?;
-                k.trim().eq_ignore_ascii_case("sec-websocket-key").then(|| v.trim().to_string())
+                k.trim()
+                    .eq_ignore_ascii_case("sec-websocket-key")
+                    .then(|| v.trim().to_string())
             })
             .unwrap_or_default();
         let protocol = head.lines().find_map(|l| {
@@ -922,8 +1008,8 @@ mod tests {
         for (op, payload) in [
             (0x1u8, b"hello".to_vec()),
             (0x2, vec![0u8, 1, 254, 255]),
-            (0x1, vec![b'x'; 200]),      // 16-bit length form
-            (0x1, vec![b'y'; 70_000]),   // 64-bit length form
+            (0x1, vec![b'x'; 200]),    // 16-bit length form
+            (0x1, vec![b'y'; 70_000]), // 64-bit length form
         ] {
             let frame = encode_frame(op, &payload, [1, 2, 3, 4]);
             let raw = read_raw_frame(&mut &frame[..], MAX_MESSAGE).ok().unwrap();

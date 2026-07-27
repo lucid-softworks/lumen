@@ -22,7 +22,11 @@ fn crc32_table() -> [u32; 256] {
         let mut c = n as u32;
         let mut k = 0;
         while k < 8 {
-            c = if c & 1 != 0 { 0xedb88320 ^ (c >> 1) } else { c >> 1 };
+            c = if c & 1 != 0 {
+                0xedb88320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
             k += 1;
         }
         table[n] = c;
@@ -57,7 +61,12 @@ struct BitReader<'a> {
 
 impl<'a> BitReader<'a> {
     fn new(data: &'a [u8]) -> Self {
-        BitReader { data, pos: 0, bit_buf: 0, bit_cnt: 0 }
+        BitReader {
+            data,
+            pos: 0,
+            bit_buf: 0,
+            bit_cnt: 0,
+        }
     }
     fn bit(&mut self) -> Result<u32, String> {
         if self.bit_cnt == 0 {
@@ -258,7 +267,9 @@ fn read_dynamic_tables(reader: &mut BitReader) -> Result<(Huffman, Huffman), Str
         match sym {
             0..=15 => lengths.push(sym as u8),
             16 => {
-                let prev = *lengths.last().ok_or("inflate: repeat with no previous length")?;
+                let prev = *lengths
+                    .last()
+                    .ok_or("inflate: repeat with no previous length")?;
                 for _ in 0..(reader.bits(2)? + 3) {
                     lengths.push(prev);
                 }
@@ -291,7 +302,11 @@ struct BitWriter {
 
 impl BitWriter {
     fn new() -> Self {
-        BitWriter { out: Vec::new(), bit_buf: 0, bit_cnt: 0 }
+        BitWriter {
+            out: Vec::new(),
+            bit_buf: 0,
+            bit_cnt: 0,
+        }
     }
     fn write(&mut self, value: u32, n: u32) {
         self.bit_buf |= value << self.bit_cnt;
@@ -527,7 +542,10 @@ mod tests {
     fn compresses_repetitive_input() {
         let data = "abcabcabcabc".repeat(100);
         let compressed = deflate(data.as_bytes());
-        assert!(compressed.len() < data.len() / 2, "expected real compression");
+        assert!(
+            compressed.len() < data.len() / 2,
+            "expected real compression"
+        );
     }
 
     #[test]

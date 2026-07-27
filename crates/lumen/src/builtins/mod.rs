@@ -29,8 +29,8 @@ mod shadowrealm;
 mod typedarray;
 mod weakrefs;
 
-pub(crate) use math::nf_math_sqrt;
 pub(crate) use function_proto::nf_function_call;
+pub(crate) use math::nf_math_sqrt;
 
 /// `args[i]` or `undefined`.
 fn arg(args: &[Value], i: usize) -> Value {
@@ -3983,7 +3983,11 @@ fn to_precision(n: f64, p: usize) -> String {
     } else {
         format!("0.{}{}", "0".repeat((-e - 1) as usize), digits)
     };
-    if neg { format!("-{body}") } else { body }
+    if neg {
+        format!("-{body}")
+    } else {
+        body
+    }
 }
 
 fn opt_norm(v: Option<Value>) -> Option<Value> {
@@ -4411,11 +4415,7 @@ fn install_array(it: &mut Interp) {
     install_array_rest(it, &ap);
 }
 
-pub(crate) fn nf_array_push(
-    i: &mut Interp,
-    this: Value,
-    args: &[Value],
-) -> Result<Value, Value> {
+pub(crate) fn nf_array_push(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
     let o = arr_to_object(i, &this)?;
     // Dense fast path: a plain array whose `length` is a writable own data property and
     // whose tail is exactly the dense frontier appends in place — no key strings, no
@@ -4479,11 +4479,7 @@ pub(crate) fn nf_array_push(
     Ok(Value::Num(len as f64))
 }
 
-pub(crate) fn nf_array_pop(
-    i: &mut Interp,
-    this: Value,
-    _args: &[Value],
-) -> Result<Value, Value> {
+pub(crate) fn nf_array_pop(i: &mut Interp, this: Value, _args: &[Value]) -> Result<Value, Value> {
     let o = arr_to_object(i, &this)?;
     // Dense fast path (mirror of push's): take the last element straight off the entries
     // tail — no key strings, no hash lookups, and crucially NO shape reset, so the array's
@@ -4528,11 +4524,7 @@ pub(crate) fn nf_array_pop(
 ///
 /// `Err(value)` means no mutation occurred and hands the argument back to the caller for the
 /// exact generic builtin path. `Ok(length)` means the argument's ownership moved into the array.
-pub(crate) fn jit_array_push_one(
-    i: &mut Interp,
-    o: &Gc,
-    value: Value,
-) -> Result<Value, Value> {
+pub(crate) fn jit_array_push_one(i: &mut Interp, o: &Gc, value: Value) -> Result<Value, Value> {
     if !matches!(o.borrow().exotic, Exotic::Array)
         || !i.ordinary_get_ptr(Rc::as_ptr(o) as usize)
         || !i.array_append_unshadowed(o)
@@ -4542,11 +4534,7 @@ pub(crate) fn jit_array_push_one(
     let mut b = o.borrow_mut();
     let len = match b.props.length_property() {
         Some(p) if !p.accessor() && p.writable() => match p.value() {
-            Value::Num(n)
-                if n.trunc() == n && (0.0..u32::MAX as f64).contains(&n) =>
-            {
-                n as u32
-            }
+            Value::Num(n) if n.trunc() == n && (0.0..u32::MAX as f64).contains(&n) => n as u32,
             _ => return Err(value),
         },
         _ => return Err(value),
@@ -4568,9 +4556,7 @@ pub(crate) fn jit_array_push_one(
 
 /// JIT-only dense `Array#pop` form. `None` is a guard miss with no mutation.
 pub(crate) fn jit_array_pop(i: &Interp, o: &Gc) -> Option<Value> {
-    if !matches!(o.borrow().exotic, Exotic::Array)
-        || !i.ordinary_get_ptr(Rc::as_ptr(o) as usize)
-    {
+    if !matches!(o.borrow().exotic, Exotic::Array) || !i.ordinary_get_ptr(Rc::as_ptr(o) as usize) {
         return None;
     }
     let mut b = o.borrow_mut();
@@ -5084,7 +5070,11 @@ fn install_array_rest(it: &mut Interp, ap: &Gc) {
                 return Ok(Value::Num(-1.0));
             }
             let n = if n.is_nan() { 0 } else { n.trunc() as i64 };
-            if n >= 0 { n.min(len - 1) } else { len + n }
+            if n >= 0 {
+                n.min(len - 1)
+            } else {
+                len + n
+            }
         } else {
             len - 1
         };
@@ -5508,11 +5498,7 @@ fn install_array_rest(it: &mut Interp, ap: &Gc) {
     set_builtin(&it.global, "Array", Value::Obj(ctor));
 }
 
-pub(crate) fn nf_array_ctor(
-    i: &mut Interp,
-    _this: Value,
-    args: &[Value],
-) -> Result<Value, Value> {
+pub(crate) fn nf_array_ctor(i: &mut Interp, _this: Value, args: &[Value]) -> Result<Value, Value> {
     let a = if args.len() == 1 && matches!(args[0], Value::Num(_)) {
         // `new Array(len)` sets length without materializing elements; the length setter
         // validates that it is a valid uint32 (else RangeError: Invalid array length).
@@ -7869,11 +7855,19 @@ fn norm_index(n: f64, len: i64) -> i64 {
         return 0;
     }
     let i = if n.is_infinite() {
-        if n > 0.0 { len } else { -len - 1 }
+        if n > 0.0 {
+            len
+        } else {
+            -len - 1
+        }
     } else {
         n as i64
     };
-    if i < 0 { (len + i).max(0) } else { i.min(len) }
+    if i < 0 {
+        (len + i).max(0)
+    } else {
+        i.min(len)
+    }
 }
 
 fn same_value_zero(a: &Value, b: &Value) -> bool {
@@ -8339,7 +8333,11 @@ fn install_string(it: &mut Interp) {
             Value::Undefined => size,
             v => {
                 let l = ab(i.to_number(&v))?;
-                if l.is_nan() { 0 } else { (l as i64).max(0) }
+                if l.is_nan() {
+                    0
+                } else {
+                    (l as i64).max(0)
+                }
             }
         };
         let count = len.min(size - start).max(0);
@@ -8930,11 +8928,7 @@ fn install_string(it: &mut Interp) {
 }
 
 /// Named entry so the bytecode call cache can recognize and specialize ASCII string slicing.
-pub(crate) fn nf_string_slice(
-    i: &mut Interp,
-    this: Value,
-    args: &[Value],
-) -> Result<Value, Value> {
+pub(crate) fn nf_string_slice(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
     let s = this_string(i, &this)?;
     if let crate::interpreter::StrUnits::Ascii = i.units_of(&s) {
         let len = s.len() as i64;

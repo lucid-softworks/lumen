@@ -132,13 +132,19 @@ impl<'a> Reader<'a> {
         self.pos >= self.data.len()
     }
     pub fn byte(&mut self) -> R<u8> {
-        let b = *self.data.get(self.pos).ok_or("wasm: unexpected end of input")?;
+        let b = *self
+            .data
+            .get(self.pos)
+            .ok_or("wasm: unexpected end of input")?;
         self.pos += 1;
         Ok(b)
     }
     pub fn bytes(&mut self, n: usize) -> R<&'a [u8]> {
         let end = self.pos.checked_add(n).ok_or("wasm: length overflow")?;
-        let s = self.data.get(self.pos..end).ok_or("wasm: unexpected end of input")?;
+        let s = self
+            .data
+            .get(self.pos..end)
+            .ok_or("wasm: unexpected end of input")?;
         self.pos = end;
         Ok(s)
     }
@@ -217,7 +223,10 @@ fn limits(r: &mut Reader) -> Result<Limits, String> {
 
 fn table_type(r: &mut Reader) -> Result<TableType, String> {
     let elem = val_type(r.byte()?)?;
-    Ok(TableType { elem, limits: limits(r)? })
+    Ok(TableType {
+        elem,
+        limits: limits(r)?,
+    })
 }
 
 fn global_type(r: &mut Reader) -> Result<GlobalType, String> {
@@ -420,7 +429,11 @@ fn decode_elems(r: &mut Reader, m: &mut Module) -> Result<(), String> {
                 for _ in 0..r.u32()? {
                     func_indices.push(r.u32()?);
                 }
-                m.elems.push(ElemSegment { table: 0, offset, func_indices });
+                m.elems.push(ElemSegment {
+                    table: 0,
+                    offset,
+                    func_indices,
+                });
             }
             2 => {
                 let table = r.u32()?;
@@ -430,7 +443,11 @@ fn decode_elems(r: &mut Reader, m: &mut Module) -> Result<(), String> {
                 for _ in 0..r.u32()? {
                     func_indices.push(r.u32()?);
                 }
-                m.elems.push(ElemSegment { table, offset, func_indices });
+                m.elems.push(ElemSegment {
+                    table,
+                    offset,
+                    func_indices,
+                });
             }
             other => return Err(format!("wasm: unsupported element segment kind {other}")),
         }
@@ -475,19 +492,28 @@ fn decode_data(r: &mut Reader, m: &mut Module) -> Result<(), String> {
                 let offset = read_const_expr(r)?;
                 let len = r.u32()? as usize;
                 let bytes = r.bytes(len)?.to_vec();
-                m.data.push(DataSegment { active: Some((0, offset)), bytes });
+                m.data.push(DataSegment {
+                    active: Some((0, offset)),
+                    bytes,
+                });
             }
             1 => {
                 let len = r.u32()? as usize;
                 let bytes = r.bytes(len)?.to_vec();
-                m.data.push(DataSegment { active: None, bytes });
+                m.data.push(DataSegment {
+                    active: None,
+                    bytes,
+                });
             }
             2 => {
                 let memidx = r.u32()?;
                 let offset = read_const_expr(r)?;
                 let len = r.u32()? as usize;
                 let bytes = r.bytes(len)?.to_vec();
-                m.data.push(DataSegment { active: Some((memidx, offset)), bytes });
+                m.data.push(DataSegment {
+                    active: Some((memidx, offset)),
+                    bytes,
+                });
             }
             other => return Err(format!("wasm: unsupported data segment kind {other}")),
         }

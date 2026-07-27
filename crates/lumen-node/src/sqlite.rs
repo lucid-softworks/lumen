@@ -73,7 +73,8 @@ type BindInt64 = unsafe extern "C" fn(*mut c_void, c_int, i64) -> c_int;
 type BindDouble = unsafe extern "C" fn(*mut c_void, c_int, f64) -> c_int;
 type BindText =
     unsafe extern "C" fn(*mut c_void, c_int, *const c_char, c_int, *mut c_void) -> c_int;
-type BindBlob = unsafe extern "C" fn(*mut c_void, c_int, *const c_void, c_int, *mut c_void) -> c_int;
+type BindBlob =
+    unsafe extern "C" fn(*mut c_void, c_int, *const c_void, c_int, *mut c_void) -> c_int;
 type BindNull = unsafe extern "C" fn(*mut c_void, c_int) -> c_int;
 type BindParameterCount = unsafe extern "C" fn(*mut c_void) -> c_int;
 type BindParameterIndex = unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int;
@@ -104,12 +105,8 @@ type DeserializeFn =
     unsafe extern "C" fn(*mut c_void, *const c_char, *mut u8, i64, i64, c_int) -> c_int;
 type Malloc64 = unsafe extern "C" fn(u64) -> *mut c_void;
 type EnableLoadExtension = unsafe extern "C" fn(*mut c_void, c_int) -> c_int;
-type LoadExtension = unsafe extern "C" fn(
-    *mut c_void,
-    *const c_char,
-    *const c_char,
-    *mut *mut c_char,
-) -> c_int;
+type LoadExtension =
+    unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, *mut *mut c_char) -> c_int;
 type FileControl = unsafe extern "C" fn(*mut c_void, *const c_char, c_int, *mut c_void) -> c_int;
 
 /// Every libsqlite3 entry point we resolve, kept alongside the [`DynLib`] that owns them (dropping
@@ -241,12 +238,12 @@ impl Api {
             malloc64: lib
                 .symbol("sqlite3_malloc64")
                 .map(|p| unsafe { std::mem::transmute::<*mut c_void, Malloc64>(p) }),
-            enable_load_extension: lib.symbol("sqlite3_enable_load_extension").map(|p| unsafe {
-                std::mem::transmute::<*mut c_void, EnableLoadExtension>(p)
-            }),
-            load_extension: lib.symbol("sqlite3_load_extension").map(|p| unsafe {
-                std::mem::transmute::<*mut c_void, LoadExtension>(p)
-            }),
+            enable_load_extension: lib
+                .symbol("sqlite3_enable_load_extension")
+                .map(|p| unsafe { std::mem::transmute::<*mut c_void, EnableLoadExtension>(p) }),
+            load_extension: lib
+                .symbol("sqlite3_load_extension")
+                .map(|p| unsafe { std::mem::transmute::<*mut c_void, LoadExtension>(p) }),
             file_control: sym!(lib, "sqlite3_file_control", FileControl),
             _lib: lib,
         })
@@ -373,7 +370,11 @@ fn db_error(ctx: &mut Ctx, db: *mut c_void, fallback: &str) -> Value {
         let api = state(ctx).api.as_ref().unwrap();
         unsafe { ((api.extended_errcode)(db), cstr((api.errmsg)(db))) }
     };
-    let message = if msg.is_empty() { fallback.to_string() } else { msg };
+    let message = if msg.is_empty() {
+        fallback.to_string()
+    } else {
+        msg
+    };
     sqlite_err(ctx, errno, message)
 }
 
@@ -491,7 +492,13 @@ fn op_prepare(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> 
     }
     let st = state(ctx);
     let sid = st.next_id();
-    st.stmts.insert(sid, Stmt { ptr: stmt, db_id: id });
+    st.stmts.insert(
+        sid,
+        Stmt {
+            ptr: stmt,
+            db_id: id,
+        },
+    );
     Ok(Value::Num(sid as f64))
 }
 
@@ -546,7 +553,7 @@ fn op_bind(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
                 return Err(ctx.make_error(
                     "TypeError",
                     "Binding expected string, TypedArray, boolean, number, bigint or null",
-                ))
+                ));
             }
         }
     } else {
@@ -655,7 +662,9 @@ fn op_column_names(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Va
         let n = unsafe { (api.column_count)(stmt) };
         let mut names = Vec::with_capacity(n as usize);
         for i in 0..n {
-            names.push(Value::from_string(unsafe { cstr((api.column_name)(stmt, i)) }));
+            names.push(Value::from_string(unsafe {
+                cstr((api.column_name)(stmt, i))
+            }));
         }
         names
     };
@@ -1011,9 +1020,9 @@ fn op_deserialize(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Val
     ensure_api(ctx)?;
     let buf = args.first().cloned().unwrap_or(Value::Undefined);
     let bytes: Vec<u8> = match ctx.typed_array_raw(&buf) {
-        Some((_, len, ptr)) if !ptr.is_null() && len > 0 => {
-            unsafe { std::slice::from_raw_parts(ptr, len).to_vec() }
-        }
+        Some((_, len, ptr)) if !ptr.is_null() && len > 0 => unsafe {
+            std::slice::from_raw_parts(ptr, len).to_vec()
+        },
         Some(_) => Vec::new(),
         None => {
             return Err(ctx.make_error(
@@ -1039,7 +1048,14 @@ fn op_deserialize(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Val
         let api = state(ctx).api.as_ref().unwrap();
         let path = b":memory:\0";
         // SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
-        unsafe { (api.open_v2)(path.as_ptr() as *const c_char, &mut db, 2 | 4, std::ptr::null()) }
+        unsafe {
+            (api.open_v2)(
+                path.as_ptr() as *const c_char,
+                &mut db,
+                2 | 4,
+                std::ptr::null(),
+            )
+        }
     };
     if rc != SQLITE_OK || db.is_null() {
         return Err(ctx.make_error("Error", "unable to open in-memory database"));

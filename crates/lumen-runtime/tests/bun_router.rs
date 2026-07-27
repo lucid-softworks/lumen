@@ -14,7 +14,9 @@ impl Write for Captured {
         self.0.borrow_mut().extend_from_slice(buf);
         Ok(buf.len())
     }
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]
@@ -25,7 +27,14 @@ fn filesystem_router_matches_nextjs_pages_and_reloads() {
         NEXT_DIR.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir_all(dir.join("blog")).unwrap();
-    for file in ["index.tsx", "settings.tsx", "blog/index.tsx", "blog/[slug].tsx", "[...all].tsx", "[[...optional]].tsx"] {
+    for file in [
+        "index.tsx",
+        "settings.tsx",
+        "blog/index.tsx",
+        "blog/[slug].tsx",
+        "[...all].tsx",
+        "[[...optional]].tsx",
+    ] {
         std::fs::write(dir.join(file), "").unwrap();
     }
 
@@ -36,7 +45,10 @@ fn filesystem_router_matches_nextjs_pages_and_reloads() {
         err: Box::new(Captured::default()),
     });
     let canonical_dir = std::fs::canonicalize(&dir).unwrap();
-    let directory = canonical_dir.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+    let directory = canonical_dir
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
     let source = format!(
         r#"
         globalThis.router = new Bun.FileSystemRouter({{
@@ -59,9 +71,19 @@ fn filesystem_router_matches_nextjs_pages_and_reloads() {
         Completion::Throw { name, message } => panic!("uncaught {name}: {message}"),
     }
     let _ = std::fs::remove_dir_all(&dir);
-    let lines: Vec<_> = String::from_utf8(out.0.borrow().clone()).unwrap().lines().map(str::to_string).collect();
-    assert_eq!(lines[0], "route exact / {} {} https://example.test/assets/index.tsx");
-    assert_eq!(lines[1], "route exact /blog {} {} https://example.test/assets/blog/index.tsx");
+    let lines: Vec<_> = String::from_utf8(out.0.borrow().clone())
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        lines[0],
+        "route exact / {} {} https://example.test/assets/index.tsx"
+    );
+    assert_eq!(
+        lines[1],
+        "route exact /blog {} {} https://example.test/assets/blog/index.tsx"
+    );
     assert_eq!(lines[2], "route dynamic /blog/[slug] {\"slug\":\"hello\"} {\"q\":[\"a b\",\"c\"],\"slug\":\"hello\"} https://example.test/assets/blog/[slug].tsx");
     assert_eq!(lines[3], "route catch-all /[...all] {\"all\":\"one/two\"} {\"all\":\"one/two\"} https://example.test/assets/[...all].tsx");
     assert_eq!(lines[4..], ["before /[...all]", "after /new true"]);

@@ -137,7 +137,9 @@ struct FfiState {
 fn ffi_state(ctx: &mut Ctx) -> &mut FfiState {
     if ctx.host_mut::<FfiState>().is_none() {
         let mut st = FfiState::default();
-        st.callbacks = (0..=MAX_ARGS).map(|_| (0..JSCB_POOL).map(|_| None).collect()).collect();
+        st.callbacks = (0..=MAX_ARGS)
+            .map(|_| (0..JSCB_POOL).map(|_| None).collect())
+            .collect();
         ctx.op_state().put(st);
     }
     ctx.host_mut::<FfiState>().unwrap()
@@ -202,7 +204,11 @@ fn marshal_arg(
 ) -> Result<(), Value> {
     if is_float(code) {
         let n = ctx.coerce_number(v)?;
-        floats.push(if code == T_F32 { FArg::F32(n as f32) } else { FArg::F64(n) });
+        floats.push(if code == T_F32 {
+            FArg::F32(n as f32)
+        } else {
+            FArg::F64(n)
+        });
         return Ok(());
     }
     if is_pointer(code) {
@@ -271,11 +277,28 @@ struct RawRet {
 }
 
 /// Run the trampoline for `(fnptr, ints, floats)` selecting the dispatcher by the return class.
-unsafe fn invoke_native(fnptr: *const c_void, ints: &[u64], floats: &[FArg], ret_code: u8) -> RawRet {
+unsafe fn invoke_native(
+    fnptr: *const c_void,
+    ints: &[u64],
+    floats: &[FArg],
+    ret_code: u8,
+) -> RawRet {
     match ret_code {
-        T_F32 => RawRet { int: 0, f32: call_f32(fnptr, ints, floats), f64: 0.0 },
-        T_F64 => RawRet { int: 0, f32: 0.0, f64: call_f64(fnptr, ints, floats) },
-        _ => RawRet { int: call_int(fnptr, ints, floats), f32: 0.0, f64: 0.0 },
+        T_F32 => RawRet {
+            int: 0,
+            f32: call_f32(fnptr, ints, floats),
+            f64: 0.0,
+        },
+        T_F64 => RawRet {
+            int: 0,
+            f32: 0.0,
+            f64: call_f64(fnptr, ints, floats),
+        },
+        _ => RawRet {
+            int: call_int(fnptr, ints, floats),
+            f32: 0.0,
+            f64: 0.0,
+        },
     }
 }
 
@@ -290,7 +313,9 @@ fn arr_len(ctx: &mut Ctx, v: &Value) -> usize {
 
 /// `__ffi.dlopen(path)` → an opaque library id (kept mapped for the process lifetime).
 pub fn op_dlopen(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
-    let path = ctx.coerce_string(args.first().unwrap_or(&Value::Undefined))?.to_string();
+    let path = ctx
+        .coerce_string(args.first().unwrap_or(&Value::Undefined))?
+        .to_string();
     let lib = DynLib::open(&path)
         .map_err(|e| plain_error(ctx, format!("cannot open library '{path}': {e}")))?;
     let st = ffi_state(ctx);
@@ -301,10 +326,15 @@ pub fn op_dlopen(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Valu
 /// `__ffi.dlsym(libId, name)` → the symbol's raw address as a number, or a Bun-style throw.
 pub fn op_dlsym(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
     let id = ctx.coerce_number(args.first().unwrap_or(&Value::Undefined))? as usize;
-    let name = ctx.coerce_string(args.get(1).unwrap_or(&Value::Undefined))?.to_string();
+    let name = ctx
+        .coerce_string(args.get(1).unwrap_or(&Value::Undefined))?
+        .to_string();
     let addr = {
         let st = ffi_state(ctx);
-        st.libs.get(id).and_then(|l| l.as_ref()).and_then(|l| l.symbol(&name))
+        st.libs
+            .get(id)
+            .and_then(|l| l.as_ref())
+            .and_then(|l| l.symbol(&name))
     };
     match addr {
         Some(p) => Ok(Value::Num(p as usize as f64)),
@@ -365,7 +395,12 @@ pub fn op_cc(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
         command.args(["-shared", "-fPIC"]);
         #[cfg(windows)]
         command.arg("-shared");
-        command.arg("-O2").arg(&source).args(&extra).arg("-o").arg(&output);
+        command
+            .arg("-O2")
+            .arg(&source)
+            .args(&extra)
+            .arg("-o")
+            .arg(&output);
         match command.output() {
             Ok(result) if result.status.success() => {
                 return Ok(Value::from_string(output.to_string_lossy().into_owned()));
@@ -402,7 +437,10 @@ pub fn op_call(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value>
     let mut ints: Vec<u64> = Vec::with_capacity(n);
     let mut floats: Vec<FArg> = Vec::with_capacity(n);
     for i in 0..n {
-        let code = ctx.member_get(&codes_v, &i.to_string())?.as_num_opt().unwrap_or(0.0) as u8;
+        let code = ctx
+            .member_get(&codes_v, &i.to_string())?
+            .as_num_opt()
+            .unwrap_or(0.0) as u8;
         let v = ctx.member_get(&vals_v, &i.to_string())?;
         marshal_arg(ctx, code, &v, &mut ints, &mut floats)?;
     }
@@ -475,7 +513,9 @@ pub fn op_read_cstring(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value
             std::slice::from_raw_parts(p, len as usize)
         }
     };
-    Ok(Value::from_string(String::from_utf8_lossy(bytes).into_owned()))
+    Ok(Value::from_string(
+        String::from_utf8_lossy(bytes).into_owned(),
+    ))
 }
 
 /// `__ffi.toArrayBuffer(ptr, byteOffset, byteLength)` — a *copy* of native memory as an
@@ -522,12 +562,17 @@ pub fn op_register_callback(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<
     if n > MAX_ARGS {
         return Err(plain_error(
             ctx,
-            format!("bun:ffi JSCallback with {n} arguments is not supported in lumen (max {MAX_ARGS})"),
+            format!(
+                "bun:ffi JSCallback with {n} arguments is not supported in lumen (max {MAX_ARGS})"
+            ),
         ));
     }
     let mut arg_codes = Vec::with_capacity(n);
     for i in 0..n {
-        let code = ctx.member_get(&codes_v, &i.to_string())?.as_num_opt().unwrap_or(0.0) as u8;
+        let code = ctx
+            .member_get(&codes_v, &i.to_string())?
+            .as_num_opt()
+            .unwrap_or(0.0) as u8;
         if is_float(code) {
             return Err(plain_error(
                 ctx,
@@ -551,7 +596,11 @@ pub fn op_register_callback(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<
             format!("bun:ffi JSCallback pool exhausted ({JSCB_POOL} live callbacks of arity {n})"),
         ));
     };
-    st.callbacks[n][k] = Some(CbEntry { func, arg_codes, ret_code });
+    st.callbacks[n][k] = Some(CbEntry {
+        func,
+        arg_codes,
+        ret_code,
+    });
     let ptr = jscb_thunk_ptr(n, k) as usize as f64;
     let id = (n * JSCB_POOL + k) as f64;
     Ok(ctx.make_array(vec![Value::Num(ptr), Value::Num(id)]))
@@ -585,7 +634,12 @@ fn jscb_dispatch(n: usize, k: usize, raw_args: &[u64]) -> u64 {
 
     let (func, arg_codes, ret_code) = {
         let st = ffi_state(ctx);
-        match st.callbacks.get(n).and_then(|r| r.get(k)).and_then(|c| c.as_ref()) {
+        match st
+            .callbacks
+            .get(n)
+            .and_then(|r| r.get(k))
+            .and_then(|c| c.as_ref())
+        {
             Some(e) => (e.func.clone(), e.arg_codes.clone(), e.ret_code),
             None => return 0,
         }
@@ -600,7 +654,10 @@ fn jscb_dispatch(n: usize, k: usize, raw_args: &[u64]) -> u64 {
     match ctx.invoke(func, Value::Undefined, &js_args) {
         Ok(v) => cb_return_to_raw(ctx, &v, ret_code),
         Err(e) => {
-            let msg = ctx.coerce_string(&e).map(|s| s.to_string()).unwrap_or_default();
+            let msg = ctx
+                .coerce_string(&e)
+                .map(|s| s.to_string())
+                .unwrap_or_default();
             eprintln!("uncaught exception in bun:ffi JSCallback: {msg}");
             0
         }
@@ -611,7 +668,11 @@ fn jscb_dispatch(n: usize, k: usize, raw_args: &[u64]) -> u64 {
 /// (0 ⇒ null), 64-bit ints as BigInt, narrower ints as numbers, bool as boolean.
 fn cb_arg_to_value(raw: u64, code: u8) -> Value {
     if is_pointer(code) {
-        return if raw == 0 { Value::Null } else { Value::Num(raw as f64) };
+        return if raw == 0 {
+            Value::Null
+        } else {
+            Value::Num(raw as f64)
+        };
     }
     match code {
         T_CHAR | T_I8 => Value::Num((raw as u8 as i8) as f64),
@@ -718,6 +779,9 @@ mod tests {
         assert_eq!(fmask(&[]), 0);
         assert_eq!(fmask(&[FArg::F32(0.0)]), 0);
         assert_eq!(fmask(&[FArg::F64(0.0)]), 1);
-        assert_eq!(fmask(&[FArg::F32(0.0), FArg::F64(0.0), FArg::F32(0.0)]), 0b010);
+        assert_eq!(
+            fmask(&[FArg::F32(0.0), FArg::F64(0.0), FArg::F32(0.0)]),
+            0b010
+        );
     }
 }

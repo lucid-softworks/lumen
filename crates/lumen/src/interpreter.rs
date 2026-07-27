@@ -420,9 +420,7 @@ fn scope_snapshot() -> Vec<Env> {
 }
 
 pub fn new_scope(parent: Option<Env>) -> Env {
-    let under_with = parent
-        .as_ref()
-        .is_some_and(|p| p.borrow().under_with);
+    let under_with = parent.as_ref().is_some_and(|p| p.borrow().under_with);
     let e = Rc::new(RefCell::new(Scope {
         vars: Default::default(),
         parent,
@@ -439,9 +437,7 @@ pub fn new_scope(parent: Option<Env>) -> Env {
 /// A *variable* environment: the hoisting target for `var`/function declarations (function body,
 /// global, or `eval` scope). See [`Scope::var_boundary`].
 pub fn new_var_scope(parent: Option<Env>) -> Env {
-    let under_with = parent
-        .as_ref()
-        .is_some_and(|p| p.borrow().under_with);
+    let under_with = parent.as_ref().is_some_and(|p| p.borrow().under_with);
     let e = Rc::new(RefCell::new(Scope {
         vars: Default::default(),
         parent,
@@ -2693,9 +2689,7 @@ impl Interp {
         }
         let keychk = st.depth & IC_ARR_KEYCHK != 0;
         let depth = st.depth & !IC_ARR_KEYCHK;
-        if !(depth <= 1
-            || (depth == 2 && st.mid_ok & 1 != 0)
-            || (depth == 3 && st.mid_ok & 3 == 3))
+        if !(depth <= 1 || (depth == 2 && st.mid_ok & 1 != 0) || (depth == 3 && st.mid_ok & 3 == 3))
         {
             return None;
         }
@@ -2725,8 +2719,8 @@ impl Interp {
                 } else if let Some(pr) = rb.proto.as_ref() {
                     let mut hp = Rc::as_ptr(pr);
                     drop(rb); // the next hop is a different object; release the borrow
-                    // Validate each intermediate hop's shape (a match proves it still lacks
-                    // the name), following live protos.
+                              // Validate each intermediate hop's shape (a match proves it still lacks
+                              // the name), following live protos.
                     for mid_shape in [st.mid_shape, st.mid2_shape]
                         .into_iter()
                         .take(depth.saturating_sub(1) as usize)
@@ -2823,7 +2817,12 @@ impl Interp {
                     // to PROP_IC_WAYS shapes stabilizes with one shape per way instead of
                     // thrashing a single cell.
                     let st = IcState {
-                        depth: depth | if keychk { crate::bytecode::IC_ARR_KEYCHK } else { 0 },
+                        depth: depth
+                            | if keychk {
+                                crate::bytecode::IC_ARR_KEYCHK
+                            } else {
+                                0
+                            },
                         slot: slot as u32,
                         recv_shape,
                         holder_shape: b.props.shape(),
@@ -3024,8 +3023,7 @@ impl Interp {
                     && st.mid_shape == epoch
                     && epoch != u32::MAX
                 {
-                    let cached_proto =
-                        (((st.mid2_shape as u64) << 32) | st.slot as u64) as usize;
+                    let cached_proto = (((st.mid2_shape as u64) << 32) | st.slot as u64) as usize;
                     if cached_proto == proto_ptr {
                         b.props.append_new(
                             name.clone(),
@@ -3044,11 +3042,7 @@ impl Interp {
                     return false; // setter, or non-writable (strict-throw) — slow path
                 }
                 let shape = b.props.shape();
-                b.props
-                    .entry_at_mut(slot)
-                    .unwrap()
-                    .1
-                    .set_value(v.clone());
+                b.props.entry_at_mut(slot).unwrap().1.set_value(v.clone());
                 let st = crate::bytecode::IcState {
                     depth: 0,
                     slot: slot as u32,
@@ -3138,16 +3132,19 @@ impl Interp {
             }
         }
         b.props.insert(name.clone(), Property::plain(v.clone()));
-        self.ic_insert(cache, IcState {
-            depth: IC_CREATE,
-            slot: proto_ptr as u32,
-            recv_shape,
-            // The memoized child shape the insert just landed on: hits append straight to it.
-            holder_shape: b.props.shape(),
-            mid_ok: 0,
-            mid_shape: crate::value::proto_epoch(),
-            mid2_shape: ((proto_ptr as u64) >> 32) as u32,
-        });
+        self.ic_insert(
+            cache,
+            IcState {
+                depth: IC_CREATE,
+                slot: proto_ptr as u32,
+                recv_shape,
+                // The memoized child shape the insert just landed on: hits append straight to it.
+                holder_shape: b.props.shape(),
+                mid_ok: 0,
+                mid_shape: crate::value::proto_epoch(),
+                mid2_shape: ((proto_ptr as u64) >> 32) as u32,
+            },
+        );
         let pin = cur.take().map(|p| Rc::downgrade(&p)).unwrap_or_default();
         self.creation_pins.insert(proto_ptr, pin);
         true
@@ -3262,7 +3259,11 @@ impl Interp {
                 if !self.mapped_arguments.is_empty() {
                     if let Some(name) = self.mapped_arg_name(ptr, key) {
                         if let Some((env, _)) = self.mapped_arguments.get(&ptr) {
-                            let v = env.borrow().vars.get(name.as_str()).map(|b| b.value.clone());
+                            let v = env
+                                .borrow()
+                                .vars
+                                .get(name.as_str())
+                                .map(|b| b.value.clone());
                             if let Some(v) = v {
                                 return Ok(v);
                             }
@@ -3530,7 +3531,10 @@ impl Interp {
     pub(crate) fn mapped_arg_value(&self, ptr: usize, key: &str) -> Option<Value> {
         let name = self.mapped_arg_name(ptr, key)?;
         let (env, _) = self.mapped_arguments.get(&ptr)?;
-        env.borrow().vars.get(name.as_str()).map(|b| b.value.clone())
+        env.borrow()
+            .vars
+            .get(name.as_str())
+            .map(|b| b.value.clone())
     }
 
     /// Write through a mapped `arguments[key]` alias into its parameter binding.
@@ -4437,9 +4441,7 @@ impl Interp {
                 let internal = b.gc_internal.get() as usize;
                 let strong = Rc::strong_count(o);
                 let keys: Vec<&str> = b.props.iter().take(4).map(|(k, _)| &**k).collect();
-                eprintln!(
-                    "[gc-dump] root strong={strong} internal={internal} props={keys:?}"
-                );
+                eprintln!("[gc-dump] root strong={strong} internal={internal} props={keys:?}");
                 shown += 1;
                 if shown >= 60 {
                     break;
@@ -4755,14 +4757,8 @@ impl Interp {
         // `eval(...)` of the current realm is intercepted earlier, in `eval_call`.) Only a
         // native function can be a realm's `eval` — skip the property lookup for user calls,
         // which is every hot call (the main realm always registers, so the map is never empty).
-        if self.multi_realm()
-            && self.eval_realm_fns.contains(&(Rc::as_ptr(&obj) as usize))
-        {
-            let realm_g = obj
-                .borrow()
-                .props
-                .get("__eval_realm")
-                .map(|p| p.value());
+        if self.multi_realm() && self.eval_realm_fns.contains(&(Rc::as_ptr(&obj) as usize)) {
+            let realm_g = obj.borrow().props.get("__eval_realm").map(|p| p.value());
             if let Some(realm_g @ Value::Obj(_)) = realm_g {
                 return match args.first() {
                     Some(Value::Str(s)) => {
@@ -5081,14 +5077,12 @@ impl Interp {
                             Abrupt::Throw(Value::Str(s)) => format!("str {s}"),
                             Abrupt::Throw(Value::Obj(o)) => format!(
                                 "obj {:?} {:?}",
-                                o.borrow()
-                                    .props
-                                    .get("name")
-                                    .map(|p| p.value())
-                                    .and_then(|v| match v {
+                                o.borrow().props.get("name").map(|p| p.value()).and_then(
+                                    |v| match v {
                                         Value::Str(s) => Some(s.to_string()),
                                         _ => None,
-                                    }),
+                                    }
+                                ),
                                 o.borrow()
                                     .props
                                     .get("message")
@@ -5291,12 +5285,10 @@ impl Interp {
                     let l = interp_layout(self);
                     self.interp_layout.set(l);
                 }
-                let _ = chunk
-                    .jit
-                    .set(
-                        crate::jit::compile(chunk, &layout, &self.interp_layout.get())
-                            .map(std::rc::Rc::new),
-                    );
+                let _ = chunk.jit.set(
+                    crate::jit::compile(chunk, &layout, &self.interp_layout.get())
+                        .map(std::rc::Rc::new),
+                );
             }
             if let Some(Some(code)) = chunk.jit.get() {
                 jit_code = Some(code.clone());
@@ -5419,9 +5411,7 @@ impl Interp {
                     }
                 }
                 let ic = found?;
-                return Some(unsafe {
-                    self.call_jit_env_committed(ic, ep, this_slot, args, argc)
-                });
+                return Some(unsafe { self.call_jit_env_committed(ic, ep, this_slot, args, argc) });
             }
         };
         if ic.native != 0 {
@@ -5929,29 +5919,28 @@ impl Interp {
                     && entry.call.epoch == epoch
                     && entry.call.global_env == genv
             });
-        let (ic, prototype_shape, prototype_slot, arguments_apply_forwarder) =
-            match cached_site {
-                Some(entry) => (
-                    entry.call,
-                    entry.prototype_shape,
-                    entry.prototype_slot,
-                    entry.arguments_apply_forwarder,
-                ),
-                None => match self.construct_ics.get(&key) {
-            Some(entry)
-                if entry.pin.as_ptr() == Rc::as_ptr(o)
-                    && entry.call.epoch == epoch
-                    && entry.call.global_env == genv =>
-            {
-                (
-                    entry.call,
-                    entry.prototype_shape,
-                    entry.prototype_slot,
-                    entry.arguments_apply_forwarder,
-                )
-            }
-            _ => self.construct_ic_fill(o, key, epoch, genv)?,
-                },
+        let (ic, prototype_shape, prototype_slot, arguments_apply_forwarder) = match cached_site {
+            Some(entry) => (
+                entry.call,
+                entry.prototype_shape,
+                entry.prototype_slot,
+                entry.arguments_apply_forwarder,
+            ),
+            None => match self.construct_ics.get(&key) {
+                Some(entry)
+                    if entry.pin.as_ptr() == Rc::as_ptr(o)
+                        && entry.call.epoch == epoch
+                        && entry.call.global_env == genv =>
+                {
+                    (
+                        entry.call,
+                        entry.prototype_shape,
+                        entry.prototype_slot,
+                        entry.arguments_apply_forwarder,
+                    )
+                }
+                _ => self.construct_ic_fill(o, key, epoch, genv)?,
+            },
         };
         let site_state = crate::bytecode::ConstructSite {
             call: ic,
@@ -5994,8 +5983,7 @@ impl Interp {
         } else {
             self.learned_construct_capacity(o)
         };
-        let this =
-            crate::value::Object::new_with_capacity(Some(proto), instance_capacity);
+        let this = crate::value::Object::new_with_capacity(Some(proto), instance_capacity);
         let this_val = Value::Obj(this.clone());
         // --- committed: identical shape to call_jit_cached's committed path ---
         self.depth += 1;
@@ -6340,8 +6328,7 @@ impl Interp {
                             crate::bytecode::CALL_IC_NEEDS_ENV
                         } else {
                             chunk.jit_direct_flags(code)
-                                | (((chunk.inline_attempted.get()
-                                    || func.code2.get().is_some())
+                                | (((chunk.inline_attempted.get() || func.code2.get().is_some())
                                     as u8)
                                     << 2)
                         },
@@ -6438,7 +6425,6 @@ impl Interp {
         self.depth -= 1;
         Some(r)
     }
-
 
     fn call_user_inner(
         &mut self,
@@ -6728,11 +6714,7 @@ impl Interp {
         // Generators (sync and async) suspend at each yield on their own coroutine; see run_generator.
         if func.is_generator {
             // The generator object's [[Prototype]] comes from the function's own `.prototype`.
-            let gen_proto = fn_obj
-                .borrow()
-                .props
-                .get("prototype")
-                .map(|p| p.value());
+            let gen_proto = fn_obj.borrow().props.get("prototype").map(|p| p.value());
             let gen = self.run_generator(func, &body, param_seed, gen_proto);
             self.strict = saved_strict;
             self.new_target = saved_new_target;
@@ -7222,11 +7204,8 @@ impl Interp {
             },
         );
         let bound = Object::new(Some(self.function_proto.clone()));
-        bound.borrow_mut().call = Callable::bound(
-            target,
-            r.clone(),
-            vec![Value::Num(key as f64), r.clone()],
-        );
+        bound.borrow_mut().call =
+            Callable::bound(target, r.clone(), vec![Value::Num(key as f64), r.clone()]);
         Value::Obj(bound)
     }
 
@@ -7255,11 +7234,8 @@ impl Interp {
         );
         let bound = Object::new(Some(self.function_proto.clone()));
         // `args` carries the generator key (as a number marker) and the result promise.
-        bound.borrow_mut().call = Callable::bound(
-            target,
-            r.clone(),
-            vec![Value::Num(key as f64), r.clone()],
-        );
+        bound.borrow_mut().call =
+            Callable::bound(target, r.clone(), vec![Value::Num(key as f64), r.clone()]);
         Value::Obj(bound)
     }
 
@@ -7292,8 +7268,7 @@ impl Interp {
             },
         );
         let bound = Object::new(Some(self.function_proto.clone()));
-        bound.borrow_mut().call =
-            Callable::bound(target, promise.clone(), vec![promise.clone()]);
+        bound.borrow_mut().call = Callable::bound(target, promise.clone(), vec![promise.clone()]);
         Value::Obj(bound)
     }
 
@@ -7344,7 +7319,12 @@ impl Interp {
     /// environment). `hoist` has just created the body's `var` bindings as `undefined`; fill in the
     /// initial value from the parameter scope for names it declares.
     fn seed_param_vars(&self, param_scope: &Env, body_scope: &Env) {
-        let names: Vec<String> = body_scope.borrow().vars.keys().map(|k| k.to_string()).collect();
+        let names: Vec<String> = body_scope
+            .borrow()
+            .vars
+            .keys()
+            .map(|k| k.to_string())
+            .collect();
         for name in names {
             if name == "this" {
                 continue;

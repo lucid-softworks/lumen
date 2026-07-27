@@ -322,11 +322,7 @@ fn op_sha256(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value
 
 // ---- compression (DEFLATE/zlib/gzip, backing CompressionStream/DecompressionStream) ----
 
-fn compress_op(
-    ctx: &mut Ctx,
-    args: &[Value],
-    codec: fn(&[u8]) -> Vec<u8>,
-) -> Result<Value, Value> {
+fn compress_op(ctx: &mut Ctx, args: &[Value], codec: fn(&[u8]) -> Vec<u8>) -> Result<Value, Value> {
     let v = args.first().unwrap_or(&Value::Undefined);
     let Some(bytes) = ctx.typed_array_bytes(v) else {
         return Err(ctx.make_error("TypeError", "compression expects a BufferSource"));

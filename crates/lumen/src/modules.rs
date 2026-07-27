@@ -14,7 +14,7 @@
 
 use crate::ast::*;
 use crate::builtins::make_bound_len;
-use crate::interpreter::{Abrupt, Binding, Env, Interp, new_scope};
+use crate::interpreter::{new_scope, Abrupt, Binding, Env, Interp};
 use crate::value::{Object, Property, Value};
 use std::collections::HashMap;
 use std::rc::Rc;

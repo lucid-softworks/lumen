@@ -50,7 +50,12 @@ mod tests {
 
     struct NoHost;
     impl Host for NoHost {
-        fn call_host(&mut self, _id: usize, _a: &[Val], _r: &[parse::ValType]) -> Result<Vec<Val>, String> {
+        fn call_host(
+            &mut self,
+            _id: usize,
+            _a: &[Val],
+            _r: &[parse::ValType],
+        ) -> Result<Vec<Val>, String> {
             Err("no imports".into())
         }
     }
@@ -58,7 +63,9 @@ mod tests {
     fn instance_of(bytes: &[u8]) -> (Store, usize) {
         let module = decode(bytes).expect("decode");
         let mut store = Store::default();
-        let idx = store.instantiate(module, Imports::default()).expect("instantiate");
+        let idx = store
+            .instantiate(module, Imports::default())
+            .expect("instantiate");
         (store, idx)
     }
 
@@ -122,14 +129,28 @@ mod tests {
         // distinct function addresses, both callable.
         let module = decode(ADD).expect("decode");
         let mut store = Store::default();
-        let a = store.instantiate(Rc::clone(&module), Imports::default()).unwrap();
+        let a = store
+            .instantiate(Rc::clone(&module), Imports::default())
+            .unwrap();
         let b = store.instantiate(module, Imports::default()).unwrap();
         assert_ne!(a, b);
         let (_, addr_a) = store.export_addr(a, "add").unwrap();
         let (_, addr_b) = store.export_addr(b, "add").unwrap();
         assert_ne!(addr_a, addr_b);
-        assert_eq!(store.invoke(addr_a, vec![Val::I32(1), Val::I32(2)], &mut NoHost, 0).unwrap()[0].i32(), 3);
-        assert_eq!(store.invoke(addr_b, vec![Val::I32(40), Val::I32(2)], &mut NoHost, 0).unwrap()[0].i32(), 42);
+        assert_eq!(
+            store
+                .invoke(addr_a, vec![Val::I32(1), Val::I32(2)], &mut NoHost, 0)
+                .unwrap()[0]
+                .i32(),
+            3
+        );
+        assert_eq!(
+            store
+                .invoke(addr_b, vec![Val::I32(40), Val::I32(2)], &mut NoHost, 0)
+                .unwrap()[0]
+                .i32(),
+            42
+        );
     }
 
     #[test]

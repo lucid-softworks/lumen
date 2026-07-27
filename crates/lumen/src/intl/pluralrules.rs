@@ -8,7 +8,7 @@ use super::{
     ab, arg, canonicalize_locale_list, data, get_options_object as coerce_options, make_service,
 };
 use crate::interpreter::Interp;
-use crate::value::{Value, set_builtin, set_data};
+use crate::value::{set_builtin, set_data, Value};
 
 pub fn install(it: &mut Interp, ns: &crate::value::Gc) {
     let (ctor, proto) = make_service(it, ns, "PluralRules", 0, construct);

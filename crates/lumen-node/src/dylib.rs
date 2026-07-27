@@ -156,7 +156,10 @@ mod tests {
 
         let lib = DynLib::open(path).expect("open system library");
         assert!(lib.symbol(sym).is_some(), "{sym} should resolve");
-        assert!(lib.symbol("__lumen_no_such_symbol__").is_none(), "bogus symbol must miss");
+        assert!(
+            lib.symbol("__lumen_no_such_symbol__").is_none(),
+            "bogus symbol must miss"
+        );
     }
 
     #[test]

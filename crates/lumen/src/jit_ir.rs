@@ -291,9 +291,7 @@ impl RegionIr {
                 && cfg.blocks[id.index()]
                     .predecessors
                     .iter()
-                    .any(|pred| {
-                        cfg.blocks[pred.index()].stack_in.is_some() && !selected(*pred)
-                    })
+                    .any(|pred| cfg.blocks[pred.index()].stack_in.is_some() && !selected(*pred))
             {
                 return Err(IrError::IrreducibleEntry { block: id });
             }
@@ -1538,7 +1536,10 @@ mod tests {
         ];
         let (g, ir) = region(&ops, 0, 2);
         assert_eq!(g.stack_depth_at(3), None);
-        assert!(ir.blocks.iter().any(|b| g.blocks[b.cfg_block.index()].start == 5));
+        assert!(ir
+            .blocks
+            .iter()
+            .any(|b| g.blocks[b.cfg_block.index()].start == 5));
     }
 
     #[test]

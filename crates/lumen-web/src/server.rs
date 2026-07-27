@@ -92,7 +92,11 @@ struct Accepted {
 
 /// `__http_server.listen(hostname, port, dispatch)` -> `[serverId, boundPort]`. Binds, registers
 /// the server, and arms the first accept. Throws if the bind fails.
-pub(crate) fn op_server_listen(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+pub(crate) fn op_server_listen(
+    ctx: &mut Ctx,
+    _this: Value,
+    args: &[Value],
+) -> Result<Value, Value> {
     let host = ctx
         .coerce_string(args.first().unwrap_or(&Value::Undefined))?
         .to_string();
@@ -179,7 +183,10 @@ pub(crate) fn op_server_respond(
         .and_then(|rc| rc.downcast::<TcpStream>().ok())
         .and_then(|rc| std::rc::Rc::try_unwrap(rc).ok());
     let Some(stream) = stream else {
-        return Err(ctx.make_error("TypeError", "respond: unknown or already-answered connection"));
+        return Err(ctx.make_error(
+            "TypeError",
+            "respond: unknown or already-answered connection",
+        ));
     };
 
     let bytes = build_response(status, &status_text, &headers, &body);
@@ -224,7 +231,11 @@ pub(crate) fn op_server_close(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Re
 }
 
 /// `__http_server.version()` -> the runtime version string (backs `Lumen.version`).
-pub(crate) fn op_server_version(_ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Value> {
+pub(crate) fn op_server_version(
+    _ctx: &mut Ctx,
+    _this: Value,
+    _args: &[Value],
+) -> Result<Value, Value> {
     Ok(Value::from_string(env!("CARGO_PKG_VERSION").to_string()))
 }
 
@@ -233,9 +244,13 @@ pub(crate) fn op_server_version(_ctx: &mut Ctx, _this: Value, _args: &[Value]) -
 /// Settle one accept: on a request, stash the socket, re-arm the next accept, and return the
 /// args for `__dispatch(serverId, connId, method, url, headers, body, remoteHost, remotePort)`.
 /// On close, return `[serverId, -1]` (JS resolves `finished`) and do not re-arm.
-fn decode_accept(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<Vec<Value>, Value> {
-    let AcceptTaskResult { server_id, outcome } =
-        *payload.downcast::<AcceptTaskResult>().expect("accept payload");
+fn decode_accept(
+    ctx: &mut Ctx,
+    payload: Box<dyn std::any::Any + Send>,
+) -> Result<Vec<Value>, Value> {
+    let AcceptTaskResult { server_id, outcome } = *payload
+        .downcast::<AcceptTaskResult>()
+        .expect("accept payload");
 
     let accepted = match outcome {
         AcceptOutcome::Closed => {
@@ -292,8 +307,14 @@ fn decode_accept(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Resul
 
 /// Settle a response write: `resolve()` on success, `reject(error)` if the socket write failed
 /// (client hung up mid-response, etc.).
-fn decode_write(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<Vec<Value>, Value> {
-    match *payload.downcast::<Result<(), String>>().expect("write payload") {
+fn decode_write(
+    ctx: &mut Ctx,
+    payload: Box<dyn std::any::Any + Send>,
+) -> Result<Vec<Value>, Value> {
+    match *payload
+        .downcast::<Result<(), String>>()
+        .expect("write payload")
+    {
         Ok(()) => Ok(vec![]),
         Err(message) => Err(ctx.make_error("Error", message)),
     }

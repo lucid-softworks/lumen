@@ -18,55 +18,193 @@ struct GlueFile {
     wrap: bool,
 }
 const JS_FILES: &[GlueFile] = &[
-    GlueFile { name: "preamble.js", wrap: false },
-    GlueFile { name: "buffer.js", wrap: false },
-    GlueFile { name: "path.js", wrap: false },
-    GlueFile { name: "os.js", wrap: false },
-    GlueFile { name: "events.js", wrap: true },
-    GlueFile { name: "diagnostics_channel.js", wrap: true },
-    GlueFile { name: "domain.js", wrap: true },
-    GlueFile { name: "trace_events.js", wrap: true },
-    GlueFile { name: "util.js", wrap: true },
-    GlueFile { name: "console.js", wrap: true },
-    GlueFile { name: "timers.js", wrap: true },
-    GlueFile { name: "crypto.js", wrap: true },
-    GlueFile { name: "punycode.js", wrap: true },
-    GlueFile { name: "shims.js", wrap: true },
-    GlueFile { name: "stream.js", wrap: true },
-    GlueFile { name: "net.js", wrap: true },
+    GlueFile {
+        name: "preamble.js",
+        wrap: false,
+    },
+    GlueFile {
+        name: "buffer.js",
+        wrap: false,
+    },
+    GlueFile {
+        name: "path.js",
+        wrap: false,
+    },
+    GlueFile {
+        name: "os.js",
+        wrap: false,
+    },
+    GlueFile {
+        name: "events.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "diagnostics_channel.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "domain.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "trace_events.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "util.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "console.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "timers.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "crypto.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "punycode.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "shims.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "stream.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "net.js",
+        wrap: true,
+    },
     // fs.js is unwrapped (shares the outer scope) but its ReadStream/WriteStream/StatWatcher
     // extend the `stream`/`events` builtins, so it must load after them.
-    GlueFile { name: "fs.js", wrap: false },
-    GlueFile { name: "http.js", wrap: true },
-    GlueFile { name: "http2_huffman.js", wrap: true },
-    GlueFile { name: "http2_codec.js", wrap: true },
-    GlueFile { name: "http2.js", wrap: true },
-    GlueFile { name: "child_process.js", wrap: true },
-    GlueFile { name: "dns.js", wrap: true },
-    GlueFile { name: "stdlib_extras.js", wrap: true },
-    GlueFile { name: "tty.js", wrap: true },
-    GlueFile { name: "tls.js", wrap: true },
+    GlueFile {
+        name: "fs.js",
+        wrap: false,
+    },
+    GlueFile {
+        name: "http.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "http2_huffman.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "http2_codec.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "http2.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "child_process.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "dns.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "stdlib_extras.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "tty.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "tls.js",
+        wrap: true,
+    },
     // Loaded after stdlib_extras so the real implementation replaces its compatibility stub.
-    GlueFile { name: "worker_threads.js", wrap: true },
-    GlueFile { name: "vm.js", wrap: true },
-    GlueFile { name: "repl.js", wrap: true },
-    GlueFile { name: "cluster.js", wrap: true },
-    GlueFile { name: "dgram.js", wrap: true },
-    GlueFile { name: "wasi.js", wrap: true },
-    GlueFile { name: "constants.js", wrap: true },
-    GlueFile { name: "bun_ffi.js", wrap: true },
-    GlueFile { name: "bun_jsc.js", wrap: true },
-    GlueFile { name: "bun_sqlite.js", wrap: true },
-    GlueFile { name: "bun_postgres.js", wrap: true },
-    GlueFile { name: "bun_mysql.js", wrap: true },
-    GlueFile { name: "bun_sql.js", wrap: true },
-    GlueFile { name: "bun_redis.js", wrap: true },
-    GlueFile { name: "bun_cookies.js", wrap: true },
-    GlueFile { name: "bun_router.js", wrap: true },
-    GlueFile { name: "bun_s3.js", wrap: true },
-    GlueFile { name: "bun.js", wrap: true },
-    GlueFile { name: "typescript_strip.js", wrap: true },
-    GlueFile { name: "module.js", wrap: false },
+    GlueFile {
+        name: "worker_threads.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "vm.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "repl.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "cluster.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "dgram.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "wasi.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "constants.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "bun_ffi.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "bun_jsc.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "bun_sqlite.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "bun_postgres.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "bun_mysql.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "bun_sql.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "bun_redis.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "bun_cookies.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "bun_router.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "bun_s3.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "bun.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "typescript_strip.js",
+        wrap: true,
+    },
+    GlueFile {
+        name: "module.js",
+        wrap: false,
+    },
 ];
 
 fn main() {
@@ -135,7 +273,11 @@ fn generate_ffi_trampolines() -> String {
     let mut s = String::new();
     s.push_str("// @generated by build.rs — bun:ffi trampoline dispatch. Do not edit.\n\n");
 
-    for (fname, rt) in [("call_int", "u64"), ("call_f32", "f32"), ("call_f64", "f64")] {
+    for (fname, rt) in [
+        ("call_int", "u64"),
+        ("call_f32", "f32"),
+        ("call_f64", "f64"),
+    ] {
         s.push_str(&format!(
             "/// Trampoline into a native function returning the `{rt}` register class.\n\
              pub unsafe fn {fname}(f: *const core::ffi::c_void, ints: &[u64], floats: &[FArg]) -> {rt} {{\n\
@@ -167,7 +309,9 @@ fn generate_ffi_trampolines() -> String {
                 }
             }
         }
-        s.push_str("        _ => unreachable!(\"ffi signature outside the supported register budget\"),\n");
+        s.push_str(
+            "        _ => unreachable!(\"ffi signature outside the supported register budget\"),\n",
+        );
         s.push_str("    }\n}\n\n");
     }
 

@@ -5,7 +5,7 @@ use super::service::{
 };
 use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
 use crate::interpreter::Interp;
-use crate::value::{Value, set_builtin, set_data};
+use crate::value::{set_builtin, set_data, Value};
 
 const UNITS: &[&str] = &[
     "year", "years", "quarter", "quarters", "month", "months", "week", "weeks", "day", "days",

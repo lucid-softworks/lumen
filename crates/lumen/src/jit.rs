@@ -17,14 +17,20 @@
 //! templates are filled in. Other targets retain the bytecode VM.
 
 #![cfg_attr(
-    not(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows"))),
+    not(all(
+        target_arch = "aarch64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    )),
     allow(dead_code)
 )]
 
 use std::rc::Rc;
 
 use crate::bytecode::Chunk;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 use crate::bytecode::UpdKind;
 use crate::interpreter::{Abrupt, Env, Interp};
 use crate::value::Value;
@@ -85,14 +91,7 @@ mod sys {
 #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 mod sys {
     extern "C" {
-        fn mmap(
-            addr: *mut u8,
-            len: usize,
-            prot: i32,
-            flags: i32,
-            fd: i32,
-            offset: i64,
-        ) -> *mut u8;
+        fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8;
         fn mprotect(addr: *mut u8, len: usize, prot: i32) -> i32;
         fn munmap(addr: *mut u8, len: usize) -> i32;
     }
@@ -131,14 +130,7 @@ mod sys {
     use core::arch::asm;
 
     extern "C" {
-        fn mmap(
-            addr: *mut u8,
-            len: usize,
-            prot: i32,
-            flags: i32,
-            fd: i32,
-            offset: i64,
-        ) -> *mut u8;
+        fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8;
         fn mprotect(addr: *mut u8, len: usize, prot: i32) -> i32;
         fn munmap(addr: *mut u8, len: usize) -> i32;
     }
@@ -409,7 +401,10 @@ pub const H_NEW: usize = 14;
 /// missing property, so filling it may be intercepted by an indexed setter on Array.prototype.
 /// Reuse the interpreter's live element-protector proof before returning a borrowed Vec header;
 /// generated code performs only drop-free Empty/Number overwrites until it leaves the region.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 unsafe extern "C" fn jit_prepare_numeric_packed_array(
     ctx: *mut JitCtx,
     raw: *const std::cell::RefCell<crate::value::Object>,
@@ -425,10 +420,7 @@ unsafe extern "C" fn jit_prepare_numeric_packed_array(
     let obj = std::mem::ManuallyDrop::new(unsafe { Rc::from_raw(raw) });
     {
         let b = obj.borrow();
-        if !matches!(&b.exotic, crate::value::Exotic::Array)
-            || !b.ic_plain.get()
-            || !b.extensible
-        {
+        if !matches!(&b.exotic, crate::value::Exotic::Array) || !b.ic_plain.get() || !b.extensible {
             return std::ptr::null_mut();
         }
     }
@@ -447,7 +439,10 @@ unsafe extern "C" fn jit_prepare_numeric_packed_array(
 /// guarded both source objects and will perform no further fallible checks. Doing the replacement
 /// in Rust preserves exact destruction for stale compiler temporaries that may be their Rc's last
 /// owner; attempting that rare destructor path in generated code would either leak or undercount.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 unsafe extern "C" fn jit_scheduler_materialize(
     tcb_slot: *mut crate::value::Value,
     packet_slot: *mut crate::value::Value,
@@ -476,7 +471,10 @@ unsafe extern "C" fn jit_scheduler_materialize(
 /// dispatch. Sources remain owned by the TCB and active-prefix locals; all destination values
 /// are constructed before stale compiler temporaries are released, so arbitrary aliasing and
 /// last-owner destruction are safe.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 unsafe extern "C" fn jit_scheduler_device_materialize(
     packet_src: *const crate::value::Value,
     packet_dst: *mut crate::value::Value,
@@ -496,15 +494,16 @@ unsafe extern "C" fn jit_scheduler_device_materialize(
     let task = crate::value::Value::Obj(Rc::clone(&*task));
     let old_packet = unsafe { std::ptr::replace(packet_dst, packet) };
     let old_task = unsafe { std::ptr::replace(task_dst, task) };
-    let old_temp = unsafe {
-        std::ptr::replace(temp_dst, crate::value::Value::Undefined)
-    };
+    let old_temp = unsafe { std::ptr::replace(temp_dst, crate::value::Value::Undefined) };
     drop(old_temp);
     drop(old_task);
     drop(old_packet);
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 unsafe extern "C" fn jit_scheduler_trace_fail(stage: usize) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTS: [AtomicU64; 64] = [const { AtomicU64::new(0) }; 64];
@@ -518,33 +517,69 @@ unsafe extern "C" fn jit_scheduler_trace_fail(stage: usize) {
 pub const N_HELPERS: usize = 15;
 
 /// ARM64 condition codes used by the inline templates.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const C_EQ: u32 = 0;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const C_NE: u32 = 1;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const C_HS: u32 = 2;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const C_LO: u32 = 3;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const C_MI: u32 = 4;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const C_HI: u32 = 8;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const C_LS: u32 = 9;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const C_GE: u32 = 10;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const C_GT: u32 = 12;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const C_LE: u32 = 13;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const C_VS: u32 = 6;
 
 /// Condition-helper modes (the `w1` immediate for `H_COND`).
 pub const COND_POP_TRUTHY: u32 = 0;
 pub const COND_PEEK_TRUTHY: u32 = 1;
-#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 pub const COND_PEEK_NOT_NULLISH: u32 = 2;
 
 // The inline fast paths read Value directly: repr(u8) tag byte at offset 0, payload at
@@ -562,7 +597,10 @@ const _: () = assert!(std::mem::size_of::<Value>() == 16);
 const _: () = assert!(std::mem::align_of::<Value>() == 8);
 // The offsets below bake 8-byte pointers into the emitted templates: JIT-platform only (on
 // wasm32 pointers are 4 bytes and none of this code exists).
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 mod layout_asserts {
     use super::JitCtx;
     // The call template's inline way-1 probe reads these CallIc fields by fixed offset.
@@ -603,7 +641,10 @@ pub struct SpFlag {
 // ARM64 assembler (the ~20 encodings the templates need)
 // ---------------------------------------------------------------------------------------------
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 mod asm {
     /// Instruction buffer with label/patch support. Registers are plain u32 numbers (x0..x30,
     /// sp=31 where encodable); labels are indices into `patches`.
@@ -1255,7 +1296,10 @@ mod asm {
 
 /// Compile `chunk` to machine code, or `None` when unsupported (non-macOS/ARM64, async bodies,
 /// or an op stream whose stack depths don't line up — a compiler bug caught defensively).
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 pub fn compile(
     chunk: &Chunk,
     layout: &crate::value::JitLayout,
@@ -1423,12 +1467,7 @@ pub fn compile(
         // coercions, partial effects, and the one final hold retain exact bytecode behavior.
         if pc == 0 && rc_ok {
             if let Some(plan) = plan_scheduler_idle_release(chunk, ops, &cfg, layout, fast) {
-                let plain_h = emit_scheduler_idle_release_region(
-                    &mut a,
-                    layout,
-                    &plan,
-                    l_ret_ok,
-                );
+                let plain_h = emit_scheduler_idle_release_region(&mut a, layout, &plan, l_ret_ok);
                 a.bind(plain_h);
                 if std::env::var_os("LUMEN_JIT_REGIONLOG").is_some() {
                     eprintln!("[jit-region] head 0: EMITTED scheduler Idle release");
@@ -1438,9 +1477,7 @@ pub fn compile(
         // Handler's v2-delivery transaction begins at a fallthrough rather than a branch target.
         // Its exact structural matcher is therefore selected outside the targeted-region gate.
         if fast & 32768 != 0 && rc_ok {
-            if let Some(plan) =
-                plan_scheduler_handler_deliver(chunk, ops, pc, &cfg, layout, fast)
-            {
+            if let Some(plan) = plan_scheduler_handler_deliver(chunk, ops, pc, &cfg, layout, fast) {
                 let plain_h =
                     emit_scheduler_handler_deliver_region(&mut a, layout, &plan, &pc_labels);
                 a.bind(plain_h);
@@ -1465,47 +1502,31 @@ pub fn compile(
                     emit_scheduler_handler_queue_region(&mut a, layout, &plan, &pc_labels);
                 a.bind(plain_h);
                 if std::env::var_os("LUMEN_JIT_REGIONLOG").is_some() {
-                    eprintln!(
-                        "[jit-region] head {pc}: EMITTED scheduler Handler v1 queue"
-                    );
+                    eprintln!("[jit-region] head {pc}: EMITTED scheduler Handler v1 queue");
                 }
             }
             let device_plan = plan_scheduler_device(chunk, ops, pc, layout, fast);
             let mut handler_plan = plan_scheduler_handler_suspend(chunk, ops, pc, layout, fast);
             if let Some(plan) = handler_plan.as_mut() {
-                plan.incoming = plan_scheduler_handler_incoming(
-                    chunk,
-                    ops,
-                    pc,
-                    &cfg,
-                    layout,
-                    fast,
-                    plan,
-                );
+                plan.incoming =
+                    plan_scheduler_handler_incoming(chunk, ops, pc, &cfg, layout, fast, plan);
             }
 
             let pc59_role_dispatch = scheduler_role_epoch
                 && scheduler_dispatch_pc == Some(pc)
                 && fast_resume.is_some()
                 && std::env::var_os("LUMEN_JIT_NO_SCHED_PC59_ROLE_DISPATCH").is_none()
-                && device_plan
-                    .as_ref()
-                    .zip(handler_plan.as_ref())
-                    .is_some_and(|(device, handler)| {
-                        scheduler_pc59_role_dispatch_compatible(device, handler)
-                    });
+                && device_plan.as_ref().zip(handler_plan.as_ref()).is_some_and(
+                    |(device, handler)| scheduler_pc59_role_dispatch_compatible(device, handler),
+                );
             let original_dispatch = pc59_role_dispatch.then(|| a.new_label());
             let device_prevalidated = pc59_role_dispatch.then(|| a.new_label());
             let handler_prevalidated = pc59_role_dispatch.then(|| a.new_label());
-            if let (Some(original_dispatch), Some(device_target), Some(handler_target)) = (
-                original_dispatch,
-                device_prevalidated,
-                handler_prevalidated,
-            ) {
+            if let (Some(original_dispatch), Some(device_target), Some(handler_target)) =
+                (original_dispatch, device_prevalidated, handler_prevalidated)
+            {
                 let device = device_plan.as_ref().expect("pc59 role-compatible Device");
-                let handler = handler_plan
-                    .as_ref()
-                    .expect("pc59 role-compatible Handler");
+                let handler = handler_plan.as_ref().expect("pc59 role-compatible Handler");
                 emit_scheduler_pc59_role_selector(
                     &mut a,
                     layout,
@@ -1587,9 +1608,7 @@ pub fn compile(
                         let phi_count = region
                             .values
                             .iter()
-                            .filter(|v| {
-                                matches!(v.def, crate::jit_ir::ValueDef::BlockParam { .. })
-                            })
+                            .filter(|v| matches!(v.def, crate::jit_ir::ValueDef::BlockParam { .. }))
                             .count();
                         eprintln!(
                             "[jit-region] head {pc}: {} blocks, {op_count} ops, {} values, {phi_count} params, {} exits",
@@ -1639,10 +1658,8 @@ pub fn compile(
                 }
                 emitted_region = true;
                 if std::env::var_os("LUMEN_JIT_REGIONLOG").is_some() {
-                    let role_dispatch = std::env::var_os(
-                        "LUMEN_JIT_NO_SCHED_ROLE_DISPATCH",
-                    )
-                    .is_none()
+                    let role_dispatch = std::env::var_os("LUMEN_JIT_NO_SCHED_ROLE_DISPATCH")
+                        .is_none()
                         && plan
                             .active
                             .as_ref()
@@ -1712,12 +1729,8 @@ pub fn compile(
                 Some(Op::LoadLocal(rhs)),
                 Some(cmp @ (Op::StrictEq | Op::StrictNotEq | Op::EqEq | Op::NotEq)),
                 Some(Op::JumpIfFalse(target)),
-            ) = (
-                op,
-                ops.get(pc + 1),
-                ops.get(pc + 2),
-                ops.get(pc + 3),
-            ) {
+            ) = (op, ops.get(pc + 1), ops.get(pc + 2), ops.get(pc + 3))
+            {
                 let lhs_off = *lhs as u32 * 16;
                 let rhs_off = *rhs as u32 * 16;
                 if !targeted[pc + 1]
@@ -2109,9 +2122,7 @@ pub fn compile(
                     l_unwind,
                 );
             }
-            Op::StoreNameCached(_, cache)
-                if fast & 8192 != 0 && update_name_inlinable(layout) =>
-            {
+            Op::StoreNameCached(_, cache) if fast & 8192 != 0 && update_name_inlinable(layout) => {
                 emit_store_name_inline(
                     &mut a,
                     layout,
@@ -2124,10 +2135,7 @@ pub fn compile(
             Op::GetElem if fast & 1024 != 0 && get_elem_inlinable(layout) => {
                 emit_get_elem_inline(&mut a, layout, pc as u32, l_unwind);
             }
-            Op::SetElemDrop
-                if fast & 2048 != 0
-                    && elem_inlinable(layout) =>
-            {
+            Op::SetElemDrop if fast & 2048 != 0 && elem_inlinable(layout) => {
                 emit_set_elem_inline(&mut a, layout, pc as u32, l_unwind, false);
             }
             Op::SetElem if fast & 4096 != 0 && elem_inlinable(layout) => {
@@ -2340,7 +2348,10 @@ pub fn compile(
                     &mut a,
                     layout,
                     chunk.jit_cache_ptr(*cache),
-                    chunk.jit_name(match op { Op::SetPropDrop(n, _) => *n, _ => unreachable!() }),
+                    chunk.jit_name(match op {
+                        Op::SetPropDrop(n, _) => *n,
+                        _ => unreachable!(),
+                    }),
                     pc as u32,
                     l_unwind,
                     PropRecv::Stack,
@@ -2355,7 +2366,10 @@ pub fn compile(
                     &mut a,
                     layout,
                     chunk.jit_cache_ptr(*cache),
-                    chunk.jit_name(match op { Op::SetPropThisDrop(n, _) => *n, _ => unreachable!() }),
+                    chunk.jit_name(match op {
+                        Op::SetPropThisDrop(n, _) => *n,
+                        _ => unreachable!(),
+                    }),
                     pc as u32,
                     l_unwind,
                     PropRecv::This,
@@ -2371,7 +2385,10 @@ pub fn compile(
                     &mut a,
                     layout,
                     chunk.jit_cache_ptr(*cache),
-                    chunk.jit_name(match op { Op::SetPropLocalDrop(_, n, _) => *n, _ => unreachable!() }),
+                    chunk.jit_name(match op {
+                        Op::SetPropLocalDrop(_, n, _) => *n,
+                        _ => unreachable!(),
+                    }),
                     pc as u32,
                     l_unwind,
                     PropRecv::Slot(*s as u32 * 16),
@@ -2715,8 +2732,8 @@ pub fn compile(
                         a.cmp_imm_w(9, 8); // callee must be an Obj
                         a.b_cond(C_NE, slow);
                         a.ldur(10, 20, off + 8); // callee payload (stored Rc ptr)
-                        // the payload is the STORED RcBox pointer; as_ptr sits one probed
-                        // header further (comparing them raw was a silent 100% miss)
+                                                 // the payload is the STORED RcBox pointer; as_ptr sits one probed
+                                                 // header further (comparing them raw was a silent 100% miss)
                         a.add_imm(13, 10, layout.gc_data_off as u32);
                         // Probe ALL 4 ways (a stable polymorphic site — e.g. one dispatch
                         // loop over a handful of receiver classes — otherwise pays the full
@@ -2862,11 +2879,7 @@ pub fn compile(
                                 a.b_cond(C_NE, hit_slow);
                                 a.mov(0, 19);
                                 a.movz(1, pc as u32, 0);
-                                a.movk(
-                                    1,
-                                    crate::bytecode::INTRINSIC_ARRAY_PUSH as u32,
-                                    1,
-                                );
+                                a.movk(1, crate::bytecode::INTRINSIC_ARRAY_PUSH as u32, 1);
                                 a.mov(2, 20);
                                 a.ldr_imm(16, 21, (H_INTRINSIC * 8) as u32);
                                 a.blr(16);
@@ -2887,11 +2900,7 @@ pub fn compile(
                             a.b_cond(C_NE, hit_slow);
                             a.mov(0, 19);
                             a.movz(1, pc as u32, 0);
-                            a.movk(
-                                1,
-                                crate::bytecode::INTRINSIC_ARRAY_POP as u32,
-                                1,
-                            );
+                            a.movk(1, crate::bytecode::INTRINSIC_ARRAY_POP as u32, 1);
                             a.mov(2, 20);
                             a.ldr_imm(16, 21, (H_INTRINSIC * 8) as u32);
                             a.blr(16);
@@ -2900,16 +2909,10 @@ pub fn compile(
                             a.b(done);
                             a.bind(no_intr);
                         }
-                        if with_this
-                            && (1..=8).contains(argc)
-                            && function_call_intrinsic_on
-                        {
+                        if with_this && (1..=8).contains(argc) && function_call_intrinsic_on {
                             let no_intr = a.new_label();
                             a.ldrb_imm(9, 12, 96);
-                            a.cmp_imm_w(
-                                9,
-                                crate::bytecode::INTRINSIC_FUNCTION_CALL as u32,
-                            );
+                            a.cmp_imm_w(9, crate::bytecode::INTRINSIC_FUNCTION_CALL as u32);
                             a.b_cond(C_NE, no_intr);
                             let receiver_off = -((*argc as i32 + 2) * 16);
                             a.ldurb(9, 20, receiver_off);
@@ -2962,11 +2965,7 @@ pub fn compile(
                             }
                             a.mov(0, 19);
                             a.movz(1, pc as u32, 0);
-                            a.movk(
-                                1,
-                                crate::bytecode::INTRINSIC_STRING_SLICE as u32,
-                                1,
-                            );
+                            a.movk(1, crate::bytecode::INTRINSIC_STRING_SLICE as u32, 1);
                             a.mov(2, 20);
                             a.ldr_imm(16, 21, (H_INTRINSIC * 8) as u32);
                             a.blr(16);
@@ -2985,11 +2984,7 @@ pub fn compile(
                             a.b_cond(C_NE, hit_slow);
                             a.mov(0, 19);
                             a.movz(1, pc as u32, 0);
-                            a.movk(
-                                1,
-                                crate::bytecode::INTRINSIC_OBJECT_HAS_OWN as u32,
-                                1,
-                            );
+                            a.movk(1, crate::bytecode::INTRINSIC_OBJECT_HAS_OWN as u32, 1);
                             a.mov(2, 20);
                             a.ldr_imm(16, 21, (H_INTRINSIC * 8) as u32);
                             a.blr(16);
@@ -3010,11 +3005,7 @@ pub fn compile(
                             a.b_cond(C_NE, hit_slow);
                             a.mov(0, 19);
                             a.movz(1, pc as u32, 0);
-                            a.movk(
-                                1,
-                                crate::bytecode::INTRINSIC_FUNCTION_APPLY as u32,
-                                1,
-                            );
+                            a.movk(1, crate::bytecode::INTRINSIC_FUNCTION_APPLY as u32, 1);
                             a.mov(2, 20);
                             a.ldr_imm(16, 21, (H_INTRINSIC * 8) as u32);
                             a.blr(16);
@@ -3210,10 +3201,7 @@ pub fn compile(
                 .map(|s| &**s)
                 .collect();
             let name = head.join("|");
-            eprintln!(
-                "[jit-map-range] {:x} {:x} {name}",
-                mem as usize, len
-            );
+            eprintln!("[jit-map-range] {:x} {:x} {name}", mem as usize, len);
             for (pc, (&insn, op)) in pc_insn.iter().zip(ops).enumerate() {
                 eprintln!(
                     "[jit-map-pc] {:x} {:x} {pc} {op:?} {name}",
@@ -3273,7 +3261,10 @@ pub fn compile(
 
 /// Whether `layout` is usable for the inline GetProp template: valid (probed std layouts hold)
 /// and every offset it bakes fits its instruction's immediate range.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn get_prop_inlinable(layout: &crate::value::JitLayout) -> bool {
     let sh = layout.obj_props + layout.props_shape;
     let en = layout.obj_props + layout.props_entries + layout.vec_ptr_off;
@@ -3298,7 +3289,10 @@ fn get_prop_inlinable(layout: &crate::value::JitLayout) -> bool {
         && layout.entry_size < 0x1_0000
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn guard_prop_data(a: &mut asm::Asm, reg: u32, base: u32, flags: u32, slow: usize) {
     a.ldrb_imm(reg, base, flags);
     let bit = asm::logical_imm_w(crate::value::PROP_ACCESSOR as u32).unwrap();
@@ -3306,7 +3300,10 @@ fn guard_prop_data(a: &mut asm::Asm, reg: u32, base: u32, flags: u32, slow: usiz
     a.cbnz(reg, false, slow);
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn guard_prop_writable(a: &mut asm::Asm, reg: u32, base: u32, flags: u32, slow: usize) {
     a.ldrb_imm(reg, base, flags);
     let bit = asm::logical_imm_w(crate::value::PROP_WRITABLE as u32).unwrap();
@@ -3324,9 +3321,15 @@ fn guard_prop_writable(a: &mut asm::Asm, reg: u32, base: u32, flags: u32, slow: 
 /// (`mid_ok`). Every guard branches to `slow` before any state is written, so the fallback
 /// re-runs the op cleanly. A BigInt value (compound payload), an accessor, any guard miss, or a
 /// last-reference receiver (whose pop-drop would free) falls to the checked helper.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 /// Where a property read's receiver comes from.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 #[derive(Clone, Copy, PartialEq)]
 enum PropRecv {
     /// Operand stack top (classic GetProp/GetMethod): consumed, refcount-managed.
@@ -3337,7 +3340,10 @@ enum PropRecv {
     Slot(u32),
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_prop_load_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -3361,7 +3367,7 @@ fn emit_prop_load_inline(
     recv: PropRecv,
 ) {
     use crate::bytecode::{
-        IC_OFF_DEPTH, IC_OFF_HOLDER_SHAPE, IC_OFF_MID_OK, IC_OFF_MID_SHAPE, IC_OFF_MID2_SHAPE,
+        IC_OFF_DEPTH, IC_OFF_HOLDER_SHAPE, IC_OFF_MID2_SHAPE, IC_OFF_MID_OK, IC_OFF_MID_SHAPE,
         IC_OFF_RECV_SHAPE, IC_OFF_SLOT,
     };
     let strong = layout.rc_strong_off as i32;
@@ -3880,7 +3886,10 @@ fn emit_prop_load_inline(
 ///
 /// Returns false (nothing emitted) when an emission-time precondition fails — the caller then
 /// emits only the probe + H_CALL_HIT form.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_direct_call(
     a: &mut asm::Asm,
     ilayout: &crate::interpreter::InterpLayout,
@@ -4061,7 +4070,7 @@ fn emit_direct_call(
     a.add_imm(11, 11, 1);
     a.str_w_imm(11, 14, il.depth as u32); // depth++ (u32 field)
     a.str_w_imm(13, 14, il.gc_tick as u32); // tick (not due)
-    // FnFrame push: entry = ptr + len*24
+                                            // FnFrame push: entry = ptr + len*24
     a.ldr_imm(6, 14, (il.fn_frames + il.fnf_ptr_word) as u32);
     a.movz(5, 24, 0);
     a.madd(6, 16, 5, 6);
@@ -4202,8 +4211,8 @@ fn emit_direct_call(
     // w0 = 1 ok / 0 threw → w1 = threw for the finish stub
     let field1 = asm::logical_imm_w(1).unwrap();
     a.logic_imm_w(2, 1, 0, field1); // eor w1, w0, #1
-    // Teardown (drops, pool return, frame pop, tail drain, depth--): one shared per-chunk stub
-    // (see `emit_direct_finish_stub`) whose fast path never leaves machine code. w8 = threw.
+                                    // Teardown (drops, pool return, frame pop, tail drain, depth--): one shared per-chunk stub
+                                    // (see `emit_direct_finish_stub`) whose fast path never leaves machine code. w8 = threw.
     a.bl_label(finish_stub);
 
     // ---- restore every swapped field ----
@@ -4255,7 +4264,7 @@ fn emit_direct_call(
     let popped = ((argc + 1 + with_this as usize) * 16) as u32;
     a.sub_imm(20, 20, popped);
     a.cbnz(8, true, l_unwind); // threw → caller unwind (fields restored)
-    // push ctx.ret (move: reset its tag to Undefined)
+                               // push ctx.ret (move: reset its tag to Undefined)
     a.ldr_imm(4, 19, cx_ret);
     a.ldr_imm(5, 19, cx_ret + 8);
     a.stur(4, 20, 0);
@@ -4279,7 +4288,10 @@ fn emit_direct_call(
 /// `this`) either trivially droppable (tag < 5) or a shared reference (bare strong-count
 /// decrement) — in two passes: validate everything with NO mutation, then commit. Any
 /// deviation falls to the H_DIRECT_FINISH helper with state untouched.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_direct_finish_stub(
     a: &mut asm::Asm,
     il: &crate::interpreter::InterpLayout,
@@ -4313,7 +4325,7 @@ fn emit_direct_finish_stub(
     if fast_ok {
         a.cbnz(1, false, slow); // threw → helper
         a.ldr_imm(14, 19, 72); // ctx.interp
-        // operand stack clean (a clean return always leaves final_sp == stack_base)
+                               // operand stack clean (a clean return always leaves final_sp == stack_base)
         a.ldr_imm(9, 19, 16); // ctx.final_sp
         a.ldr_imm(10, 19, 8); // ctx.stack_base
         a.cmp_reg_x(9, 10);
@@ -4427,7 +4439,7 @@ fn emit_direct_finish_stub(
         a.bind(c_done);
         // Bookkeeping (x14/x16/x7 may be stale after helper drops: re-read everything).
         a.ldr_imm(14, 19, 72); // ctx.interp
-        // FnFrame pop
+                               // FnFrame pop
         a.ldr_imm(16, 14, (il.fn_frames + il.fnf_len_word) as u32);
         a.sub_imm(16, 16, 1);
         a.str_imm(16, 14, (il.fn_frames + il.fnf_len_word) as u32);
@@ -4460,14 +4472,20 @@ fn emit_direct_finish_stub(
 
 /// Same immediate-range gate as [`get_prop_inlinable`] plus the `proto` offset (GetMethod walks
 /// one prototype hop).
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn get_method_inlinable(layout: &crate::value::JitLayout) -> bool {
     get_prop_inlinable(layout) && layout.obj_proto < 4096
 }
 
 /// Same gate as [`get_prop_inlinable`] plus the `writable` byte (the store re-checks it — an
 /// in-place defineProperty can flip attributes without changing the shape).
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn set_prop_inlinable(layout: &crate::value::JitLayout) -> bool {
     let cap = layout.obj_props + layout.props_entries + layout.vec_cap_off;
     get_prop_inlinable(layout)
@@ -4492,7 +4510,10 @@ fn set_prop_inlinable(layout: &crate::value::JitLayout) -> bool {
 /// one FP add. Anything else (accessor, non-writable, non-Num old value, shape/depth miss,
 /// exotic receiver, last-reference receiver) falls to the checked helper before any state is
 /// written.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_update_prop_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -4625,7 +4646,10 @@ fn emit_update_prop_inline(
 
 /// Gate for the inline equality / Not templates: the Obj arms read the receiver's `ic_plain`
 /// byte, so those offsets must fit their instructions' immediate ranges.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn eq_inlinable(layout: &crate::value::JitLayout) -> bool {
     layout.valid
         && layout.rc_strong_off < 256
@@ -4639,7 +4663,10 @@ fn eq_inlinable(layout: &crate::value::JitLayout) -> bool {
 /// directly for object identity and nullish cases. These cases require neither coercion nor
 /// ownership changes. Any TDZ value, coercing mixed pair, or HTMLDDA/nullish pair replays the
 /// original operations through their checked helpers before the frame is touched.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_local_eq_branch(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -4779,7 +4806,10 @@ fn emit_local_eq_branch(
 /// Gate for the ordinary-constructor `instanceof` template. The current heap property layout is
 /// NaN-boxed; require that exact form so decoding `.prototype` remains fail-closed if storage is
 /// changed again.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn instanceof_inlinable(
     layout: &crate::value::JitLayout,
     il: &crate::interpreter::InterpLayout,
@@ -4815,7 +4845,10 @@ fn instanceof_inlinable(
 /// additionally validate constructor identity facts and decode its current `.prototype` value.
 /// The LHS prototype walk is raw only while the realm-wide proxy latch remains clear. Every miss
 /// occurs before stack/refcount mutation and therefore cleanly replays through `jit_exec`.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_instanceof_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -4959,7 +4992,10 @@ fn emit_instanceof_inline(
 /// Probe one polymorphic property-creation way. Entry has x11 at the receiver Object and the
 /// incoming value at sp-16. A hit leaves x12 at its IcState and x13 holding the current entries
 /// length, then branches to `commit`; a miss has no side effects.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_prop_create_probe(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -4982,11 +5018,7 @@ fn emit_prop_create_probe(
     a.b_cond(C_NE, miss);
     a.ldrb_imm(9, 11, layout.obj_extensible as u32);
     a.cbz(9, false, miss);
-    a.ldrb_imm(
-        9,
-        11,
-        (layout.obj_props + layout.props_proto_flag) as u32,
-    );
+    a.ldrb_imm(9, 11, (layout.obj_props + layout.props_proto_flag) as u32);
     a.cbnz(9, false, miss);
     // Named-only small map: no DenseStorage sidecar/index, <=8 entries, and spare capacity.
     a.ldr_imm(9, 11, (layout.obj_props + layout.props_elems) as u32);
@@ -5027,7 +5059,10 @@ fn emit_prop_create_probe(
     a.b(commit);
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_set_prop_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -5060,7 +5095,7 @@ fn emit_set_prop_inline(
             a.cmp_imm_w(9, 8);
             a.b_cond(C_NE, slow);
             a.ldur(10, 20, -24); // receiver rc_ptr
-            // receiver refcount > 1 (so the pop-drop below never frees)
+                                 // receiver refcount > 1 (so the pop-drop below never frees)
             a.ldur(9, 10, strong);
             a.cmp_imm_x(9, 1);
             a.b_cond(C_LS, slow);
@@ -5173,17 +5208,9 @@ fn emit_set_prop_inline(
         a.ldur(14, 17, strong);
         a.add_imm(14, 14, 1);
         a.stur(14, 17, strong);
-        a.stur(
-            17,
-            15,
-            (layout.entry_key + layout.str_ptr_word) as i32,
-        );
+        a.stur(17, 15, (layout.entry_key + layout.str_ptr_word) as i32);
         a.mov_imm64(14, name.len() as u64);
-        a.stur(
-            14,
-            15,
-            (layout.entry_key + layout.str_len_word) as i32,
-        );
+        a.stur(14, 15, (layout.entry_key + layout.str_len_word) as i32);
         a.stur(16, 15, ev);
         a.movz(
             14,
@@ -5405,7 +5432,10 @@ fn emit_set_prop_inline(
 /// which includes the `[[IsHTMLDDA]]` object) — takes the helper. Every guard branches to `slow`
 /// before any state is written. With `branch`, the result drives a fused `JumpIfFalse` directly
 /// (no Bool materializes); otherwise the Bool pushes in place of the operands.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_eq_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -5662,7 +5692,10 @@ fn emit_eq_inline(
 /// are truthy — except a possible `[[IsHTMLDDA]]` object, so the Obj arm requires the
 /// receiver's `ic_plain` byte. BigInt and any refcounted operand that is a last reference take
 /// the helper. Guards all branch to `slow` before any state is written.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_not_inline(a: &mut asm::Asm, layout: &crate::value::JitLayout, pc: u32, l_unwind: usize) {
     let strong = layout.rc_strong_off as i32;
     let len_off = crate::lstr::LEN_OFF as u32;
@@ -5742,7 +5775,10 @@ fn emit_not_inline(a: &mut asm::Asm, layout: &crate::value::JitLayout, pc: u32, 
 
 /// Gate for the inline LoadName template: probed layouts hold and every baked offset fits its
 /// instruction's immediate range.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn load_name_inlinable(layout: &crate::value::JitLayout) -> bool {
     // The global-mode path additionally bakes the property-IC offsets (shape/entries/accessor),
     // so it shares that gate.
@@ -5758,7 +5794,10 @@ fn load_name_inlinable(layout: &crate::value::JitLayout) -> bool {
 /// The cached numeric name update additionally writes through the resolved binding/property.
 /// Require the descriptor and binding-mutability bytes to be directly addressable, and the
 /// packed global-property representation understood by the emitted Number guard.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn update_name_inlinable(layout: &crate::value::JitLayout) -> bool {
     load_name_inlinable(layout)
         && layout.entry_accessor == layout.entry_value + 8
@@ -5771,7 +5810,10 @@ fn update_name_inlinable(layout: &crate::value::JitLayout) -> bool {
 /// Inline `++`/`--` on a cached free name holding a Number. Cache validation proves the live
 /// resolution and leaves x14 at the binding/property value. Mutable/writable and Number guards
 /// all run before the FP update is committed; any mismatch replays the original op in Rust.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_update_name_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -5863,7 +5905,10 @@ fn emit_update_name_inline(
 /// Inline a cached free-name store when both the old and new values are non-owning scalar Values.
 /// Refcounted payload replacement, immutable bindings, non-writable/accessor globals, NaN packing,
 /// and every cache miss replay through the checked executor before any stack or target mutation.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_store_name_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -5972,7 +6017,10 @@ fn emit_store_name_inline(
 /// binding's value straight out of the scope — no hashing, no helper call. The cache is filled
 /// by the VM slow path (`Chunk::name_ic_fill`, depth-0 resolutions only); any mismatch — cold
 /// cache, different env, structural scope change, TDZ, BigInt value — takes the checked helper.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_load_name_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -6096,7 +6144,10 @@ fn emit_load_name_inline(
 /// Shared LoadName cache validation: on success x14 points at the resolved `Value` (the binding's
 /// value in scope mode, the global entry's value in global mode) and execution falls through; any
 /// mismatch branches to `slow`. Clobbers x7 and x9-x17.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_name_ic_value_ptr(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -6169,7 +6220,10 @@ fn emit_name_ic_value_ptr(
 
 /// Same gate as [`get_prop_inlinable`] plus the dense-element (`Props::elems`) and
 /// writable-flag offsets the element templates bake in.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn elem_inlinable(layout: &crate::value::JitLayout) -> bool {
     let elems = layout.obj_props + layout.props_elems;
     get_prop_inlinable(layout)
@@ -6187,7 +6241,10 @@ fn elem_inlinable(layout: &crate::value::JitLayout) -> bool {
         && layout.entry_writable < 4096
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn packed_elem_inlinable(layout: &crate::value::JitLayout) -> bool {
     layout.packed_elems_valid
         && layout.property_size == 16
@@ -6198,7 +6255,10 @@ fn packed_elem_inlinable(layout: &crate::value::JitLayout) -> bool {
 }
 
 /// Packed entries can still use the numeric mirror read; the classic entry chase falls back.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn get_elem_inlinable(layout: &crate::value::JitLayout) -> bool {
     let elems = layout.obj_props + layout.props_elems;
     get_prop_inlinable(layout)
@@ -6219,7 +6279,10 @@ fn get_elem_inlinable(layout: &crate::value::JitLayout) -> bool {
 /// Num key that is exactly a u32 in dense bounds, a non-accessor slot, and a non-BigInt value on
 /// a receiver that is not the last reference; the live `inline_ic_safe` flag rules out proxies /
 /// typed arrays / module namespaces existing at all. Everything else falls to the checked helper.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_get_elem_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -6382,7 +6445,10 @@ fn emit_get_elem_inline(
 /// BigInt `v` under `keep` (compound clone), a last-reference old value or receiver, an accessor
 /// or non-writable slot, or any dense miss falls to the checked helper.
 /// Where a mirror store's key index comes from.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 enum MirrorKey {
     /// Exact u32 already in an x register.
     U32InReg(u32),
@@ -6395,7 +6461,10 @@ enum MirrorKey {
 }
 
 /// What a mirror store writes.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 enum MirrorVal {
     /// A Value at `[x20 + off]` (tag at `off`, payload at `off+8`); tag unknown — a non-Num
     /// invalidates the mirror.
@@ -6409,7 +6478,10 @@ enum MirrorVal {
 /// unproven values, and invalidate outright on a non-Num or the hole sentinel. Bounds are
 /// re-checked against the mirror's own length as corruption insurance (the lockstep invariant
 /// should make it redundant). Clobbers x9, x12, x13 and d1 only.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_mirror_store(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -6488,7 +6560,10 @@ fn emit_mirror_store(
     a.bind(done);
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_set_elem_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -6647,7 +6722,10 @@ fn emit_set_elem_inline(
 }
 
 /// Which fused parameter-slot element op to emit.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 #[derive(Clone, Copy, PartialEq)]
 enum ElemLocalKind {
     /// `x[k]` → pops the key, pushes the element (net stack unchanged).
@@ -6659,7 +6737,10 @@ enum ElemLocalKind {
 }
 
 /// Where a fused element read's key comes from.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 #[derive(Clone, Copy, PartialEq)]
 enum KeySrc {
     /// On the operand stack (the plain op forms).
@@ -6675,7 +6756,10 @@ enum KeySrc {
 /// Guard that a packed property's old value is a Number, whose overwrite needs no destructor.
 /// Keeping this numeric-only makes the emitted template small; other packed values use the
 /// checked helper. On success w9 is the zero old-drop marker and x12 is scratch.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_packed_number_drop_guard(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -6701,7 +6785,10 @@ fn emit_packed_number_drop_guard(
 
 /// Encode a wide Number at `off` into x16. Other kinds stay on the checked path, keeping the
 /// per-site packed-write template compact; Number payload bits are already NaN-box compatible.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_packed_stack_encode(a: &mut asm::Asm, off: i32, slow: usize) {
     a.ldurb(13, 20, off);
     a.cmp_imm_w(13, 4);
@@ -6721,7 +6808,10 @@ fn emit_packed_stack_encode(a: &mut asm::Asm, off: i32, slow: usize) {
 
 /// Encode any wide local-slot value except BigInt into x16, transferring the stack value's
 /// ownership when the caller commits. All exits to `slow` happen before frame mutation.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_packed_stack_encode_all(a: &mut asm::Asm, off: i32, slow: usize) {
     a.ldurb(9, 20, off);
     a.ldur(16, 20, off + 8);
@@ -6789,7 +6879,10 @@ fn emit_packed_stack_encode_all(a: &mut asm::Asm, off: i32, slow: usize) {
 /// Decode one NaN-boxed heap property into the execution stack's wide x12/x13 Value pair.
 /// `entry` points at `(Rc<str>, Property)` and all guards branch to `slow` before mutation.
 /// BigInt stays checked; strings, symbols and objects clone by incrementing their Rc count.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_packed_entry_decode(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -6803,12 +6896,11 @@ fn emit_packed_entry_decode(
 
 /// Decode the packed word in x13 into the wide execution pair x12/x13, cloning any shared
 /// reference payload. BigInt remains on the checked path.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-fn emit_packed_word_decode(
-    a: &mut asm::Asm,
-    layout: &crate::value::JitLayout,
-    slow: usize,
-) {
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+fn emit_packed_word_decode(a: &mut asm::Asm, layout: &crate::value::JitLayout, slow: usize) {
     let strong = layout.rc_strong_off as i32;
     a.lsr_imm(9, 13, 48);
     let decoded = a.new_label();
@@ -6877,7 +6969,10 @@ fn emit_packed_word_decode(
 /// the operand stack, so there is no receiver clone/drop refcounting at all (the slot's own
 /// reference keeps it alive; no user code runs inside the fast path). A non-Obj slot (including
 /// a defensive TDZ Empty) falls to the checked helper, which re-runs the op generically.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_elem_local_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -6893,7 +6988,10 @@ fn emit_elem_local_inline(
 /// pairs fuse the key-producing op into the element read, so their slow path re-runs *both*
 /// original ops via the helper (`pcs` lists them in order; every guard runs before any state
 /// is written, so the re-run is always clean).
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_elem_local_keyed(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -7148,7 +7246,10 @@ fn emit_elem_local_keyed(
 
 /// One op of a numeric register chain (see [`build_chain`]). Every value the chain produces is a
 /// proven Num held in a callee-saved FP register (d8..d15) instead of the operand stack.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 #[derive(Clone, Copy)]
 enum ChainOp {
     /// Push a Num constant (f64 bits).
@@ -7195,7 +7296,10 @@ enum ChainOp {
 /// fill a dense numeric array.  All mutable state has fixed register homes across both arms; the
 /// shared [`crate::jit_ir`] graph proves the loop and its block boundaries, while the baseline JIT
 /// remains the exact-PC side-exit target.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 struct NumericDiamondPlan {
     head: usize,
     exit_pc: usize,
@@ -7212,7 +7316,10 @@ struct NumericDiamondPlan {
 /// skip held/suspended nodes, and side-exit to the active-task body. Unlike a benchmark-name
 /// intrinsic, discovery is entirely structural and every cached shape, method identity, global
 /// number, ownership count, and property descriptor is guarded live.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 struct SchedulerShellPlan {
     head: usize,
     active_pc: usize,
@@ -7228,7 +7335,10 @@ struct SchedulerShellPlan {
     active: Option<SchedulerActivePlan>,
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 struct SchedulerActivePlan {
     exit_pc: usize,
     tcb_off: u32,
@@ -7252,7 +7362,10 @@ struct SchedulerActivePlan {
 /// Preplanned null-packet continuation from SchedulerActive into the two task classifiers that
 /// dominate Richards. The active emitter keeps the TCB virtual in x0 and leaves scalar sentinels
 /// in the frame; any total miss materializes the exact pc59 snapshot before ordinary bytecode.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 struct SchedulerActiveNullDispatchPlan {
     device: SchedulerDevicePlan,
     handler: SchedulerHandlerSuspendPlan,
@@ -7265,7 +7378,10 @@ struct SchedulerActiveNullDispatchPlan {
 /// Cross-child IdleTask transaction selected from the scheduler's polymorphic run call cache.
 /// `run_expected` pins the exact method identity at runtime before any cache pointer from the
 /// child Idle chunk is touched.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 struct SchedulerActiveIdlePlan {
     task: crate::bytecode::IcState,
     run_method: crate::bytecode::IcState,
@@ -7276,7 +7392,10 @@ struct SchedulerActiveIdlePlan {
 /// Cross-child WorkerTask arms discovered through the scheduler's polymorphic run profile. The
 /// null arm is a guarded bridge into suspend; the packet arm is a complete Worker/queue/preempt
 /// transaction and therefore never constructs the two nested JS call frames on success.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 struct SchedulerActiveWorkerPlan {
     task: crate::bytecode::IcState,
     run_method: crate::bytecode::IcState,
@@ -7285,7 +7404,10 @@ struct SchedulerActiveWorkerPlan {
     work: Option<SchedulerActiveWorkerWorkPlan>,
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 struct SchedulerActiveWorkerWorkPlan {
     v1: crate::bytecode::IcState,
     v2: crate::bytecode::IcState,
@@ -7303,7 +7425,10 @@ struct SchedulerActiveWorkerWorkPlan {
 /// Whole-function fast path for Richards' IdleTask release arm. The ordinary bytecode remains
 /// the exact replay path for the final hold, observable property access, coercions, missing
 /// targets, and non-preempting releases; the specialized arm is entirely guard-then-commit.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 struct SchedulerIdleReleasePlan {
     count: crate::bytecode::IcState,
     v1: crate::bytecode::IcState,
@@ -7325,7 +7450,10 @@ struct SchedulerIdleReleasePlan {
 /// Guarded bridge from the scheduler's polymorphic task call into the already-inlined
 /// DeviceTask body. It removes the generic property/method dispatch and materializes the three
 /// compiler locals once, then resumes at the exact suspend, queue, or hold arm.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 struct SchedulerDevicePlan {
     suspend_pc: usize,
     queue_pc: usize,
@@ -7347,7 +7475,10 @@ struct SchedulerDevicePlan {
 /// The dominant HandlerTask arm needs no packet work: both the incoming packet and Handler.v1
 /// are exactly Null, so the inlined body immediately calls `scheduler.suspendCurrent()`. This
 /// compact plan proves that path and reuses the same flattened suspend transaction as DeviceTask.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 struct SchedulerHandlerIncomingPlan {
     kind: crate::bytecode::IcState,
     kind_work_cache: usize,
@@ -7357,7 +7488,10 @@ struct SchedulerHandlerIncomingPlan {
     delivery: SchedulerHandlerDeliverPlan,
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 struct SchedulerHandlerSuspendPlan {
     tcb_off: u32,
     packet_off: u32,
@@ -7378,13 +7512,19 @@ struct SchedulerHandlerSuspendPlan {
 /// The two remaining exact-Null incoming-packet arms in HandlerTask.run. Both begin from the
 /// Active dispatcher with the task and current TCB still virtual: an unfinished work packet can
 /// deliver Handler.v2, while a completed one transfers Handler.v1 through Scheduler.queue.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 struct SchedulerHandlerNullFullPlan {
     delivery: SchedulerHandlerDeliverPlan,
     queue: SchedulerHandlerQueuePlan,
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 struct SchedulerHandlerQueuePlan {
     handler_off: u32,
     v1: crate::bytecode::IcState,
@@ -7395,7 +7535,10 @@ struct SchedulerHandlerQueuePlan {
 /// cell from v1, and queues the packet onto either an empty or one-node target worklist. The
 /// source/successor and appended packet ownership moves are count-neutral; an empty preempting
 /// target additionally performs one guarded current-TCB owner replacement.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 struct SchedulerHandlerDeliverPlan {
     handler_off: u32,
     count_off: u32,
@@ -7433,7 +7576,10 @@ struct SchedulerHandlerDeliverPlan {
 /// Select where the Handler delivery transaction obtains its already-observed inputs. Both
 /// stitched forms enter with x2=count, x3=Handler.v2 entry, x5=Handler, and x6=packet. The
 /// incoming-device form additionally has x15=packet.link entry already proven exact Null.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 #[derive(Clone, Copy)]
 enum SchedulerHandlerDeliverSource {
     Locals,
@@ -7442,7 +7588,10 @@ enum SchedulerHandlerDeliverSource {
     ActiveIncomingWork,
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 #[derive(Clone, Copy)]
 enum SchedulerQueueSource {
     Clear,
@@ -7452,13 +7601,25 @@ enum SchedulerQueueSource {
 // Stack-resident, non-owning prototype cache for one bounded direct Scheduler session. The four
 // words occupy the scheduler-only gap between saved x23..x28 and d8..d15; no runtime object is
 // retained after the native frame returns, and every session entry clears the complete cache.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const SCHED_ROLE_DEVICE_PROTO_SP: u32 = 96;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const SCHED_ROLE_HANDLER_PROTO_SP: u32 = 104;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const SCHED_ROLE_IDLE_PROTO_SP: u32 = 112;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const SCHED_ROLE_WORKER_PROTO_SP: u32 = 120;
 
 // A graph-compatible scheduler gets a 512-byte native frame. The graph cache is deliberately
@@ -7467,36 +7628,81 @@ const SCHED_ROLE_WORKER_PROTO_SP: u32 = 120;
 // remain at 96..128; the graph header occupies 128..160, six 48-byte records occupy 160..448,
 // and d8..d15 are saved at 448..512. The header's second word is a soft contract bitmap: a failed
 // optional proof leaves it zero while the already-valid graph epoch continues unchanged.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const SCHED_GRAPH_CURRENT_ID_ENTRY_SP: u32 = 128;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const SCHED_GRAPH_CORE_FLAGS_SP: u32 = 136;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const SCHED_GRAPH_CORE_VALID: u32 = 1;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const SCHED_GRAPH_HELD_SP: u32 = 144;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const SCHED_GRAPH_SUSPENDED_SP: u32 = 152;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const SCHED_GRAPH_RECORDS_SP: u32 = 160;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const SCHED_GRAPH_RECORD_SIZE: u32 = 48;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const SCHED_GRAPH_RECORD_COUNT: u32 = 6;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const SCHED_GRAPH_TCB_OFF: u32 = 0;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const SCHED_GRAPH_TASK_OFF: u32 = 8;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const SCHED_GRAPH_STATE_ENTRY_OFF: u32 = 16;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const SCHED_GRAPH_QUEUE_ENTRY_OFF: u32 = 24;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const SCHED_GRAPH_LINK_RECORD_OFF: u32 = 32;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const SCHED_GRAPH_ID_BITS_OFF: u32 = 40;
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 const fn scheduler_graph_record_sp(index: u32) -> u32 {
     SCHED_GRAPH_RECORDS_SP + index * SCHED_GRAPH_RECORD_SIZE
 }
@@ -7504,14 +7710,20 @@ const fn scheduler_graph_record_sp(index: u32) -> u32 {
 /// A caller-established route to one exact graph record. `sp_bias` keeps the contract header
 /// address explicit for future nested consumers; the first Active-null consumer runs after its
 /// 48-byte snapshot has been restored and therefore uses the scheduler-frame base directly.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 #[derive(Clone, Copy)]
 struct SchedulerGraphCoreContext {
     current_record: u32,
     sp_bias: u32,
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 #[derive(Clone, Copy)]
 struct SchedulerDeviceSuspendPlan {
     loop_pc: usize,
@@ -7525,7 +7737,10 @@ struct SchedulerDeviceSuspendPlan {
     suspended_cache: usize,
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 struct SchedulerDeviceHoldPlan {
     loop_pc: usize,
     scheduler: crate::bytecode::IcState,
@@ -7540,7 +7755,10 @@ struct SchedulerDeviceHoldPlan {
     link: crate::bytecode::IcState,
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 #[derive(Clone, Copy)]
 struct SchedulerDeviceQueuePlan {
     loop_pc: usize,
@@ -7564,7 +7782,10 @@ struct SchedulerDeviceQueuePlan {
     current_priority: crate::bytecode::IcState,
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 struct LinkedScanPlan {
     exit_pc: usize,
     next_off: u32,
@@ -7573,7 +7794,10 @@ struct LinkedScanPlan {
     loose_null_compare: bool,
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 struct SchedulerIdleReleaseArm {
     scheduler_name: u32,
     scheduler_cache: u32,
@@ -7598,7 +7822,10 @@ struct SchedulerIdleReleaseArm {
     current_priority_cache: u32,
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn parse_scheduler_idle_release_arm(
     chunk: &Chunk,
     ops: &[crate::bytecode::Op],
@@ -7606,53 +7833,8 @@ fn parse_scheduler_idle_release_arm(
 ) -> Option<SchedulerIdleReleaseArm> {
     use crate::bytecode::Op;
     let end = start.checked_add(45)?;
-    let [
-        Op::GetPropThis(scheduler_name, scheduler_cache),
-        Op::GetMethod(release_name, release_method_cache),
-        Op::LoadName(_, id_cache),
-        Op::InlineGuard(release_target, release_generic),
-        Op::StoreLocal(id),
-        Op::Pop,
-        Op::StoreLocal(scheduler),
-        Op::ResetSlots(target, reset_count),
-        Op::GetPropLocal(scheduler0, blocks_name, blocks_cache),
-        Op::LoadLocal(id0),
-        Op::GetElem,
-        Op::StoreLocal(target0),
-        Op::LoadLocal(target1),
-        Op::Const(null_target),
-        Op::EqEq,
-        Op::JumpIfFalse(nonnull_target),
-        Op::LoadLocal(target2),
-        Op::Jump(null_return),
-        Op::LoadLocal(target3),
-        Op::GetMethod(mark_name, mark_method_cache),
-        Op::InlineGuard(mark_target, mark_generic),
-        Op::Pop,
-        Op::StoreLocal(mark_this),
-        Op::GetPropLocal(mark_this0, state_name, state_cache),
-        Op::LoadName(not_held_name, not_held_cache),
-        Op::BitAnd,
-        Op::SetPropLocalDrop(mark_this1, state_name1, state_store),
-        Op::Undef,
-        Op::Jump(mark_join),
-        Op::CallWithThis(0, _),
-        Op::Pop,
-        Op::GetPropLocal(target4, priority_name, target_priority_cache),
-        Op::GetPropLocal(scheduler1, current_name, current_cache),
-        Op::GetProp(priority_name1, current_priority_cache),
-        Op::Gt,
-        Op::JumpIfFalse(no_preempt),
-        Op::LoadLocal(target5),
-        Op::Jump(return_join0),
-        Op::Jump(return_current),
-        Op::GetPropLocal(scheduler2, current_name1, _current_cache_again),
-        Op::Jump(return_join1),
-        Op::Undef,
-        Op::Jump(return_join2),
-        Op::CallWithThis(1, _),
-        Op::Return,
-    ] = ops.get(start..end)?
+    let [Op::GetPropThis(scheduler_name, scheduler_cache), Op::GetMethod(release_name, release_method_cache), Op::LoadName(_, id_cache), Op::InlineGuard(release_target, release_generic), Op::StoreLocal(id), Op::Pop, Op::StoreLocal(scheduler), Op::ResetSlots(target, reset_count), Op::GetPropLocal(scheduler0, blocks_name, blocks_cache), Op::LoadLocal(id0), Op::GetElem, Op::StoreLocal(target0), Op::LoadLocal(target1), Op::Const(null_target), Op::EqEq, Op::JumpIfFalse(nonnull_target), Op::LoadLocal(target2), Op::Jump(null_return), Op::LoadLocal(target3), Op::GetMethod(mark_name, mark_method_cache), Op::InlineGuard(mark_target, mark_generic), Op::Pop, Op::StoreLocal(mark_this), Op::GetPropLocal(mark_this0, state_name, state_cache), Op::LoadName(not_held_name, not_held_cache), Op::BitAnd, Op::SetPropLocalDrop(mark_this1, state_name1, state_store), Op::Undef, Op::Jump(mark_join), Op::CallWithThis(0, _), Op::Pop, Op::GetPropLocal(target4, priority_name, target_priority_cache), Op::GetPropLocal(scheduler1, current_name, current_cache), Op::GetProp(priority_name1, current_priority_cache), Op::Gt, Op::JumpIfFalse(no_preempt), Op::LoadLocal(target5), Op::Jump(return_join0), Op::Jump(return_current), Op::GetPropLocal(scheduler2, current_name1, _current_cache_again), Op::Jump(return_join1), Op::Undef, Op::Jump(return_join2), Op::CallWithThis(1, _), Op::Return] =
+        ops.get(start..end)?
     else {
         return None;
     };
@@ -7715,7 +7897,10 @@ fn parse_scheduler_idle_release_arm(
 /// Recognize the complete 118-op IdleTask body. Only the hot `count > 1` release arm is
 /// specialized: all observable operations are represented by live guards and every mutation is
 /// delayed until those guards prove the canonical higher-priority-target outcome.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn plan_scheduler_idle_release(
     chunk: &Chunk,
     ops: &[crate::bytecode::Op],
@@ -7740,40 +7925,13 @@ fn plan_scheduler_idle_release(
     {
         return None;
     }
-    let [
-        Op::LoadThis,
-        Op::UpdateProp(count_name0, count_cache0, UpdKind::DecDiscard),
-        Op::GetPropThis(count_name1, count_cache1),
-        Op::Const(count_zero),
-        Op::EqEq,
-        Op::JumpIfFalse(release_pc),
-        Op::GetPropThis(_, _),
-        Op::GetMethod(_, _),
-        Op::CallWithThis(0, _),
-        Op::Return,
-        Op::GetPropThis(v1_name0, v1_cache0),
-        Op::Const(bit_one),
-        Op::BitAnd,
-        Op::Const(bit_zero),
-        Op::EqEq,
-        Op::JumpIfFalse(odd_pc),
-        Op::GetPropThis(v1_name1, v1_cache1),
-        Op::Const(shift_one0),
-        Op::Shr,
-        Op::SetPropThisDrop(v1_name2, v1_store0),
-    ] = &ops[..20]
+    let [Op::LoadThis, Op::UpdateProp(count_name0, count_cache0, UpdKind::DecDiscard), Op::GetPropThis(count_name1, count_cache1), Op::Const(count_zero), Op::EqEq, Op::JumpIfFalse(release_pc), Op::GetPropThis(_, _), Op::GetMethod(_, _), Op::CallWithThis(0, _), Op::Return, Op::GetPropThis(v1_name0, v1_cache0), Op::Const(bit_one), Op::BitAnd, Op::Const(bit_zero), Op::EqEq, Op::JumpIfFalse(odd_pc), Op::GetPropThis(v1_name1, v1_cache1), Op::Const(shift_one0), Op::Shr, Op::SetPropThisDrop(v1_name2, v1_store0)] =
+        &ops[..20]
     else {
         return None;
     };
-    let [
-        Op::Jump(final_return),
-        Op::GetPropThis(v1_name3, v1_cache2),
-        Op::Const(shift_one1),
-        Op::Shr,
-        Op::Const(xor_mask),
-        Op::BitXor,
-        Op::SetPropThisDrop(v1_name4, v1_store1),
-    ] = &ops[65..72]
+    let [Op::Jump(final_return), Op::GetPropThis(v1_name3, v1_cache2), Op::Const(shift_one1), Op::Shr, Op::Const(xor_mask), Op::BitXor, Op::SetPropThisDrop(v1_name4, v1_store1)] =
+        &ops[65..72]
     else {
         return None;
     };
@@ -7954,7 +8112,10 @@ fn plan_scheduler_idle_release(
     })
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn plan_scheduler_shell(
     chunk: &Chunk,
     ops: &[crate::bytecode::Op],
@@ -7975,36 +8136,8 @@ fn plan_scheduler_shell(
         return None;
     }
     let end = head.checked_add(28)?;
-    let [
-        Op::GetPropThis(current_name, current_cache0),
-        Op::Const(null),
-        Op::NotEq,
-        Op::JumpIfFalse(null_pc),
-        Op::GetPropThis(current_name1, current_cache1),
-        Op::GetMethod(_, method_cache),
-        Op::InlineGuard(inline_target, generic_call),
-        Op::Pop,
-        Op::StoreLocal(temp),
-        Op::GetPropLocal(temp1, state_name, state_cache0),
-        Op::LoadName(_, held_cache),
-        Op::BitAnd,
-        Op::Const(zero),
-        Op::NotEq,
-        Op::JumpIfTruePeek(or_join),
-        Op::Pop,
-        Op::GetPropLocal(temp2, state_name1, state_cache1),
-        Op::LoadName(_, suspended_cache),
-        Op::EqEq,
-        Op::Jump(bool_join0),
-        Op::Undef,
-        Op::Jump(bool_join1),
-        Op::CallWithThis(0, _),
-        Op::JumpIfFalse(active_pc),
-        Op::GetPropThis(current_name2, current_cache2),
-        Op::GetProp(link_name, link_cache),
-        Op::SetPropThisDrop(current_name3, current_store),
-        Op::Jump(trampoline),
-    ] = ops.get(head..end)?
+    let [Op::GetPropThis(current_name, current_cache0), Op::Const(null), Op::NotEq, Op::JumpIfFalse(null_pc), Op::GetPropThis(current_name1, current_cache1), Op::GetMethod(_, method_cache), Op::InlineGuard(inline_target, generic_call), Op::Pop, Op::StoreLocal(temp), Op::GetPropLocal(temp1, state_name, state_cache0), Op::LoadName(_, held_cache), Op::BitAnd, Op::Const(zero), Op::NotEq, Op::JumpIfTruePeek(or_join), Op::Pop, Op::GetPropLocal(temp2, state_name1, state_cache1), Op::LoadName(_, suspended_cache), Op::EqEq, Op::Jump(bool_join0), Op::Undef, Op::Jump(bool_join1), Op::CallWithThis(0, _), Op::JumpIfFalse(active_pc), Op::GetPropThis(current_name2, current_cache2), Op::GetProp(link_name, link_cache), Op::SetPropThisDrop(current_name3, current_store), Op::Jump(trampoline)] =
+        ops.get(head..end)?
     else {
         return None;
     };
@@ -8025,10 +8158,7 @@ fn plan_scheduler_shell(
         }) != Some(head)
         || !chunk.jit_const_copyable(*null)
         || chunk.jit_const_bits(*null) != (2, 0)
-        || chunk
-            .jit_const_num(*zero)
-            .and_then(exact_i32_const)
-            != Some(0)
+        || chunk.jit_const_num(*zero).and_then(exact_i32_const) != Some(0)
     {
         return None;
     }
@@ -8088,7 +8218,11 @@ fn plan_scheduler_shell(
         || link.depth != 0
         || state.recv_shape != link.recv_shape
         || !same_own(*state_cache1, state)
-        || chunk.jit_name(*link_name).as_bytes().first().is_some_and(u8::is_ascii_digit)
+        || chunk
+            .jit_name(*link_name)
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_digit)
     {
         return None;
     }
@@ -8147,7 +8281,10 @@ fn plan_scheduler_shell(
 /// Recognize the straight-line `TaskControlBlock.run` prologue immediately after the scheduler
 /// shell.  The lowering stops before the polymorphic task dispatch, at a canonical empty-stack
 /// boundary with the inlined TCB and packet locals fully materialized.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn plan_scheduler_active(
     chunk: &Chunk,
     ops: &[crate::bytecode::Op],
@@ -8168,37 +8305,8 @@ fn plan_scheduler_active(
         reject!("disabled");
     }
     let end = start.checked_add(29)?;
-    let [
-        Op::GetPropThis(current_name0, current_cache0),
-        Op::GetProp(_id_name, id_cache),
-        Op::SetPropThisDrop(_current_id_name, current_id_store),
-        Op::GetPropThis(current_name1, current_cache1),
-        Op::GetMethod(_, run_cache),
-        Op::InlineGuard(run_target, _),
-        Op::Pop,
-        Op::StoreLocal(tcb),
-        Op::ResetSlots(reset_start, reset_count),
-        Op::GetPropLocal(tcb1, state_name0, state_cache),
-        Op::LoadName(_, suspended_runnable_cache),
-        Op::EqEq,
-        Op::JumpIfFalse(no_packet),
-        Op::GetPropLocal(tcb2, queue_name0, queue_cache0),
-        Op::StoreLocal(packet),
-        Op::GetPropLocal(packet1, link_name, packet_link_cache),
-        Op::SetPropLocalDrop(tcb3, queue_name1, queue_store),
-        Op::GetPropLocal(tcb4, queue_name2, queue_cache1),
-        Op::Const(null0),
-        Op::EqEq,
-        Op::JumpIfFalse(runnable_branch),
-        Op::LoadName(_, running_cache),
-        Op::SetPropLocalDrop(tcb5, state_name1, state_store0),
-        Op::Jump(state_join),
-        Op::LoadName(_, runnable_cache),
-        Op::SetPropLocalDrop(tcb6, state_name2, state_store1),
-        Op::Jump(exit),
-        Op::Const(null1),
-        Op::StoreLocal(packet2),
-    ] = ops.get(start..end)?
+    let [Op::GetPropThis(current_name0, current_cache0), Op::GetProp(_id_name, id_cache), Op::SetPropThisDrop(_current_id_name, current_id_store), Op::GetPropThis(current_name1, current_cache1), Op::GetMethod(_, run_cache), Op::InlineGuard(run_target, _), Op::Pop, Op::StoreLocal(tcb), Op::ResetSlots(reset_start, reset_count), Op::GetPropLocal(tcb1, state_name0, state_cache), Op::LoadName(_, suspended_runnable_cache), Op::EqEq, Op::JumpIfFalse(no_packet), Op::GetPropLocal(tcb2, queue_name0, queue_cache0), Op::StoreLocal(packet), Op::GetPropLocal(packet1, link_name, packet_link_cache), Op::SetPropLocalDrop(tcb3, queue_name1, queue_store), Op::GetPropLocal(tcb4, queue_name2, queue_cache1), Op::Const(null0), Op::EqEq, Op::JumpIfFalse(runnable_branch), Op::LoadName(_, running_cache), Op::SetPropLocalDrop(tcb5, state_name1, state_store0), Op::Jump(state_join), Op::LoadName(_, runnable_cache), Op::SetPropLocalDrop(tcb6, state_name2, state_store1), Op::Jump(exit), Op::Const(null1), Op::StoreLocal(packet2)] =
+        ops.get(start..end)?
     else {
         reject!("op shape");
     };
@@ -8340,7 +8448,10 @@ fn plan_scheduler_active(
 /// Select the call-free Device/Handler tails that can consume SchedulerActive's exact Null packet
 /// without first constructing wide frame locals. Requiring all three tails and a common scheduler
 /// backedge makes the emitted continuation all-or-nothing and keeps its failure snapshot simple.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn plan_scheduler_active_null_dispatch(
     chunk: &Chunk,
     ops: &[crate::bytecode::Op],
@@ -8412,15 +8523,8 @@ fn plan_scheduler_active_null_dispatch(
                 && same_ic(incoming.delivery.target_queue, active.queue)
                 && same_ic(incoming.delivery.state, active.state)
         });
-    handler.null_full = plan_scheduler_handler_null_full(
-        chunk,
-        ops,
-        cfg,
-        layout,
-        fast,
-        loop_pc,
-        &handler,
-    );
+    handler.null_full =
+        plan_scheduler_handler_null_full(chunk, ops, cfg, layout, fast, loop_pc, &handler);
     if std::env::var_os("LUMEN_JIT_REGIONLOG").is_some() {
         eprintln!(
             "[jit-region-plan] scheduler Active Handler null full={}, incoming_suspend={}, incoming_work_delivery={}",
@@ -8439,14 +8543,7 @@ fn plan_scheduler_active_null_dispatch(
         active,
         device.task,
     );
-    let worker = plan_scheduler_active_worker(
-        chunk,
-        ops,
-        active,
-        device.task,
-        *suspend,
-        *queue,
-    );
+    let worker = plan_scheduler_active_worker(chunk, ops, active, device.task, *suspend, *queue);
     Some(SchedulerActiveNullDispatchPlan {
         device,
         handler,
@@ -8460,7 +8557,10 @@ fn plan_scheduler_active_null_dispatch(
 /// Join HandlerTask's two already-warmed non-suspend plans to the Active null-packet prefix.
 /// The child plans retain their complete live descriptor/method/value guard sets; this matcher
 /// only proves that they describe the same Handler fields and return to the same scheduler loop.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn plan_scheduler_handler_null_full(
     chunk: &Chunk,
     ops: &[crate::bytecode::Op],
@@ -8477,8 +8577,7 @@ fn plan_scheduler_handler_null_full(
         return None;
     }
     let queue = plan_scheduler_handler_queue(chunk, ops, wait.completion_pc, layout, fast)?;
-    let delivery =
-        plan_scheduler_handler_deliver(chunk, ops, wait.delivery_pc, cfg, layout, fast)?;
+    let delivery = plan_scheduler_handler_deliver(chunk, ops, wait.delivery_pc, cfg, layout, fast)?;
     let same_ic = |left: crate::bytecode::IcState, right: crate::bytecode::IcState| {
         left.recv_shape == right.recv_shape
             && left.holder_shape == right.holder_shape
@@ -8511,7 +8610,10 @@ fn plan_scheduler_handler_null_full(
 /// Find IdleTask.run among the scheduler's remaining polymorphic call-cache ways, then recognize
 /// its already-warmed whole-function release transaction in the exact child chunk recorded by
 /// that way. The generated arm still guards TCB.task, IdleTask's shape, and the live run method.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn plan_scheduler_active_idle(
     chunk: &Chunk,
     ops: &[crate::bytecode::Op],
@@ -8526,12 +8628,8 @@ fn plan_scheduler_active_idle(
     if std::env::var_os("LUMEN_JIT_NO_SCHED_ACTIVE_IDLE").is_some() {
         return None;
     }
-    let [
-        Op::GetPropLocal(tcb, _, task_cache),
-        Op::GetMethod(_, run_cache),
-        Op::LoadLocal(packet),
-        Op::InlineGuard(_, device_guard),
-    ] = ops.get(active.exit_pc..active.exit_pc.checked_add(4)?)?
+    let [Op::GetPropLocal(tcb, _, task_cache), Op::GetMethod(_, run_cache), Op::LoadLocal(packet), Op::InlineGuard(_, device_guard)] =
+        ops.get(active.exit_pc..active.exit_pc.checked_add(4)?)?
     else {
         return None;
     };
@@ -8628,13 +8726,8 @@ fn plan_scheduler_active_idle(
             let Ok(child_cfg) = crate::jit_ir::Cfg::build(child) else {
                 continue;
             };
-            let candidate = plan_scheduler_idle_release(
-                child,
-                child.jit_ops(),
-                &child_cfg,
-                layout,
-                fast,
-            );
+            let candidate =
+                plan_scheduler_idle_release(child, child.jit_ops(), &child_cfg, layout, fast);
             if std::env::var_os("LUMEN_JIT_REGIONLOG").is_some() {
                 eprintln!(
                     "[jit-region-plan] scheduler Active Idle: child_ops={}, exact={}, release={}",
@@ -8648,8 +8741,7 @@ fn plan_scheduler_active_idle(
         let Some(release) = release else {
             continue;
         };
-        let Some(run_method) =
-            chunk.jit_cache_for_shape(*run_cache, release.count.recv_shape)
+        let Some(run_method) = chunk.jit_cache_for_shape(*run_cache, release.count.recv_shape)
         else {
             continue;
         };
@@ -8693,7 +8785,10 @@ fn plan_scheduler_active_idle(
 /// Discover WorkerTask's exact-null arm from the scheduler's remaining polymorphic call ways.
 /// The child body performs no mutation before `scheduler.suspendCurrent()`, so an exact run
 /// identity plus live child property caches can bridge directly into the shared suspend tail.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn plan_scheduler_active_worker(
     chunk: &Chunk,
     ops: &[crate::bytecode::Op],
@@ -8706,12 +8801,8 @@ fn plan_scheduler_active_worker(
     if std::env::var_os("LUMEN_JIT_NO_SCHED_ACTIVE_WORKER").is_some() {
         return None;
     }
-    let [
-        Op::GetPropLocal(tcb, _, task_cache),
-        Op::GetMethod(_, run_cache),
-        Op::LoadLocal(packet),
-        Op::InlineGuard(_, device_guard),
-    ] = ops.get(active.exit_pc..active.exit_pc.checked_add(4)?)?
+    let [Op::GetPropLocal(tcb, _, task_cache), Op::GetMethod(_, run_cache), Op::LoadLocal(packet), Op::InlineGuard(_, device_guard)] =
+        ops.get(active.exit_pc..active.exit_pc.checked_add(4)?)?
     else {
         return None;
     };
@@ -8765,17 +8856,8 @@ fn plan_scheduler_active_worker(
             let Some(prefix) = child_ops.get(..9) else {
                 continue;
             };
-            let [
-                Op::LoadLocal(arg),
-                Op::Const(null),
-                Op::EqEq,
-                Op::JumpIfFalse(nonnull),
-                Op::GetPropThis(_, scheduler_cache),
-                Op::GetMethod(_, suspend_cache),
-                Op::CallWithThis(0, _),
-                Op::Return,
-                Op::Jump(end),
-            ] = prefix
+            let [Op::LoadLocal(arg), Op::Const(null), Op::EqEq, Op::JumpIfFalse(nonnull), Op::GetPropThis(_, scheduler_cache), Op::GetMethod(_, suspend_cache), Op::CallWithThis(0, _), Op::Return, Op::Jump(end)] =
+                prefix
             else {
                 continue;
             };
@@ -8795,8 +8877,7 @@ fn plan_scheduler_active_worker(
             let Some(suspend_method) = child.jit_cache_preferred(*suspend_cache) else {
                 continue;
             };
-            let Some(run_method) =
-                chunk.jit_cache_for_shape(*run_cache, scheduler.recv_shape)
+            let Some(run_method) = chunk.jit_cache_for_shape(*run_cache, scheduler.recv_shape)
             else {
                 continue;
             };
@@ -8814,13 +8895,8 @@ fn plan_scheduler_active_worker(
             };
             let mut suspend = base_suspend;
             suspend.scheduler = scheduler;
-            let work = plan_scheduler_active_worker_work(
-                child,
-                active,
-                scheduler,
-                base_queue,
-                &same_ic,
-            );
+            let work =
+                plan_scheduler_active_worker_work(child, active, scheduler, base_queue, &same_ic);
             let candidate = SchedulerActiveWorkerPlan {
                 task,
                 run_method,
@@ -8840,7 +8916,10 @@ fn plan_scheduler_active_worker(
 /// transaction comes from the already-proven Device arm of the same outer scheduler; only the
 /// Worker receiver cache and queue-method cache differ. Every cache consumed here is guarded
 /// again by generated code after the exact Worker.run identity check.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn plan_scheduler_active_worker_work(
     child: &Chunk,
     active: &SchedulerActivePlan,
@@ -8853,57 +8932,18 @@ fn plan_scheduler_active_worker_work(
         return None;
     }
     let ops = child.jit_ops();
-    let [
-        Op::GetPropThis(v1_name0, v1_cache0),
-        Op::LoadName(id_a_name0, id_a_cache0),
-        Op::EqEq,
-        Op::JumpIfFalse(v1_else),
-        Op::LoadName(_id_b_name, id_b_cache),
-        Op::SetPropThisDrop(v1_name1, v1_store0),
-        Op::Jump(v1_join),
-        Op::LoadName(id_a_name1, id_a_cache1),
-        Op::SetPropThisDrop(v1_name2, v1_store1),
-        Op::GetPropThis(v1_name3, v1_cache1),
-        Op::SetPropLocalDrop(packet0, _packet_id_name, packet_id_store),
-        Op::Const(zero0),
-        Op::SetPropLocalDrop(packet1, _packet_a1_name, packet_a1_store),
-    ] = ops.get(9..22)?
+    let [Op::GetPropThis(v1_name0, v1_cache0), Op::LoadName(id_a_name0, id_a_cache0), Op::EqEq, Op::JumpIfFalse(v1_else), Op::LoadName(_id_b_name, id_b_cache), Op::SetPropThisDrop(v1_name1, v1_store0), Op::Jump(v1_join), Op::LoadName(id_a_name1, id_a_cache1), Op::SetPropThisDrop(v1_name2, v1_store1), Op::GetPropThis(v1_name3, v1_cache1), Op::SetPropLocalDrop(packet0, _packet_id_name, packet_id_store), Op::Const(zero0), Op::SetPropLocalDrop(packet1, _packet_a1_name, packet_a1_store)] =
+        ops.get(9..22)?
     else {
         return None;
     };
-    let [
-        Op::Const(zero1),
-        Op::StoreLocal(index0),
-        Op::LoadLocal(index1),
-        Op::LoadName(_data_size_name, data_size_cache),
-        Op::Lt,
-        Op::JumpIfFalse(loop_exit),
-        Op::LoadThis,
-        Op::UpdateProp(v2_name0, v2_update, crate::bytecode::UpdKind::IncDiscard),
-        Op::GetPropThis(v2_name1, v2_cache0),
-        Op::Const(threshold),
-        Op::Gt,
-        Op::JumpIfFalse(no_reset),
-        Op::Const(reset),
-        Op::SetPropThisDrop(v2_name2, v2_store),
-        Op::GetPropLocal(packet2, _packet_a2_name, packet_a2_cache),
-        Op::LoadLocal(index2),
-        Op::GetPropThis(v2_name3, v2_cache1),
-        Op::SetElemDrop,
-        Op::UpdateLocal(index3, crate::bytecode::UpdKind::IncDiscard),
-        Op::Jump(loop_head),
-    ] = ops.get(22..42)?
+    let [Op::Const(zero1), Op::StoreLocal(index0), Op::LoadLocal(index1), Op::LoadName(_data_size_name, data_size_cache), Op::Lt, Op::JumpIfFalse(loop_exit), Op::LoadThis, Op::UpdateProp(v2_name0, v2_update, crate::bytecode::UpdKind::IncDiscard), Op::GetPropThis(v2_name1, v2_cache0), Op::Const(threshold), Op::Gt, Op::JumpIfFalse(no_reset), Op::Const(reset), Op::SetPropThisDrop(v2_name2, v2_store), Op::GetPropLocal(packet2, _packet_a2_name, packet_a2_cache), Op::LoadLocal(index2), Op::GetPropThis(v2_name3, v2_cache1), Op::SetElemDrop, Op::UpdateLocal(index3, crate::bytecode::UpdKind::IncDiscard), Op::Jump(loop_head)] =
+        ops.get(22..42)?
     else {
         return None;
     };
-    let [
-        Op::GetPropThis(_scheduler_name, scheduler_cache),
-        Op::GetMethod(_queue_name, queue_method_cache),
-        Op::LoadLocal(packet3),
-        Op::CallWithThis(1, queue_call_cache),
-        Op::Return,
-        Op::ReturnUndef,
-    ] = ops.get(42..48)?
+    let [Op::GetPropThis(_scheduler_name, scheduler_cache), Op::GetMethod(_queue_name, queue_method_cache), Op::LoadLocal(packet3), Op::CallWithThis(1, queue_call_cache), Op::Return, Op::ReturnUndef] =
+        ops.get(42..48)?
     else {
         return None;
     };
@@ -9027,7 +9067,10 @@ fn plan_scheduler_active_worker_work(
 /// of Handler invocations take this path in Richards. All guards precede the shared suspend
 /// transaction, so any mutation, accessor, exotic value, or alternate inline layout replays the
 /// original task call with an untouched frame.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn plan_scheduler_handler_suspend(
     chunk: &Chunk,
     ops: &[crate::bytecode::Op],
@@ -9048,61 +9091,31 @@ fn plan_scheduler_handler_suspend(
     {
         return None;
     }
-    let [
-        Op::GetPropLocal(tcb, _, task_cache),
-        Op::GetMethod(_, run_cache),
-        Op::LoadLocal(packet),
-        Op::InlineGuard(handler_target, device_guard),
-    ] = ops.get(head..head.checked_add(4)?)?
+    let [Op::GetPropLocal(tcb, _, task_cache), Op::GetMethod(_, run_cache), Op::LoadLocal(packet), Op::InlineGuard(handler_target, device_guard)] =
+        ops.get(head..head.checked_add(4)?)?
     else {
         return None;
     };
     let body = head + 4;
-    let [
-        Op::StoreLocal(handler_packet),
-        Op::Pop,
-        Op::StoreLocal(handler_task),
-        Op::ResetSlots(reset_start, reset_count),
-        Op::LoadLocal(handler_packet0),
-        Op::Const(null_packet),
-        Op::NotEq,
-        Op::JumpIfFalse(no_packet),
-    ] = ops.get(body..body.checked_add(8)?)?
+    let [Op::StoreLocal(handler_packet), Op::Pop, Op::StoreLocal(handler_task), Op::ResetSlots(reset_start, reset_count), Op::LoadLocal(handler_packet0), Op::Const(null_packet), Op::NotEq, Op::JumpIfFalse(no_packet)] =
+        ops.get(body..body.checked_add(8)?)?
     else {
         return None;
     };
     let no_packet = *no_packet as usize;
-    let [
-        Op::GetPropLocal(handler_task0, v1_name0, v1_cache),
-        Op::Const(null_v1),
-        Op::NotEq,
-        Op::JumpIfFalse(suspend_start),
-    ] = ops.get(no_packet..no_packet.checked_add(4)?)?
+    let [Op::GetPropLocal(handler_task0, v1_name0, v1_cache), Op::Const(null_v1), Op::NotEq, Op::JumpIfFalse(suspend_start)] =
+        ops.get(no_packet..no_packet.checked_add(4)?)?
     else {
         return None;
     };
     let suspend_start = *suspend_start as usize;
-    let [
-        Op::GetPropLocal(handler_task2, v1_name1, v1_cache1),
-        Op::GetProp(_, packet_a1_cache),
-        Op::StoreLocal(count),
-        Op::LoadLocal(count0),
-        Op::LoadName(_, data_size_cache),
-        Op::Lt,
-        Op::JumpIfFalse(completion_pc),
-        Op::GetPropLocal(handler_task3, _, v2_cache),
-        Op::Const(null_v2),
-        Op::NotEq,
-        Op::JumpIfFalse(suspend_trampoline),
-    ] = ops.get(no_packet + 4..no_packet.checked_add(15)?)?
+    let [Op::GetPropLocal(handler_task2, v1_name1, v1_cache1), Op::GetProp(_, packet_a1_cache), Op::StoreLocal(count), Op::LoadLocal(count0), Op::LoadName(_, data_size_cache), Op::Lt, Op::JumpIfFalse(completion_pc), Op::GetPropLocal(handler_task3, _, v2_cache), Op::Const(null_v2), Op::NotEq, Op::JumpIfFalse(suspend_trampoline)] =
+        ops.get(no_packet + 4..no_packet.checked_add(15)?)?
     else {
         return None;
     };
-    let [
-        Op::GetPropLocal(handler_task1, scheduler_name, scheduler_cache),
-        Op::GetMethod(suspend_name, _),
-        ..,
-    ] = ops.get(suspend_start..suspend_start.checked_add(24)?)?
+    let [Op::GetPropLocal(handler_task1, scheduler_name, scheduler_cache), Op::GetMethod(suspend_name, _), ..] =
+        ops.get(suspend_start..suspend_start.checked_add(24)?)?
     else {
         return None;
     };
@@ -9206,7 +9219,10 @@ fn plan_scheduler_handler_suspend(
 /// v2-delivery transaction. Canonical Richards takes this DEVICE arm 781 times per run. The
 /// prefix's exact Packet.addTo body only clears an already-Null link and returns the packet, so a
 /// guarded owner can be published to Handler.v2 before the compiler locals are materialized.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn plan_scheduler_handler_incoming(
     chunk: &Chunk,
     ops: &[crate::bytecode::Op],
@@ -9225,20 +9241,8 @@ fn plan_scheduler_handler_incoming(
     }
 
     let body = head.checked_add(4)?;
-    let [
-        Op::StoreLocal(handler_packet),
-        Op::Pop,
-        Op::StoreLocal(handler),
-        Op::ResetSlots(count, reset_count),
-        Op::LoadLocal(handler_packet0),
-        Op::Const(null_packet),
-        Op::NotEq,
-        Op::JumpIfFalse(no_packet),
-        Op::GetPropLocal(handler_packet1, _, kind_cache),
-        Op::LoadName(_, kind_work_cache),
-        Op::EqEq,
-        Op::JumpIfFalse(device_start),
-    ] = ops.get(body..body.checked_add(12)?)?
+    let [Op::StoreLocal(handler_packet), Op::Pop, Op::StoreLocal(handler), Op::ResetSlots(count, reset_count), Op::LoadLocal(handler_packet0), Op::Const(null_packet), Op::NotEq, Op::JumpIfFalse(no_packet), Op::GetPropLocal(handler_packet1, _, kind_cache), Op::LoadName(_, kind_work_cache), Op::EqEq, Op::JumpIfFalse(device_start)] =
+        ops.get(body..body.checked_add(12)?)?
     else {
         if std::env::var_os("LUMEN_JIT_REGIONLOG").is_some() {
             eprintln!("[jit-region-plan] Handler incoming: reject prefix header");
@@ -9264,9 +9268,7 @@ fn plan_scheduler_handler_incoming(
         return None;
     }
     let saved = count.checked_add(1)?;
-    if handler_packet.checked_add(1) != Some(*handler)
-        || handler.checked_add(1) != Some(*count)
-    {
+    if handler_packet.checked_add(1) != Some(*handler) || handler.checked_add(1) != Some(*count) {
         if std::env::var_os("LUMEN_JIT_REGIONLOG").is_some() {
             eprintln!("[jit-region-plan] Handler incoming: reject Handler local group");
         }
@@ -9277,44 +9279,8 @@ fn plan_scheduler_handler_incoming(
     // over the else arm. The two sites have distinct IC indices, so prove their warmed method,
     // packet-link, scan-link, and Handler-field facts independently before sharing an Active
     // transaction.
-    let [
-        Op::LoadLocal(work_packet),
-        Op::GetMethod(_, work_add_method_cache),
-        Op::GetPropLocal(work_handler0, work_v1_name0, work_v1_cache),
-        Op::InlineGuard(work_add_target, work_generic_call),
-        Op::StoreLocal(work_add_queue),
-        Op::Pop,
-        Op::StoreLocal(work_add_this),
-        Op::ResetSlots(work_add_next, work_add_reset_count),
-        Op::Const(work_null_link0),
-        Op::SetPropLocalDrop(work_add_this0, work_link_name0, work_packet_link_store),
-        Op::LoadLocal(work_add_queue0),
-        Op::Const(work_null_queue),
-        Op::EqEq,
-        Op::JumpIfFalse(work_nonempty_queue),
-        Op::LoadLocal(work_add_this1),
-        Op::Jump(work_add_join0),
-        Op::LoadLocal(work_add_queue1),
-        Op::StoreLocal(work_next),
-        Op::GetPropLocal(work_next0, work_link_name1, work_queued_link_cache),
-        Op::Dup,
-        Op::StoreLocal(work_peek),
-        Op::Const(work_null_peek),
-        Op::NotEq,
-        Op::JumpIfFalse(work_scan_done),
-        Op::LoadLocal(work_peek0),
-        Op::StoreLocal(work_next1),
-        Op::Jump(work_scan_head),
-        Op::LoadLocal(work_add_this2),
-        Op::SetPropLocalDrop(work_next2, work_link_name2, work_queued_link_store),
-        Op::LoadLocal(work_add_queue2),
-        Op::Jump(work_add_join1),
-        Op::Undef,
-        Op::Jump(work_add_join2),
-        Op::CallWithThis(1, _),
-        Op::SetPropLocalDrop(work_handler1, work_v1_name1, work_v1_store),
-        Op::Jump(work_exit),
-    ] = ops.get(work_start..device_start)?
+    let [Op::LoadLocal(work_packet), Op::GetMethod(_, work_add_method_cache), Op::GetPropLocal(work_handler0, work_v1_name0, work_v1_cache), Op::InlineGuard(work_add_target, work_generic_call), Op::StoreLocal(work_add_queue), Op::Pop, Op::StoreLocal(work_add_this), Op::ResetSlots(work_add_next, work_add_reset_count), Op::Const(work_null_link0), Op::SetPropLocalDrop(work_add_this0, work_link_name0, work_packet_link_store), Op::LoadLocal(work_add_queue0), Op::Const(work_null_queue), Op::EqEq, Op::JumpIfFalse(work_nonempty_queue), Op::LoadLocal(work_add_this1), Op::Jump(work_add_join0), Op::LoadLocal(work_add_queue1), Op::StoreLocal(work_next), Op::GetPropLocal(work_next0, work_link_name1, work_queued_link_cache), Op::Dup, Op::StoreLocal(work_peek), Op::Const(work_null_peek), Op::NotEq, Op::JumpIfFalse(work_scan_done), Op::LoadLocal(work_peek0), Op::StoreLocal(work_next1), Op::Jump(work_scan_head), Op::LoadLocal(work_add_this2), Op::SetPropLocalDrop(work_next2, work_link_name2, work_queued_link_store), Op::LoadLocal(work_add_queue2), Op::Jump(work_add_join1), Op::Undef, Op::Jump(work_add_join2), Op::CallWithThis(1, _), Op::SetPropLocalDrop(work_handler1, work_v1_name1, work_v1_store), Op::Jump(work_exit)] =
+        ops.get(work_start..device_start)?
     else {
         if std::env::var_os("LUMEN_JIT_REGIONLOG").is_some() {
             eprintln!("[jit-region-plan] Handler incoming: reject WORK Packet.addTo body");
@@ -9360,43 +9326,8 @@ fn plan_scheduler_handler_incoming(
         return None;
     }
 
-    let [
-        Op::LoadLocal(handler_packet2),
-        Op::GetMethod(_, add_method_cache),
-        Op::GetPropLocal(handler0, v2_name0, v2_cache),
-        Op::InlineGuard(add_target, generic_call),
-        Op::StoreLocal(add_queue),
-        Op::Pop,
-        Op::StoreLocal(add_this),
-        Op::ResetSlots(add_next, add_reset_count),
-        Op::Const(null_link0),
-        Op::SetPropLocalDrop(add_this0, link_name0, packet_link_store),
-        Op::LoadLocal(add_queue0),
-        Op::Const(null_queue),
-        Op::EqEq,
-        Op::JumpIfFalse(nonempty_queue),
-        Op::LoadLocal(add_this1),
-        Op::Jump(add_join0),
-        Op::LoadLocal(add_queue1),
-        Op::StoreLocal(next),
-        Op::GetPropLocal(next0, link_name1, queued_link_cache),
-        Op::Dup,
-        Op::StoreLocal(peek),
-        Op::Const(null_peek),
-        Op::NotEq,
-        Op::JumpIfFalse(scan_done),
-        Op::LoadLocal(peek0),
-        Op::StoreLocal(next1),
-        Op::Jump(scan_head),
-        Op::LoadLocal(add_this2),
-        Op::SetPropLocalDrop(next2, link_name2, queued_link_store),
-        Op::LoadLocal(add_queue2),
-        Op::Jump(add_join1),
-        Op::Undef,
-        Op::Jump(add_join2),
-        Op::CallWithThis(1, _),
-        Op::SetPropLocalDrop(handler1, v2_name1, v2_store),
-    ] = ops.get(device_start..no_packet)?
+    let [Op::LoadLocal(handler_packet2), Op::GetMethod(_, add_method_cache), Op::GetPropLocal(handler0, v2_name0, v2_cache), Op::InlineGuard(add_target, generic_call), Op::StoreLocal(add_queue), Op::Pop, Op::StoreLocal(add_this), Op::ResetSlots(add_next, add_reset_count), Op::Const(null_link0), Op::SetPropLocalDrop(add_this0, link_name0, packet_link_store), Op::LoadLocal(add_queue0), Op::Const(null_queue), Op::EqEq, Op::JumpIfFalse(nonempty_queue), Op::LoadLocal(add_this1), Op::Jump(add_join0), Op::LoadLocal(add_queue1), Op::StoreLocal(next), Op::GetPropLocal(next0, link_name1, queued_link_cache), Op::Dup, Op::StoreLocal(peek), Op::Const(null_peek), Op::NotEq, Op::JumpIfFalse(scan_done), Op::LoadLocal(peek0), Op::StoreLocal(next1), Op::Jump(scan_head), Op::LoadLocal(add_this2), Op::SetPropLocalDrop(next2, link_name2, queued_link_store), Op::LoadLocal(add_queue2), Op::Jump(add_join1), Op::Undef, Op::Jump(add_join2), Op::CallWithThis(1, _), Op::SetPropLocalDrop(handler1, v2_name1, v2_store)] =
+        ops.get(device_start..no_packet)?
     else {
         if std::env::var_os("LUMEN_JIT_REGIONLOG").is_some() {
             eprintln!("[jit-region-plan] Handler incoming: reject Packet.addTo body");
@@ -9489,8 +9420,7 @@ fn plan_scheduler_handler_incoming(
                 && actual.slot == expected.slot
         })
     };
-    let same_state = |actual: crate::bytecode::IcState,
-                      expected: crate::bytecode::IcState| {
+    let same_state = |actual: crate::bytecode::IcState, expected: crate::bytecode::IcState| {
         actual.depth == expected.depth
             && actual.recv_shape == expected.recv_shape
             && actual.holder_shape == expected.holder_shape
@@ -9507,11 +9437,7 @@ fn plan_scheduler_handler_incoming(
     let work_queued_link = chunk.jit_cache_preferred(*work_queued_link_cache)?;
     let target = chunk.jit_inline_target(*add_target);
     let work_target = chunk.jit_inline_target(*work_add_target);
-    if target.argc != 1
-        || !target.check_this
-        || work_target.argc != 1
-        || !work_target.check_this
-    {
+    if target.argc != 1 || !target.check_this || work_target.argc != 1 || !work_target.check_this {
         if std::env::var_os("LUMEN_JIT_REGIONLOG").is_some() {
             eprintln!("[jit-region-plan] Handler incoming: reject inline target ABI");
         }
@@ -9573,7 +9499,10 @@ fn plan_scheduler_handler_incoming(
 /// empty-stack branch target. The queue/check/mark transaction is flattened only for an empty,
 /// non-preempting target queue; every descriptor, shape, method, global, and value-class guard
 /// runs before either ownership move is published.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn plan_scheduler_handler_queue(
     chunk: &Chunk,
     ops: &[crate::bytecode::Op],
@@ -9600,78 +9529,8 @@ fn plan_scheduler_handler_queue(
     }
 
     let end = head.checked_add(70)?;
-    let [
-        Op::GetPropLocal(handler, v1_name0, v1_cache0),
-        Op::StoreLocal(saved),
-        Op::GetPropLocal(handler1, v1_name1, v1_cache1),
-        Op::GetProp(link_name0, packet_link_cache),
-        Op::SetPropLocalDrop(handler2, v1_name2, v1_store),
-        Op::GetPropLocal(handler3, _, scheduler_cache),
-        Op::GetMethod(_, queue_method_cache),
-        Op::LoadLocal(saved0),
-        Op::InlineGuard(queue_target, queue_generic),
-        Op::StoreLocal(packet),
-        Op::Pop,
-        Op::StoreLocal(scheduler),
-        Op::ResetSlots(target, reset_count),
-        Op::GetPropLocal(scheduler0, _, blocks_cache),
-        Op::GetPropLocal(packet0, id_name0, packet_id_cache),
-        Op::GetElem,
-        Op::StoreLocal(target0),
-        Op::LoadLocal(target1),
-        Op::Const(null_target),
-        Op::EqEq,
-        Op::JumpIfFalse(nonnull_target),
-        Op::LoadLocal(target2),
-        Op::Jump(null_return),
-        Op::LoadLocal(scheduler1),
-        Op::UpdateProp(_, queue_count_cache, UpdKind::IncDiscard),
-        Op::Const(null_link),
-        Op::SetPropLocalDrop(packet1, link_name1, packet_link_store),
-        Op::GetPropLocal(scheduler2, _, current_id_cache),
-        Op::SetPropLocalDrop(packet2, id_name1, packet_id_store),
-        Op::LoadLocal(target3),
-        Op::GetMethod(_, check_method_cache),
-        Op::GetPropLocal(scheduler3, current_name0, current_cache),
-        Op::LoadLocal(packet3),
-        Op::InlineGuard(check_target, check_generic),
-        Op::StoreLocal(check_packet),
-        Op::StoreLocal(check_task),
-        Op::Pop,
-        Op::StoreLocal(check_this),
-        Op::GetPropLocal(check_this0, queue_name0, target_queue_cache),
-        Op::Const(null_queue),
-        Op::EqEq,
-        Op::JumpIfFalse(nonempty_queue),
-        Op::LoadLocal(check_packet0),
-        Op::SetPropLocalDrop(check_this1, queue_name1, target_queue_store),
-        Op::LoadLocal(check_this2),
-        Op::GetMethod(_, mark_method_cache),
-        Op::CallWithThis(0, mark_call),
-        Op::Pop,
-        Op::GetPropLocal(check_this3, priority_name0, target_priority_cache),
-        Op::GetPropLocal(check_task0, priority_name1, current_priority_cache),
-        Op::Gt,
-        Op::JumpIfFalse(no_preempt),
-        Op::LoadLocal(check_this4),
-        Op::Jump(return_join0),
-        Op::Jump(return_current),
-        Op::LoadLocal(check_packet1),
-        Op::GetMethod(_, _),
-        Op::GetPropLocal(check_this5, queue_name2, _),
-        Op::CallWithThis(1, _),
-        Op::SetPropLocalDrop(check_this6, queue_name3, _),
-        Op::LoadLocal(check_task1),
-        Op::Jump(return_join1),
-        Op::Undef,
-        Op::Jump(return_join2),
-        Op::CallWithThis(2, _),
-        Op::Jump(queue_join0),
-        Op::Undef,
-        Op::Jump(queue_join1),
-        Op::CallWithThis(1, _),
-        Op::Jump(outer_join),
-    ] = ops.get(head..end)?
+    let [Op::GetPropLocal(handler, v1_name0, v1_cache0), Op::StoreLocal(saved), Op::GetPropLocal(handler1, v1_name1, v1_cache1), Op::GetProp(link_name0, packet_link_cache), Op::SetPropLocalDrop(handler2, v1_name2, v1_store), Op::GetPropLocal(handler3, _, scheduler_cache), Op::GetMethod(_, queue_method_cache), Op::LoadLocal(saved0), Op::InlineGuard(queue_target, queue_generic), Op::StoreLocal(packet), Op::Pop, Op::StoreLocal(scheduler), Op::ResetSlots(target, reset_count), Op::GetPropLocal(scheduler0, _, blocks_cache), Op::GetPropLocal(packet0, id_name0, packet_id_cache), Op::GetElem, Op::StoreLocal(target0), Op::LoadLocal(target1), Op::Const(null_target), Op::EqEq, Op::JumpIfFalse(nonnull_target), Op::LoadLocal(target2), Op::Jump(null_return), Op::LoadLocal(scheduler1), Op::UpdateProp(_, queue_count_cache, UpdKind::IncDiscard), Op::Const(null_link), Op::SetPropLocalDrop(packet1, link_name1, packet_link_store), Op::GetPropLocal(scheduler2, _, current_id_cache), Op::SetPropLocalDrop(packet2, id_name1, packet_id_store), Op::LoadLocal(target3), Op::GetMethod(_, check_method_cache), Op::GetPropLocal(scheduler3, current_name0, current_cache), Op::LoadLocal(packet3), Op::InlineGuard(check_target, check_generic), Op::StoreLocal(check_packet), Op::StoreLocal(check_task), Op::Pop, Op::StoreLocal(check_this), Op::GetPropLocal(check_this0, queue_name0, target_queue_cache), Op::Const(null_queue), Op::EqEq, Op::JumpIfFalse(nonempty_queue), Op::LoadLocal(check_packet0), Op::SetPropLocalDrop(check_this1, queue_name1, target_queue_store), Op::LoadLocal(check_this2), Op::GetMethod(_, mark_method_cache), Op::CallWithThis(0, mark_call), Op::Pop, Op::GetPropLocal(check_this3, priority_name0, target_priority_cache), Op::GetPropLocal(check_task0, priority_name1, current_priority_cache), Op::Gt, Op::JumpIfFalse(no_preempt), Op::LoadLocal(check_this4), Op::Jump(return_join0), Op::Jump(return_current), Op::LoadLocal(check_packet1), Op::GetMethod(_, _), Op::GetPropLocal(check_this5, queue_name2, _), Op::CallWithThis(1, _), Op::SetPropLocalDrop(check_this6, queue_name3, _), Op::LoadLocal(check_task1), Op::Jump(return_join1), Op::Undef, Op::Jump(return_join2), Op::CallWithThis(2, _), Op::Jump(queue_join0), Op::Undef, Op::Jump(queue_join1), Op::CallWithThis(1, _), Op::Jump(outer_join)] =
+        ops.get(head..end)?
     else {
         return None;
     };
@@ -9788,11 +9647,10 @@ fn plan_scheduler_handler_queue(
         })
     };
     let distinct_slots = |states: &[crate::bytecode::IcState]| {
-        states.iter().enumerate().all(|(i, state)| {
-            states[..i]
-                .iter()
-                .all(|earlier| earlier.slot != state.slot)
-        })
+        states
+            .iter()
+            .enumerate()
+            .all(|(i, state)| states[..i].iter().all(|earlier| earlier.slot != state.slot))
     };
 
     let queue_target = chunk.jit_inline_target(*queue_target);
@@ -9839,15 +9697,10 @@ fn plan_scheduler_handler_queue(
                 .filter(|c| Rc::as_ptr(c) == mark_ic.chunk_raw)
                 .cloned()
         };
-        let mark_chunk = chunk_for_ic(mark_func.code2.get())
-            .or_else(|| chunk_for_ic(mark_func.code.get()))?;
-        let [
-            Op::GetPropThis(state_name0, state_cache),
-            Op::LoadName(_, runnable_cache),
-            Op::BitOr,
-            Op::SetPropThisDrop(state_name1, state_store),
-            Op::ReturnUndef,
-        ] = mark_chunk.jit_ops()
+        let mark_chunk =
+            chunk_for_ic(mark_func.code2.get()).or_else(|| chunk_for_ic(mark_func.code.get()))?;
+        let [Op::GetPropThis(state_name0, state_cache), Op::LoadName(_, runnable_cache), Op::BitOr, Op::SetPropThisDrop(state_name1, state_store), Op::ReturnUndef] =
+            mark_chunk.jit_ops()
         else {
             return None;
         };
@@ -9889,33 +9742,8 @@ fn plan_scheduler_handler_queue(
         .into_iter()
         .flatten()
         {
-            let [
-                Op::GetPropThis(queue0, _),
-                Op::Const(null0),
-                Op::EqEq,
-                Op::JumpIfFalse(nonempty),
-                Op::LoadLocal(packet0),
-                Op::SetPropThisDrop(queue1, _),
-                Op::LoadThis,
-                Op::GetMethod(_, _),
-                Op::CallWithThis(0, child_mark_call),
-                Op::Pop,
-                Op::GetPropThis(priority0, _),
-                Op::GetPropLocal(task0, priority1, _),
-                Op::Gt,
-                Op::JumpIfFalse(no_preempt0),
-                Op::LoadThis,
-                Op::Return,
-                Op::Jump(return_current0),
-                Op::LoadLocal(packet1),
-                Op::GetMethod(_, _),
-                Op::GetPropThis(queue2, _),
-                Op::CallWithThis(1, _),
-                Op::SetPropThisDrop(queue3, _),
-                Op::LoadLocal(task1),
-                Op::Return,
-                Op::ReturnUndef,
-            ] = check_chunk.jit_ops()
+            let [Op::GetPropThis(queue0, _), Op::Const(null0), Op::EqEq, Op::JumpIfFalse(nonempty), Op::LoadLocal(packet0), Op::SetPropThisDrop(queue1, _), Op::LoadThis, Op::GetMethod(_, _), Op::CallWithThis(0, child_mark_call), Op::Pop, Op::GetPropThis(priority0, _), Op::GetPropLocal(task0, priority1, _), Op::Gt, Op::JumpIfFalse(no_preempt0), Op::LoadThis, Op::Return, Op::Jump(return_current0), Op::LoadLocal(packet1), Op::GetMethod(_, _), Op::GetPropThis(queue2, _), Op::CallWithThis(1, _), Op::SetPropThisDrop(queue3, _), Op::LoadLocal(task1), Op::Return, Op::ReturnUndef] =
+                check_chunk.jit_ops()
             else {
                 continue;
             };
@@ -10030,7 +9858,10 @@ fn plan_scheduler_handler_queue(
 /// Recognize HandlerTask's numeric delivery arm after the live `v2 != null` branch. The lowering
 /// covers Scheduler.queue's empty/preempting case and its dominant nonempty one-node case, where
 /// Packet.addTo performs no scan and appends directly to that packet's Null link.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn plan_scheduler_handler_deliver(
     chunk: &Chunk,
     ops: &[crate::bytecode::Op],
@@ -10059,88 +9890,8 @@ fn plan_scheduler_handler_deliver(
     }
 
     let end = head.checked_add(80)?;
-    let [
-        Op::GetPropLocal(handler, v2_name0, v2_cache0),
-        Op::StoreLocal(saved),
-        Op::GetPropLocal(handler0, v2_name1, v2_cache1),
-        Op::GetProp(link_name0, packet_link_cache),
-        Op::SetPropLocalDrop(handler1, v2_name2, v2_store),
-        Op::GetPropLocal(handler2, v1_name0, v1_cache0),
-        Op::GetProp(_, payload_array_cache),
-        Op::LoadLocal(count),
-        Op::GetElem,
-        Op::SetPropLocalDrop(saved0, a1_name0, packet_a1_store),
-        Op::GetPropLocal(handler3, v1_name1, v1_cache1),
-        Op::LoadLocal(count0),
-        Op::Const(one),
-        Op::Add,
-        Op::SetPropDrop(a1_name1, work_a1_store),
-        Op::GetPropLocal(handler4, _, scheduler_cache),
-        Op::GetMethod(_, queue_method_cache),
-        Op::LoadLocal(saved1),
-        Op::InlineGuard(queue_target, queue_generic),
-        Op::StoreLocal(packet),
-        Op::Pop,
-        Op::StoreLocal(scheduler),
-        Op::ResetSlots(target, reset_count),
-        Op::GetPropLocal(scheduler0, _, blocks_cache),
-        Op::GetPropLocal(packet0, id_name0, packet_id_cache),
-        Op::GetElem,
-        Op::StoreLocal(target0),
-        Op::LoadLocal(target1),
-        Op::Const(null_target),
-        Op::EqEq,
-        Op::JumpIfFalse(nonnull_target),
-        Op::LoadLocal(target2),
-        Op::Jump(null_return),
-        Op::LoadLocal(scheduler1),
-        Op::UpdateProp(_, queue_count_cache, UpdKind::IncDiscard),
-        Op::Const(null_link),
-        Op::SetPropLocalDrop(packet1, link_name1, packet_link_store),
-        Op::GetPropLocal(scheduler2, _, current_id_cache),
-        Op::SetPropLocalDrop(packet2, id_name1, packet_id_store),
-        Op::LoadLocal(target3),
-        Op::GetMethod(_, check_method_cache),
-        Op::GetPropLocal(scheduler3, current_name0, current_cache),
-        Op::LoadLocal(packet3),
-        Op::InlineGuard(check_target, check_generic),
-        Op::StoreLocal(check_packet),
-        Op::StoreLocal(check_task),
-        Op::Pop,
-        Op::StoreLocal(check_this),
-        Op::GetPropLocal(check_this0, queue_name0, target_queue_cache0),
-        Op::Const(null_queue),
-        Op::EqEq,
-        Op::JumpIfFalse(nonempty_queue),
-        Op::LoadLocal(check_packet0),
-        Op::SetPropLocalDrop(check_this1, queue_name1, target_queue_store0),
-        Op::LoadLocal(check_this2),
-        Op::GetMethod(_, mark_method_cache),
-        Op::CallWithThis(0, _mark_call),
-        Op::Pop,
-        Op::GetPropLocal(check_this3, priority_name0, target_priority_cache),
-        Op::GetPropLocal(check_task0, priority_name1, current_priority_cache),
-        Op::Gt,
-        Op::JumpIfFalse(no_preempt),
-        Op::LoadLocal(check_this4),
-        Op::Jump(return_join0),
-        Op::Jump(return_current),
-        Op::LoadLocal(check_packet1),
-        Op::GetMethod(_, _outer_add_method_cache),
-        Op::GetPropLocal(check_this5, queue_name2, target_queue_cache1),
-        Op::CallWithThis(1, _outer_add_call),
-        Op::SetPropLocalDrop(check_this6, queue_name3, target_queue_store1),
-        Op::LoadLocal(check_task1),
-        Op::Jump(return_join1),
-        Op::Undef,
-        Op::Jump(return_join2),
-        Op::CallWithThis(2, _),
-        Op::Jump(queue_join0),
-        Op::Undef,
-        Op::Jump(queue_join1),
-        Op::CallWithThis(1, _),
-        Op::Jump(outer_join),
-    ] = ops.get(head..end)?
+    let [Op::GetPropLocal(handler, v2_name0, v2_cache0), Op::StoreLocal(saved), Op::GetPropLocal(handler0, v2_name1, v2_cache1), Op::GetProp(link_name0, packet_link_cache), Op::SetPropLocalDrop(handler1, v2_name2, v2_store), Op::GetPropLocal(handler2, v1_name0, v1_cache0), Op::GetProp(_, payload_array_cache), Op::LoadLocal(count), Op::GetElem, Op::SetPropLocalDrop(saved0, a1_name0, packet_a1_store), Op::GetPropLocal(handler3, v1_name1, v1_cache1), Op::LoadLocal(count0), Op::Const(one), Op::Add, Op::SetPropDrop(a1_name1, work_a1_store), Op::GetPropLocal(handler4, _, scheduler_cache), Op::GetMethod(_, queue_method_cache), Op::LoadLocal(saved1), Op::InlineGuard(queue_target, queue_generic), Op::StoreLocal(packet), Op::Pop, Op::StoreLocal(scheduler), Op::ResetSlots(target, reset_count), Op::GetPropLocal(scheduler0, _, blocks_cache), Op::GetPropLocal(packet0, id_name0, packet_id_cache), Op::GetElem, Op::StoreLocal(target0), Op::LoadLocal(target1), Op::Const(null_target), Op::EqEq, Op::JumpIfFalse(nonnull_target), Op::LoadLocal(target2), Op::Jump(null_return), Op::LoadLocal(scheduler1), Op::UpdateProp(_, queue_count_cache, UpdKind::IncDiscard), Op::Const(null_link), Op::SetPropLocalDrop(packet1, link_name1, packet_link_store), Op::GetPropLocal(scheduler2, _, current_id_cache), Op::SetPropLocalDrop(packet2, id_name1, packet_id_store), Op::LoadLocal(target3), Op::GetMethod(_, check_method_cache), Op::GetPropLocal(scheduler3, current_name0, current_cache), Op::LoadLocal(packet3), Op::InlineGuard(check_target, check_generic), Op::StoreLocal(check_packet), Op::StoreLocal(check_task), Op::Pop, Op::StoreLocal(check_this), Op::GetPropLocal(check_this0, queue_name0, target_queue_cache0), Op::Const(null_queue), Op::EqEq, Op::JumpIfFalse(nonempty_queue), Op::LoadLocal(check_packet0), Op::SetPropLocalDrop(check_this1, queue_name1, target_queue_store0), Op::LoadLocal(check_this2), Op::GetMethod(_, mark_method_cache), Op::CallWithThis(0, _mark_call), Op::Pop, Op::GetPropLocal(check_this3, priority_name0, target_priority_cache), Op::GetPropLocal(check_task0, priority_name1, current_priority_cache), Op::Gt, Op::JumpIfFalse(no_preempt), Op::LoadLocal(check_this4), Op::Jump(return_join0), Op::Jump(return_current), Op::LoadLocal(check_packet1), Op::GetMethod(_, _outer_add_method_cache), Op::GetPropLocal(check_this5, queue_name2, target_queue_cache1), Op::CallWithThis(1, _outer_add_call), Op::SetPropLocalDrop(check_this6, queue_name3, target_queue_store1), Op::LoadLocal(check_task1), Op::Jump(return_join1), Op::Undef, Op::Jump(return_join2), Op::CallWithThis(2, _), Op::Jump(queue_join0), Op::Undef, Op::Jump(queue_join1), Op::CallWithThis(1, _), Op::Jump(outer_join)] =
+        ops.get(head..end)?
     else {
         return None;
     };
@@ -10273,11 +10024,10 @@ fn plan_scheduler_handler_deliver(
         })
     };
     let distinct_slots = |states: &[crate::bytecode::IcState]| {
-        states.iter().enumerate().all(|(i, state)| {
-            states[..i]
-                .iter()
-                .all(|earlier| earlier.slot != state.slot)
-        })
+        states
+            .iter()
+            .enumerate()
+            .all(|(i, state)| states[..i].iter().all(|earlier| earlier.slot != state.slot))
     };
     let queue_target = chunk.jit_inline_target(*queue_target);
     let check_target = chunk.jit_inline_target(*check_target);
@@ -10337,13 +10087,8 @@ fn plan_scheduler_handler_deliver(
         .into_iter()
         .flatten()
         .find(|candidate| Rc::as_ptr(candidate) == mark_ic.chunk_raw)?;
-        let [
-            Op::GetPropThis(state_name0, state_cache),
-            Op::LoadName(_, runnable_cache),
-            Op::BitOr,
-            Op::SetPropThisDrop(state_name1, state_store),
-            Op::ReturnUndef,
-        ] = mark_chunk.jit_ops()
+        let [Op::GetPropThis(state_name0, state_cache), Op::LoadName(_, runnable_cache), Op::BitOr, Op::SetPropThisDrop(state_name1, state_store), Op::ReturnUndef] =
+            mark_chunk.jit_ops()
         else {
             return None;
         };
@@ -10372,33 +10117,8 @@ fn plan_scheduler_handler_deliver(
     .into_iter()
     .flatten()
     {
-        let [
-            Op::GetPropThis(queue0, _),
-            Op::Const(null0),
-            Op::EqEq,
-            Op::JumpIfFalse(nonempty0),
-            Op::LoadLocal(packet4),
-            Op::SetPropThisDrop(queue1, _),
-            Op::LoadThis,
-            Op::GetMethod(_, _),
-            Op::CallWithThis(0, child_mark_call),
-            Op::Pop,
-            Op::GetPropThis(priority0, _),
-            Op::GetPropLocal(task4, priority1, _),
-            Op::Gt,
-            Op::JumpIfFalse(no_preempt0),
-            Op::LoadThis,
-            Op::Return,
-            Op::Jump(return_current0),
-            Op::LoadLocal(packet5),
-            Op::GetMethod(_, add_method_cache),
-            Op::GetPropThis(queue2, _),
-            Op::CallWithThis(1, add_call),
-            Op::SetPropThisDrop(queue3, _),
-            Op::LoadLocal(task5),
-            Op::Return,
-            Op::ReturnUndef,
-        ] = check_chunk.jit_ops()
+        let [Op::GetPropThis(queue0, _), Op::Const(null0), Op::EqEq, Op::JumpIfFalse(nonempty0), Op::LoadLocal(packet4), Op::SetPropThisDrop(queue1, _), Op::LoadThis, Op::GetMethod(_, _), Op::CallWithThis(0, child_mark_call), Op::Pop, Op::GetPropThis(priority0, _), Op::GetPropLocal(task4, priority1, _), Op::Gt, Op::JumpIfFalse(no_preempt0), Op::LoadThis, Op::Return, Op::Jump(return_current0), Op::LoadLocal(packet5), Op::GetMethod(_, add_method_cache), Op::GetPropThis(queue2, _), Op::CallWithThis(1, add_call), Op::SetPropThisDrop(queue3, _), Op::LoadLocal(task5), Op::Return, Op::ReturnUndef] =
+            check_chunk.jit_ops()
         else {
             continue;
         };
@@ -10452,32 +10172,8 @@ fn plan_scheduler_handler_deliver(
         let Some(add_chunk) = add_chunk else {
             continue;
         };
-        let [
-            Op::Const(add_null0),
-            Op::SetPropThisDrop(add_link0, this_link_store),
-            Op::LoadLocal(add_queue0),
-            Op::Const(add_null1),
-            Op::EqEq,
-            Op::JumpIfFalse(add_nonempty),
-            Op::LoadThis,
-            Op::Return,
-            Op::LoadLocal(add_queue1),
-            Op::StoreLocal(next),
-            Op::GetPropLocal(next0, add_link1, queued_link_cache),
-            Op::Dup,
-            Op::StoreLocal(peek),
-            Op::Const(add_null2),
-            Op::NotEq,
-            Op::JumpIfFalse(scan_done),
-            Op::LoadLocal(peek0),
-            Op::StoreLocal(next1),
-            Op::Jump(scan_head),
-            Op::LoadThis,
-            Op::SetPropLocalDrop(next2, add_link2, queued_link_store),
-            Op::LoadLocal(add_queue2),
-            Op::Return,
-            Op::ReturnUndef,
-        ] = add_chunk.jit_ops()
+        let [Op::Const(add_null0), Op::SetPropThisDrop(add_link0, this_link_store), Op::LoadLocal(add_queue0), Op::Const(add_null1), Op::EqEq, Op::JumpIfFalse(add_nonempty), Op::LoadThis, Op::Return, Op::LoadLocal(add_queue1), Op::StoreLocal(next), Op::GetPropLocal(next0, add_link1, queued_link_cache), Op::Dup, Op::StoreLocal(peek), Op::Const(add_null2), Op::NotEq, Op::JumpIfFalse(scan_done), Op::LoadLocal(peek0), Op::StoreLocal(next1), Op::Jump(scan_head), Op::LoadThis, Op::SetPropLocalDrop(next2, add_link2, queued_link_store), Op::LoadLocal(add_queue2), Op::Return, Op::ReturnUndef] =
+            add_chunk.jit_ops()
         else {
             continue;
         };
@@ -10626,7 +10322,10 @@ fn plan_scheduler_handler_deliver(
 /// The first HandlerTask inline guard deliberately falls through to a second DeviceTask guard;
 /// property IC way selection therefore keys off DeviceTask's own `v1` shape instead of requiring
 /// the polymorphic `run` site to collapse to one preferred way.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn plan_scheduler_device(
     chunk: &Chunk,
     ops: &[crate::bytecode::Op],
@@ -10647,52 +10346,15 @@ fn plan_scheduler_device(
         return None;
     }
     let outer_end = head.checked_add(4)?;
-    let [
-        Op::GetPropLocal(tcb, _, task_cache),
-        Op::GetMethod(_, run_cache),
-        Op::LoadLocal(packet),
-        Op::InlineGuard(_, device_guard),
-    ] = ops.get(head..outer_end)?
+    let [Op::GetPropLocal(tcb, _, task_cache), Op::GetMethod(_, run_cache), Op::LoadLocal(packet), Op::InlineGuard(_, device_guard)] =
+        ops.get(head..outer_end)?
     else {
         return None;
     };
     let device_guard = *device_guard as usize;
     let device_end = device_guard.checked_add(33)?;
-    let [
-        Op::InlineGuard(device_target, generic_call),
-        Op::StoreLocal(device_packet),
-        Op::Pop,
-        Op::StoreLocal(task),
-        Op::ResetSlots(temp, reset_count),
-        Op::LoadLocal(device_packet1),
-        Op::Const(null_packet),
-        Op::EqEq,
-        Op::JumpIfFalse(hold_pc),
-        Op::GetPropLocal(task1, _, v1_cache0),
-        Op::Const(null_v1),
-        Op::EqEq,
-        Op::JumpIfFalse(queue_pc),
-        Op::GetPropLocal(task2, scheduler_name0, scheduler_cache0),
-        Op::GetMethod(suspend_name, _),
-        Op::CallWithThis(0, _),
-        Op::Jump(join0),
-        Op::GetPropLocal(task3, _, v1_cache1),
-        Op::StoreLocal(temp1),
-        Op::Const(null_store),
-        Op::SetPropLocalDrop(task4, _, v1_store0),
-        Op::GetPropLocal(task5, scheduler_name1, _scheduler_cache1),
-        Op::GetMethod(_queue_name, _queue_method_cache),
-        Op::LoadLocal(temp2),
-        Op::CallWithThis(1, _queue_call),
-        Op::Jump(join1),
-        Op::Jump(scaffold),
-        Op::LoadLocal(device_packet2),
-        Op::SetPropLocalDrop(task6, _, v1_store1),
-        Op::GetPropLocal(task7, scheduler_name2, scheduler_cache2),
-        Op::GetMethod(hold_name, hold_method_cache),
-        Op::CallWithThis(0, _),
-        Op::Jump(join2),
-    ] = ops.get(device_guard..device_end)?
+    let [Op::InlineGuard(device_target, generic_call), Op::StoreLocal(device_packet), Op::Pop, Op::StoreLocal(task), Op::ResetSlots(temp, reset_count), Op::LoadLocal(device_packet1), Op::Const(null_packet), Op::EqEq, Op::JumpIfFalse(hold_pc), Op::GetPropLocal(task1, _, v1_cache0), Op::Const(null_v1), Op::EqEq, Op::JumpIfFalse(queue_pc), Op::GetPropLocal(task2, scheduler_name0, scheduler_cache0), Op::GetMethod(suspend_name, _), Op::CallWithThis(0, _), Op::Jump(join0), Op::GetPropLocal(task3, _, v1_cache1), Op::StoreLocal(temp1), Op::Const(null_store), Op::SetPropLocalDrop(task4, _, v1_store0), Op::GetPropLocal(task5, scheduler_name1, _scheduler_cache1), Op::GetMethod(_queue_name, _queue_method_cache), Op::LoadLocal(temp2), Op::CallWithThis(1, _queue_call), Op::Jump(join1), Op::Jump(scaffold), Op::LoadLocal(device_packet2), Op::SetPropLocalDrop(task6, _, v1_store1), Op::GetPropLocal(task7, scheduler_name2, scheduler_cache2), Op::GetMethod(hold_name, hold_method_cache), Op::CallWithThis(0, _), Op::Jump(join2)] =
+        ops.get(device_guard..device_end)?
     else {
         return None;
     };
@@ -10818,7 +10480,10 @@ fn plan_scheduler_device(
     })
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 #[allow(clippy::too_many_arguments)]
 fn plan_scheduler_device_suspend(
     chunk: &Chunk,
@@ -10840,32 +10505,8 @@ fn plan_scheduler_device_suspend(
     // its nested markAsSuspended call; the Device call site itself remains generic.
     let start = device_guard.checked_sub(26)?;
     let end = start.checked_add(24)?;
-    let [
-        Op::GetPropLocal(_, scheduler_name0, _),
-        Op::GetMethod(suspend_name0, suspend_method_cache),
-        Op::InlineGuard(suspend_target, suspend_generic),
-        Op::Pop,
-        Op::StoreLocal(scheduler_local),
-        Op::GetPropLocal(scheduler_local0, current_name0, current_cache0),
-        Op::GetMethod(_, mark_method_cache),
-        Op::InlineGuard(mark_target, mark_generic),
-        Op::Pop,
-        Op::StoreLocal(tcb_local),
-        Op::GetPropLocal(tcb_local0, state_name0, state_cache0),
-        Op::LoadName(_, suspended_cache),
-        Op::BitOr,
-        Op::SetPropLocalDrop(tcb_local1, state_name1, state_store),
-        Op::Undef,
-        Op::Jump(mark_join0),
-        Op::CallWithThis(0, _),
-        Op::Pop,
-        Op::GetPropLocal(scheduler_local1, current_name1, current_cache1),
-        Op::Jump(suspend_join0),
-        Op::Undef,
-        Op::Jump(suspend_join1),
-        Op::CallWithThis(0, _),
-        Op::Jump(join),
-    ] = ops.get(start..end)?
+    let [Op::GetPropLocal(_, scheduler_name0, _), Op::GetMethod(suspend_name0, suspend_method_cache), Op::InlineGuard(suspend_target, suspend_generic), Op::Pop, Op::StoreLocal(scheduler_local), Op::GetPropLocal(scheduler_local0, current_name0, current_cache0), Op::GetMethod(_, mark_method_cache), Op::InlineGuard(mark_target, mark_generic), Op::Pop, Op::StoreLocal(tcb_local), Op::GetPropLocal(tcb_local0, state_name0, state_cache0), Op::LoadName(_, suspended_cache), Op::BitOr, Op::SetPropLocalDrop(tcb_local1, state_name1, state_store), Op::Undef, Op::Jump(mark_join0), Op::CallWithThis(0, _), Op::Pop, Op::GetPropLocal(scheduler_local1, current_name1, current_cache1), Op::Jump(suspend_join0), Op::Undef, Op::Jump(suspend_join1), Op::CallWithThis(0, _), Op::Jump(join)] =
+        ops.get(start..end)?
     else {
         return None;
     };
@@ -10959,7 +10600,10 @@ fn plan_scheduler_device_suspend(
     })
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 #[allow(clippy::too_many_arguments)]
 fn plan_scheduler_device_hold(
     chunk: &Chunk,
@@ -10989,37 +10633,8 @@ fn plan_scheduler_device_hold(
     };
     let device_chunk = device_func.code.get()?.as_ref()?;
     let device_ops = device_chunk.jit_ops();
-    let [
-        Op::LoadLocal(_),
-        Op::Const(_),
-        Op::EqEq,
-        Op::JumpIfFalse(_),
-        Op::GetPropThis(_, _),
-        Op::Const(_),
-        Op::EqEq,
-        Op::JumpIfFalse(_),
-        Op::GetPropThis(_, _),
-        Op::GetMethod(_, _),
-        Op::CallWithThis(0, _),
-        Op::Return,
-        Op::GetPropThis(_, _),
-        Op::StoreLocal(_),
-        Op::Const(_),
-        Op::SetPropThisDrop(_, _),
-        Op::GetPropThis(_, _),
-        Op::GetMethod(_, _),
-        Op::LoadLocal(_),
-        Op::CallWithThis(1, _),
-        Op::Return,
-        Op::Jump(_),
-        Op::LoadLocal(_),
-        Op::SetPropThisDrop(_, _),
-        Op::GetPropThis(_, _),
-        Op::GetMethod(device_hold_name, _),
-        Op::CallWithThis(0, device_hold_call),
-        Op::Return,
-        Op::ReturnUndef,
-    ] = device_ops
+    let [Op::LoadLocal(_), Op::Const(_), Op::EqEq, Op::JumpIfFalse(_), Op::GetPropThis(_, _), Op::Const(_), Op::EqEq, Op::JumpIfFalse(_), Op::GetPropThis(_, _), Op::GetMethod(_, _), Op::CallWithThis(0, _), Op::Return, Op::GetPropThis(_, _), Op::StoreLocal(_), Op::Const(_), Op::SetPropThisDrop(_, _), Op::GetPropThis(_, _), Op::GetMethod(_, _), Op::LoadLocal(_), Op::CallWithThis(1, _), Op::Return, Op::Jump(_), Op::LoadLocal(_), Op::SetPropThisDrop(_, _), Op::GetPropThis(_, _), Op::GetMethod(device_hold_name, _), Op::CallWithThis(0, device_hold_call), Op::Return, Op::ReturnUndef] =
+        device_ops
     else {
         return None;
     };
@@ -11041,27 +10656,8 @@ fn plan_scheduler_device_hold(
     };
     let hold_chunk = hold_func.code2.get()?.as_ref()?;
     let hold_ops = hold_chunk.jit_ops();
-    let [
-        Op::LoadThis,
-        Op::UpdateProp(_, hold_count_cache, UpdKind::IncDiscard),
-        Op::GetPropThis(current_name0, current_cache0),
-        Op::GetMethod(_, mark_method_cache),
-        Op::InlineGuard(mark_target, mark_generic),
-        Op::Pop,
-        Op::StoreLocal(mark_this),
-        Op::GetPropLocal(mark_this0, state_name0, state_cache),
-        Op::LoadName(_, held_cache),
-        Op::BitOr,
-        Op::SetPropLocalDrop(mark_this1, state_name1, state_store),
-        Op::Undef,
-        Op::Jump(mark_join),
-        Op::CallWithThis(0, _),
-        Op::Pop,
-        Op::GetPropThis(current_name1, current_cache1),
-        Op::GetProp(_, link_cache),
-        Op::Return,
-        Op::ReturnUndef,
-    ] = hold_ops
+    let [Op::LoadThis, Op::UpdateProp(_, hold_count_cache, UpdKind::IncDiscard), Op::GetPropThis(current_name0, current_cache0), Op::GetMethod(_, mark_method_cache), Op::InlineGuard(mark_target, mark_generic), Op::Pop, Op::StoreLocal(mark_this), Op::GetPropLocal(mark_this0, state_name0, state_cache), Op::LoadName(_, held_cache), Op::BitOr, Op::SetPropLocalDrop(mark_this1, state_name1, state_store), Op::Undef, Op::Jump(mark_join), Op::CallWithThis(0, _), Op::Pop, Op::GetPropThis(current_name1, current_cache1), Op::GetProp(_, link_cache), Op::Return, Op::ReturnUndef] =
+        hold_ops
     else {
         return None;
     };
@@ -11151,7 +10747,10 @@ fn plan_scheduler_device_hold(
     })
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 #[allow(clippy::too_many_arguments)]
 fn plan_scheduler_device_queue(
     chunk: &Chunk,
@@ -11191,37 +10790,8 @@ fn plan_scheduler_device_queue(
     };
     let device_chunk = device_func.code.get()?.as_ref()?;
     let device_ops = device_chunk.jit_ops();
-    let [
-        Op::LoadLocal(_),
-        Op::Const(_),
-        Op::EqEq,
-        Op::JumpIfFalse(_),
-        Op::GetPropThis(_, _),
-        Op::Const(_),
-        Op::EqEq,
-        Op::JumpIfFalse(_),
-        Op::GetPropThis(_, _),
-        Op::GetMethod(_, _),
-        Op::CallWithThis(0, _),
-        Op::Return,
-        Op::GetPropThis(_, _),
-        Op::StoreLocal(_),
-        Op::Const(_),
-        Op::SetPropThisDrop(_, _),
-        Op::GetPropThis(_, _),
-        Op::GetMethod(device_queue_name, _),
-        Op::LoadLocal(_),
-        Op::CallWithThis(1, device_queue_call),
-        Op::Return,
-        Op::Jump(_),
-        Op::LoadLocal(_),
-        Op::SetPropThisDrop(_, _),
-        Op::GetPropThis(_, _),
-        Op::GetMethod(_, _),
-        Op::CallWithThis(0, _),
-        Op::Return,
-        Op::ReturnUndef,
-    ] = device_ops
+    let [Op::LoadLocal(_), Op::Const(_), Op::EqEq, Op::JumpIfFalse(_), Op::GetPropThis(_, _), Op::Const(_), Op::EqEq, Op::JumpIfFalse(_), Op::GetPropThis(_, _), Op::GetMethod(_, _), Op::CallWithThis(0, _), Op::Return, Op::GetPropThis(_, _), Op::StoreLocal(_), Op::Const(_), Op::SetPropThisDrop(_, _), Op::GetPropThis(_, _), Op::GetMethod(device_queue_name, _), Op::LoadLocal(_), Op::CallWithThis(1, device_queue_call), Op::Return, Op::Jump(_), Op::LoadLocal(_), Op::SetPropThisDrop(_, _), Op::GetPropThis(_, _), Op::GetMethod(_, _), Op::CallWithThis(0, _), Op::Return, Op::ReturnUndef] =
+        device_ops
     else {
         return None;
     };
@@ -11264,70 +10834,22 @@ fn plan_scheduler_device_queue(
     let queue_chunk = queue_func.code2.get()?.as_ref()?;
     let q = queue_chunk.jit_ops();
     if std::env::var_os("LUMEN_JIT_REGIONLOG").is_some() {
-        eprintln!("[jit-region-plan] scheduler Device queue: queue_ops={}", q.len());
+        eprintln!(
+            "[jit-region-plan] scheduler Device queue: queue_ops={}",
+            q.len()
+        );
     }
     if q.len() != 93 {
         return None;
     }
 
-    let [
-        Op::GetPropThis(_, blocks_cache),
-        Op::GetPropLocal(packet0, _, packet_id_cache),
-        Op::GetElem,
-        Op::StoreLocal(target),
-        Op::LoadLocal(target0),
-        Op::Const(null_target),
-        Op::EqEq,
-        Op::JumpIfFalse(nonnull_target),
-        Op::LoadLocal(target1),
-        Op::Return,
-        Op::LoadThis,
-        Op::UpdateProp(_, queue_count_cache, UpdKind::IncDiscard),
-        Op::Const(null_link),
-        Op::SetPropLocalDrop(packet1, _, packet_link_store),
-        Op::GetPropThis(_, current_id_cache),
-        Op::SetPropLocalDrop(packet2, _, packet_id_store),
-        Op::LoadLocal(target2),
-        Op::GetMethod(_, check_method_cache),
-        Op::GetPropThis(_, current_cache),
-        Op::LoadLocal(packet3),
-        Op::InlineGuard(check_target, check_generic),
-    ] = &q[..21]
+    let [Op::GetPropThis(_, blocks_cache), Op::GetPropLocal(packet0, _, packet_id_cache), Op::GetElem, Op::StoreLocal(target), Op::LoadLocal(target0), Op::Const(null_target), Op::EqEq, Op::JumpIfFalse(nonnull_target), Op::LoadLocal(target1), Op::Return, Op::LoadThis, Op::UpdateProp(_, queue_count_cache, UpdKind::IncDiscard), Op::Const(null_link), Op::SetPropLocalDrop(packet1, _, packet_link_store), Op::GetPropThis(_, current_id_cache), Op::SetPropLocalDrop(packet2, _, packet_id_store), Op::LoadLocal(target2), Op::GetMethod(_, check_method_cache), Op::GetPropThis(_, current_cache), Op::LoadLocal(packet3), Op::InlineGuard(check_target, check_generic)] =
+        &q[..21]
     else {
         return None;
     };
-    let [
-        Op::StoreLocal(check_packet),
-        Op::StoreLocal(check_task),
-        Op::Pop,
-        Op::StoreLocal(check_this),
-        Op::GetPropLocal(check_this0, _, target_queue_cache),
-        Op::Const(null_queue),
-        Op::EqEq,
-        Op::JumpIfFalse(nonempty_queue),
-        Op::LoadLocal(check_packet0),
-        Op::SetPropLocalDrop(check_this1, _, target_queue_store),
-        Op::LoadLocal(check_this2),
-        Op::GetMethod(_, mark_method_cache),
-        Op::InlineGuard(mark_target, mark_generic),
-        Op::Pop,
-        Op::StoreLocal(mark_this),
-        Op::GetPropLocal(mark_this0, _, state_cache),
-        Op::LoadName(_, runnable_cache),
-        Op::BitOr,
-        Op::SetPropLocalDrop(mark_this1, _, state_store),
-        Op::Undef,
-        Op::Jump(mark_join),
-        Op::CallWithThis(0, _),
-        Op::Pop,
-        Op::GetPropLocal(check_this3, _, target_priority_cache),
-        Op::GetPropLocal(check_task0, _, current_priority_cache),
-        Op::Gt,
-        Op::JumpIfFalse(no_preempt),
-        Op::LoadLocal(check_this4),
-        Op::Jump(return_join0),
-        Op::Jump(return_current),
-    ] = &q[21..51]
+    let [Op::StoreLocal(check_packet), Op::StoreLocal(check_task), Op::Pop, Op::StoreLocal(check_this), Op::GetPropLocal(check_this0, _, target_queue_cache), Op::Const(null_queue), Op::EqEq, Op::JumpIfFalse(nonempty_queue), Op::LoadLocal(check_packet0), Op::SetPropLocalDrop(check_this1, _, target_queue_store), Op::LoadLocal(check_this2), Op::GetMethod(_, mark_method_cache), Op::InlineGuard(mark_target, mark_generic), Op::Pop, Op::StoreLocal(mark_this), Op::GetPropLocal(mark_this0, _, state_cache), Op::LoadName(_, runnable_cache), Op::BitOr, Op::SetPropLocalDrop(mark_this1, _, state_store), Op::Undef, Op::Jump(mark_join), Op::CallWithThis(0, _), Op::Pop, Op::GetPropLocal(check_this3, _, target_priority_cache), Op::GetPropLocal(check_task0, _, current_priority_cache), Op::Gt, Op::JumpIfFalse(no_preempt), Op::LoadLocal(check_this4), Op::Jump(return_join0), Op::Jump(return_current)] =
+        &q[21..51]
     else {
         return None;
     };
@@ -11402,11 +10924,10 @@ fn plan_scheduler_device_queue(
         })
     };
     let distinct_slots = |states: &[crate::bytecode::IcState]| {
-        states.iter().enumerate().all(|(i, state)| {
-            states[..i]
-                .iter()
-                .all(|earlier| earlier.slot != state.slot)
-        })
+        states
+            .iter()
+            .enumerate()
+            .all(|(i, state)| states[..i].iter().all(|earlier| earlier.slot != state.slot))
     };
     if scheduler.depth != 0
         || scheduler.recv_shape != device_shape
@@ -11494,7 +11015,10 @@ fn plan_scheduler_device_queue(
     })
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn plan_scheduler_device_queue_code2(
     chunk: &Chunk,
     ops: &[crate::bytecode::Op],
@@ -11514,81 +11038,18 @@ fn plan_scheduler_device_queue_code2(
     if q.len() != 171 {
         return None;
     }
-    let [
-        Op::GetPropThis(v1_name0, v1_cache),
-        Op::StoreLocal(saved_v1),
-        Op::Const(null_v1),
-        Op::SetPropThisDrop(v1_name1, v1_store),
-        Op::GetPropThis(_, scheduler_cache),
-        Op::GetMethod(_, queue_method_cache),
-        Op::LoadLocal(saved_v10),
-        Op::InlineGuard(queue_target, queue_generic),
-        Op::StoreLocal(packet),
-        Op::Pop,
-        Op::StoreLocal(scheduler),
-        Op::ResetSlots(target, reset_count),
-    ] = &q[32..44]
+    let [Op::GetPropThis(v1_name0, v1_cache), Op::StoreLocal(saved_v1), Op::Const(null_v1), Op::SetPropThisDrop(v1_name1, v1_store), Op::GetPropThis(_, scheduler_cache), Op::GetMethod(_, queue_method_cache), Op::LoadLocal(saved_v10), Op::InlineGuard(queue_target, queue_generic), Op::StoreLocal(packet), Op::Pop, Op::StoreLocal(scheduler), Op::ResetSlots(target, reset_count)] =
+        &q[32..44]
     else {
         return None;
     };
-    let [
-        Op::GetPropLocal(scheduler0, _, blocks_cache),
-        Op::GetPropLocal(packet0, _, packet_id_cache),
-        Op::GetElem,
-        Op::StoreLocal(target0),
-        Op::LoadLocal(target1),
-        Op::Const(null_target),
-        Op::EqEq,
-        Op::JumpIfFalse(nonnull_target),
-        Op::LoadLocal(target2),
-        Op::Jump(null_return),
-        Op::LoadLocal(scheduler1),
-        Op::UpdateProp(_, queue_count_cache, UpdKind::IncDiscard),
-        Op::Const(null_link),
-        Op::SetPropLocalDrop(packet1, _, packet_link_store),
-        Op::GetPropLocal(scheduler2, _, current_id_cache),
-        Op::SetPropLocalDrop(packet2, _, packet_id_store),
-        Op::LoadLocal(target3),
-        Op::GetMethod(_, check_method_cache),
-        Op::GetPropLocal(scheduler3, _, current_cache),
-        Op::LoadLocal(packet3),
-        Op::InlineGuard(check_target, check_generic),
-    ] = &q[44..65]
+    let [Op::GetPropLocal(scheduler0, _, blocks_cache), Op::GetPropLocal(packet0, _, packet_id_cache), Op::GetElem, Op::StoreLocal(target0), Op::LoadLocal(target1), Op::Const(null_target), Op::EqEq, Op::JumpIfFalse(nonnull_target), Op::LoadLocal(target2), Op::Jump(null_return), Op::LoadLocal(scheduler1), Op::UpdateProp(_, queue_count_cache, UpdKind::IncDiscard), Op::Const(null_link), Op::SetPropLocalDrop(packet1, _, packet_link_store), Op::GetPropLocal(scheduler2, _, current_id_cache), Op::SetPropLocalDrop(packet2, _, packet_id_store), Op::LoadLocal(target3), Op::GetMethod(_, check_method_cache), Op::GetPropLocal(scheduler3, _, current_cache), Op::LoadLocal(packet3), Op::InlineGuard(check_target, check_generic)] =
+        &q[44..65]
     else {
         return None;
     };
-    let [
-        Op::StoreLocal(check_packet),
-        Op::StoreLocal(check_task),
-        Op::Pop,
-        Op::StoreLocal(check_this),
-        Op::GetPropLocal(check_this0, _, target_queue_cache),
-        Op::Const(null_queue),
-        Op::EqEq,
-        Op::JumpIfFalse(nonempty_queue),
-        Op::LoadLocal(check_packet0),
-        Op::SetPropLocalDrop(check_this1, _, target_queue_store),
-        Op::LoadLocal(check_this2),
-        Op::GetMethod(_, mark_method_cache),
-        Op::InlineGuard(mark_target, mark_generic),
-        Op::Pop,
-        Op::StoreLocal(mark_this),
-        Op::GetPropLocal(mark_this0, state_name0, state_cache),
-        Op::LoadName(_, runnable_cache),
-        Op::BitOr,
-        Op::SetPropLocalDrop(mark_this1, state_name1, state_store),
-        Op::Undef,
-        Op::Jump(mark_join),
-        Op::CallWithThis(0, _),
-        Op::Pop,
-        Op::GetPropLocal(check_this3, _, target_priority_cache),
-        Op::GetPropLocal(check_task0, _, current_priority_cache),
-        Op::Gt,
-        Op::JumpIfFalse(no_preempt),
-        Op::LoadLocal(check_this4),
-        Op::Jump(return_join0),
-        Op::Jump(return_current),
-    ] = &q[65..95]
+    let [Op::StoreLocal(check_packet), Op::StoreLocal(check_task), Op::Pop, Op::StoreLocal(check_this), Op::GetPropLocal(check_this0, _, target_queue_cache), Op::Const(null_queue), Op::EqEq, Op::JumpIfFalse(nonempty_queue), Op::LoadLocal(check_packet0), Op::SetPropLocalDrop(check_this1, _, target_queue_store), Op::LoadLocal(check_this2), Op::GetMethod(_, mark_method_cache), Op::InlineGuard(mark_target, mark_generic), Op::Pop, Op::StoreLocal(mark_this), Op::GetPropLocal(mark_this0, state_name0, state_cache), Op::LoadName(_, runnable_cache), Op::BitOr, Op::SetPropLocalDrop(mark_this1, state_name1, state_store), Op::Undef, Op::Jump(mark_join), Op::CallWithThis(0, _), Op::Pop, Op::GetPropLocal(check_this3, _, target_priority_cache), Op::GetPropLocal(check_task0, _, current_priority_cache), Op::Gt, Op::JumpIfFalse(no_preempt), Op::LoadLocal(check_this4), Op::Jump(return_join0), Op::Jump(return_current)] =
+        &q[65..95]
     else {
         return None;
     };
@@ -11677,11 +11138,10 @@ fn plan_scheduler_device_queue_code2(
         })
     };
     let distinct_slots = |states: &[crate::bytecode::IcState]| {
-        states.iter().enumerate().all(|(i, state)| {
-            states[..i]
-                .iter()
-                .all(|earlier| earlier.slot != state.slot)
-        })
+        states
+            .iter()
+            .enumerate()
+            .all(|(i, state)| states[..i].iter().all(|earlier| earlier.slot != state.slot))
     };
     if v1.depth != 0
         || v1.recv_shape != device_shape
@@ -11778,7 +11238,10 @@ fn plan_scheduler_device_queue_code2(
 /// Plan `while ((peek = next.link) != null) next = peek`.  The optimized region borrows linked
 /// objects through the still-rooted initial list, performs no per-node RC operations, then
 /// materializes the two locals exactly once at the exit or a guarded side exit.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn plan_linked_scan(
     chunk: &Chunk,
     ops: &[crate::bytecode::Op],
@@ -11797,17 +11260,8 @@ fn plan_linked_scan(
         return None;
     }
     let end = head.checked_add(9)?;
-    let [
-        Op::GetPropLocal(next, _, cache),
-        Op::Dup,
-        Op::StoreLocal(peek),
-        Op::Const(null),
-        cmp @ (Op::NotEq | Op::StrictNotEq),
-        Op::JumpIfFalse(exit),
-        Op::LoadLocal(peek_read),
-        Op::StoreLocal(next_store),
-        Op::Jump(back),
-    ] = ops.get(head..end)?
+    let [Op::GetPropLocal(next, _, cache), Op::Dup, Op::StoreLocal(peek), Op::Const(null), cmp @ (Op::NotEq | Op::StrictNotEq), Op::JumpIfFalse(exit), Op::LoadLocal(peek_read), Op::StoreLocal(next_store), Op::Jump(back)] =
+        ops.get(head..end)?
     else {
         return None;
     };
@@ -11854,7 +11308,10 @@ fn plan_linked_scan(
     })
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn exact_i32_const(bits: u64) -> Option<i64> {
     let value = f64::from_bits(bits);
     if !value.is_finite()
@@ -11868,7 +11325,10 @@ fn exact_i32_const(bits: u64) -> Option<i64> {
     Some(value as i32 as i64)
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn plan_numeric_diamond(
     chunk: &Chunk,
     ops: &[crate::bytecode::Op],
@@ -11880,26 +11340,8 @@ fn plan_numeric_diamond(
     use crate::bytecode::{Op, UpdKind};
     let end = head.checked_add(18)?;
     let body = ops.get(head..end)?;
-    let [
-        Op::LoadLocal(index),
-        Op::LoadName(_, limit_cache),
-        Op::Lt,
-        Op::JumpIfFalse(exit),
-        Op::LoadThis,
-        Op::UpdateProp(counter_name, counter_update_cache, UpdKind::IncDiscard),
-        Op::GetPropThis(counter_name_read, counter_read_cache),
-        Op::Const(threshold),
-        Op::Gt,
-        Op::JumpIfFalse(no_reset),
-        Op::Const(reset),
-        Op::SetPropThisDrop(counter_name_set, counter_set_cache),
-        Op::GetPropLocal(owner, _, array_cache),
-        Op::LoadLocal(index_read),
-        Op::GetPropThis(counter_name_store, counter_store_cache),
-        Op::SetElemDrop,
-        Op::UpdateLocal(index_update, UpdKind::IncDiscard),
-        Op::Jump(back),
-    ] = body
+    let [Op::LoadLocal(index), Op::LoadName(_, limit_cache), Op::Lt, Op::JumpIfFalse(exit), Op::LoadThis, Op::UpdateProp(counter_name, counter_update_cache, UpdKind::IncDiscard), Op::GetPropThis(counter_name_read, counter_read_cache), Op::Const(threshold), Op::Gt, Op::JumpIfFalse(no_reset), Op::Const(reset), Op::SetPropThisDrop(counter_name_set, counter_set_cache), Op::GetPropLocal(owner, _, array_cache), Op::LoadLocal(index_read), Op::GetPropThis(counter_name_store, counter_store_cache), Op::SetElemDrop, Op::UpdateLocal(index_update, UpdKind::IncDiscard), Op::Jump(back)] =
+        body
     else {
         return None;
     };
@@ -11957,9 +11399,7 @@ fn plan_numeric_diamond(
     };
     let same_counter = |cache: u32| {
         chunk.jit_cache_preferred(cache).is_some_and(|state| {
-            state.depth == 0
-                && state.recv_shape == counter.recv_shape
-                && state.slot == counter.slot
+            state.depth == 0 && state.recv_shape == counter.recv_shape && state.slot == counter.slot
         })
     };
     if counter.depth != 0
@@ -11978,10 +11418,7 @@ fn plan_numeric_diamond(
     if chunk.jit_name_number(*limit_cache).is_none() {
         reject!("limit feedback");
     }
-    let Some(threshold) = chunk
-        .jit_const_num(*threshold)
-        .and_then(exact_i32_const)
-    else {
+    let Some(threshold) = chunk.jit_const_num(*threshold).and_then(exact_i32_const) else {
         reject!("threshold constant");
     };
     let Some(reset) = chunk.jit_const_num(*reset).and_then(exact_i32_const) else {
@@ -12012,7 +11449,10 @@ fn plan_numeric_diamond(
 /// proven Num in a register: arithmetic needs no tag checks at all and the compare+branch needs
 /// no guards whatsoever. Returns the chain and how many bytecode ops it covers (`None` if
 /// shorter than 3 ops — plain templates are fine for those).
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn build_chain(
     chunk: &Chunk,
     ops: &[crate::bytecode::Op],
@@ -12113,7 +11553,11 @@ fn build_chain(
             Op::SetPropThisDrop(n, c)
                 if prop_store_ok
                     && vdepth >= 1
-                    && !chunk.jit_name(*n).as_bytes().first().is_some_and(|b| b.is_ascii_digit()) =>
+                    && !chunk
+                        .jit_name(*n)
+                        .as_bytes()
+                        .first()
+                        .is_some_and(|b| b.is_ascii_digit()) =>
             {
                 let Some(st) = chunk.jit_cache_preferred(*c) else {
                     break;
@@ -12127,7 +11571,11 @@ fn build_chain(
                 if prop_store_ok
                     && vdepth >= 1
                     && in_range(*s)
-                    && !chunk.jit_name(*n).as_bytes().first().is_some_and(|b| b.is_ascii_digit()) =>
+                    && !chunk
+                        .jit_name(*n)
+                        .as_bytes()
+                        .first()
+                        .is_some_and(|b| b.is_ascii_digit()) =>
             {
                 let Some(st) = chunk.jit_cache_preferred(*c) else {
                     break;
@@ -12180,10 +11628,7 @@ fn build_chain(
     while matches!(
         chain.last(),
         Some((
-            ChainOp::ConstNum(_)
-                | ChainOp::Load(_)
-                | ChainOp::LoadName(_)
-                | ChainOp::LoadProp(..),
+            ChainOp::ConstNum(_) | ChainOp::Load(_) | ChainOp::LoadName(_) | ChainOp::LoadProp(..),
             _
         ))
     ) {
@@ -12258,9 +11703,9 @@ fn build_chain(
     if has_prop {
         let useful = match chain.last() {
             Some((ChainOp::Bit(_), _)) => true,
-            Some((ChainOp::StoreProp(..), _)) => chain
-                .iter()
-                .any(|(op, _)| matches!(op, ChainOp::Bit(_))),
+            Some((ChainOp::StoreProp(..), _)) => {
+                chain.iter().any(|(op, _)| matches!(op, ChainOp::Bit(_)))
+            }
             Some((ChainOp::CmpBranch(..), cmp_pc)) => match ops[*cmp_pc] {
                 // Ordered comparisons necessarily request numeric coercion on the ordinary
                 // path, so a numeric property guard is a productive speculation.
@@ -12285,9 +11730,7 @@ fn build_chain(
             return None;
         }
     }
-    if std::env::var_os("LUMEN_JIT_PROP_CHAIN_LOG").is_some()
-        && has_prop
-    {
+    if std::env::var_os("LUMEN_JIT_PROP_CHAIN_LOG").is_some() && has_prop {
         let desc: Vec<String> = chain
             .iter()
             .map(|(_op, pc)| format!("{pc}:{:?}", ops[*pc]))
@@ -12312,7 +11755,10 @@ fn build_chain(
 /// through the generic helper, so semantics are identical on every path. Side-effecting ops
 /// (slot stores, element writes) commit only after all their guards pass, which is what makes
 /// the spill-and-rerun always clean.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_chain(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -13066,7 +12512,10 @@ fn emit_chain(
 // to the plain loop if they hold a refcounted value, so every later flush is a plain overwrite.
 // ---------------------------------------------------------------------------------------------
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 /// What a chain op pushes, precomputed by the planner (see the module comment above).
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum PushKind {
@@ -13076,7 +12525,10 @@ enum PushKind {
     D { iv: bool },
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 /// Where a loop-touched numeric slot lives during the run.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum SlotRes {
@@ -13088,7 +12540,10 @@ enum SlotRes {
     None,
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 #[derive(Debug)]
 struct SlotPlan {
     off: u32,
@@ -13105,7 +12560,10 @@ struct SlotPlan {
     int_checked: bool,
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 struct LoopPlan {
     head: usize,
     jump_pc: usize,
@@ -13142,7 +12600,10 @@ struct LoopPlan {
     uses_ext: bool,
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 struct NamePlan {
     /// The `NameIc` cell address (`Chunk::jit_name_cache_ptr`).
     ptr: usize,
@@ -13152,9 +12613,15 @@ struct NamePlan {
     int_checked: bool,
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 /// How a loop-chain receiver is cached (see `LoopPlan::receivers`).
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 struct ReceiverPlan {
     off: u32,
     /// x16/x17 (receivers 3-4 draw from the pin pool): the validated object base.
@@ -13179,14 +12646,20 @@ struct ReceiverPlan {
 /// Integer-range bookkeeping for iv decisions: |v| ≤ 2^exp and integral. 255 = unknown/not
 /// integral. Kept crude on purpose — it only has to prove products/sums of masked values stay
 /// under 2^62.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 #[derive(Clone, Copy)]
 struct NumInfo {
     integral: bool,
     exp: u32,
     neg: bool,
 }
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 impl NumInfo {
     fn unknown() -> NumInfo {
         NumInfo {
@@ -13200,7 +12673,10 @@ impl NumInfo {
     }
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn plan_loop(
     chunk: &Chunk,
     ops: &[crate::bytecode::Op],
@@ -14375,7 +13851,10 @@ fn plan_loop(
     })
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 /// A virtual value during loop-chain emission.
 #[derive(Clone, Copy)]
 enum LV {
@@ -14384,7 +13863,10 @@ enum LV {
     D(u32, bool), // d-register, integral-valued
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_region_own_entry(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -14428,7 +13910,10 @@ fn emit_region_own_entry(
 /// already proved by the enclosing scheduler role dispatch. The entries vector cannot move while
 /// that dispatch remains direct: every generated task arm only updates existing property values
 /// and any path capable of running user code leaves the role region first.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_region_own_entry_trusted_shape(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -14455,7 +13940,10 @@ fn emit_region_own_entry_trusted_shape(
     }
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_region_packed_number(
     a: &mut asm::Asm,
     entry_reg: u32,
@@ -14479,7 +13967,10 @@ fn emit_region_packed_number(
     a.fmov_d_x(dreg, 13);
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_region_exact_i32(a: &mut asm::Asm, dreg: u32, out: u32, fail: usize) {
     a.fcvtzs_w_d(out, dreg);
     a.scvtf_d_w(1, out);
@@ -14490,14 +13981,11 @@ fn emit_region_exact_i32(a: &mut asm::Asm, dreg: u32, out: u32, fail: usize) {
     a.sxtw(out, out);
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-fn emit_region_packed_scalar(
-    a: &mut asm::Asm,
-    entry: u32,
-    value_off: i32,
-    out: u32,
-    fail: usize,
-) {
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+fn emit_region_packed_scalar(a: &mut asm::Asm, entry: u32, value_off: i32, out: u32, fail: usize) {
     let scalar = a.new_label();
     a.ldur(out, entry, value_off);
     a.lsr_imm(9, out, 48);
@@ -14515,7 +14003,10 @@ fn emit_region_packed_scalar(
 
 /// Guard an exact method stored on the already-pinned immediate prototype `proto`. The receiver
 /// shape/prototype identity is checked separately for every scheduler iteration.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_region_proto_method(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -14560,7 +14051,10 @@ fn emit_region_proto_method(
     a.b_cond(C_NE, fail);
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_region_clone_rc(a: &mut asm::Asm, ptr: u32, strong: i32) {
     a.ldur(9, ptr, strong);
     a.add_imm(9, 9, 1);
@@ -14570,7 +14064,10 @@ fn emit_region_clone_rc(a: &mut asm::Asm, ptr: u32, strong: i32) {
 /// Execute one complete IdleTask release without entering any of its three nested user
 /// functions. All property/name/method/number checks precede the source-ordered three-write
 /// commit, so the returned label can replay pc0 without duplicating observable effects.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_idle_release_region(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -14718,7 +14215,10 @@ fn emit_scheduler_idle_release_region(
     fail
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_device_commit(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -14743,7 +14243,10 @@ fn emit_scheduler_device_commit(
     a.b(target);
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_loop_continue(
     a: &mut asm::Asm,
     fast_resume: Option<usize>,
@@ -14762,7 +14265,10 @@ fn emit_scheduler_loop_continue(
     a.b(pc_labels[loop_pc]);
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_device_suspend(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -14895,7 +14401,10 @@ fn emit_scheduler_device_suspend(
     emit_scheduler_loop_continue(a, fast_resume, plan.loop_pc, pc_labels);
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_device_hold(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -14920,13 +14429,7 @@ fn emit_scheduler_device_hold(
     a.mov_imm64(14, crate::value::PACK_NULL);
     a.cmp_reg_x(v1_packed, 14);
     a.b_cond(C_NE, fail);
-    guard_prop_writable(
-        a,
-        9,
-        23,
-        layout.entry_writable as u32,
-        fail,
-    );
+    guard_prop_writable(a, 9, 23, layout.entry_writable as u32, fail);
 
     // x0=active TCB, x5=DeviceTask. Guard Device.scheduler === outer schedule receiver and then
     // the exact holdCurrent method before consuming any facts from that method's child chunk.
@@ -15078,7 +14581,10 @@ fn emit_scheduler_device_hold(
     a.b(outer_fail);
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_packed_entry(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -15106,7 +14612,10 @@ fn emit_scheduler_packed_entry(
     guard_prop_data(a, 9, out, layout.property_meta as u32, fail);
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_packed_target(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -15125,7 +14634,10 @@ fn emit_scheduler_packed_target(
     a.lsr_imm(out, out, 16);
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_device_queue(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -15148,13 +14660,7 @@ fn emit_scheduler_device_queue(
     a.stp_off(27, 28, 32);
     a.mov(23, source_entry);
     a.mov(24, packet);
-    guard_prop_writable(
-        a,
-        9,
-        23,
-        layout.entry_writable as u32,
-        fail,
-    );
+    guard_prop_writable(a, 9, 23, layout.entry_writable as u32, fail);
 
     // Exact Device.scheduler === the outer schedule receiver, followed by the live queue method.
     emit_region_own_entry(a, layout, 5, 3, 4, plan.scheduler, false, fail);
@@ -15387,7 +14893,10 @@ fn emit_scheduler_device_queue(
 /// Flatten HandlerTask's completed-work arm beginning at its empty-stack pc. Handler.v1 owns the
 /// packet and packet.link owns the successor; the shared queue emitter transfers those owners to
 /// target.queue and Handler.v1 respectively without touching either strong count.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_handler_queue_region(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -15428,7 +14937,10 @@ fn emit_scheduler_handler_queue_region(
 /// Flatten HandlerTask's numeric v2 delivery into the empty/preempting or one-node Packet.addTo
 /// arm. Packet/source ownership is moved without count traffic; only replacing a preempted
 /// Scheduler.current needs a guarded target retain and old-current release.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_handler_deliver_region(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -15450,7 +14962,10 @@ fn emit_scheduler_handler_deliver_region(
 /// proven by their Handler prefixes. `IncomingDevice` deliberately leaves skipped compiler
 /// locals alone: they are fixed frame slots, dead on success, and overwritten later or released
 /// with the schedule frame, so retention is bounded rather than iteration-cumulative.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_handler_deliver_transaction(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -16027,8 +15542,7 @@ fn emit_scheduler_handler_deliver_transaction(
     a.ldp_post(23, 24, 112);
     if matches!(
         source,
-        SchedulerHandlerDeliverSource::ActiveNull
-            | SchedulerHandlerDeliverSource::IncomingDevice
+        SchedulerHandlerDeliverSource::ActiveNull | SchedulerHandlerDeliverSource::IncomingDevice
     ) {
         if fast_resume.is_some() {
             // A one-node append leaves Scheduler.current and the active TCB untouched, and no
@@ -16052,7 +15566,10 @@ fn emit_scheduler_handler_deliver_transaction(
     outer_fail
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_handler_wait_prefix(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -16133,7 +15650,10 @@ fn emit_scheduler_handler_wait_prefix(
 /// Bypass HandlerTask's inlined body when the incoming packet and its v1 worklist are both exact
 /// Null. The task has no side effect before `suspendCurrent`, whose guarded transaction is shared
 /// with DeviceTask. Failure falls through to the original polymorphic task dispatch at `head`.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_handler_suspend_region(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -16250,7 +15770,10 @@ fn emit_scheduler_handler_suspend_region(
 /// Lower the polymorphic task dispatch into the existing DeviceTask tails. No state is changed
 /// until every property, method, descriptor, value-class, and HTMLDDA guard has succeeded; a
 /// failure can therefore replay the original pc59 with an untouched stack and local set.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_device_region(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -16319,17 +15842,7 @@ fn emit_scheduler_device_region(
     a.ldrb_imm(9, 14, layout.obj_ic_plain as u32);
     a.cbz(9, false, plain_h);
     if let Some(hold) = &plan.hold {
-        emit_scheduler_device_hold(
-            a,
-            layout,
-            hold,
-            7,
-            12,
-            13,
-            fast_resume,
-            plain_h,
-            pc_labels,
-        );
+        emit_scheduler_device_hold(a, layout, hold, 7, 12, 13, fast_resume, plain_h, pc_labels);
     } else {
         emit_scheduler_device_commit(
             a,
@@ -16411,7 +15924,10 @@ fn emit_scheduler_device_region(
 /// value guard: it replays through the shared pc59 fallback instead. Shapes alone are insufficient
 /// because canonical HandlerTask and WorkerTask have the same own fields, so every matching shape
 /// is resolved by its exact live `run` method in the original Device/Handler/Idle/Worker order.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn scheduler_active_null_role_dispatch_compatible(
     dispatch: &SchedulerActiveNullDispatchPlan,
 ) -> bool {
@@ -16425,7 +15941,10 @@ fn scheduler_active_null_role_dispatch_compatible(
         })
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn scheduler_role_epoch_compatible(plan: &SchedulerShellPlan) -> bool {
     let Some(active) = &plan.active else {
         return false;
@@ -16438,7 +15957,10 @@ fn scheduler_role_epoch_compatible(plan: &SchedulerShellPlan) -> bool {
         && scheduler_active_null_role_dispatch_compatible(dispatch)
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn scheduler_role_epoch_enabled(plan: &SchedulerShellPlan) -> bool {
     std::env::var_os("LUMEN_JIT_NO_SCHED_ROLE_DISPATCH").is_none()
         && std::env::var_os("LUMEN_JIT_NO_SCHED_ROLE_EPOCH").is_none()
@@ -16449,7 +15971,10 @@ fn scheduler_role_epoch_enabled(plan: &SchedulerShellPlan) -> bool {
 /// requires all six canonical roles and only own data ICs, but never keys on benchmark names or
 /// compile-time object addresses. Runtime validation discovers and pins the exact six TCB/task
 /// identities for one bounded session.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn scheduler_graph_epoch_compatible(
     plan: &SchedulerShellPlan,
     layout: &crate::value::JitLayout,
@@ -16498,10 +16023,7 @@ fn scheduler_graph_epoch_compatible(
             let value = off as i64 + layout.entry_value as i64;
             off < 4096 && meta < 4096 && (-256..=255).contains(&value)
         })
-        && slots
-            .into_iter()
-            .max()
-            .is_some_and(|slot| slot < 4095);
+        && slots.into_iter().max().is_some_and(|slot| slot < 4095);
     direct_slots_fit
         && own(plan.state)
         && own(plan.link)
@@ -16533,7 +16055,10 @@ fn scheduler_graph_epoch_compatible(
         .all(|method| method.depth == 1)
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn scheduler_graph_epoch_enabled(
     plan: &SchedulerShellPlan,
     layout: &crate::value::JitLayout,
@@ -16546,7 +16071,10 @@ fn scheduler_graph_epoch_enabled(
 /// The first graph-core contract proves the immutable task-to-Scheduler edge for every exact
 /// role record. Suspend can then reuse the graph's state entry, pinned Scheduler/current, methods,
 /// and state global without re-walking three object property chains on every null task step.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn scheduler_graph_core_compatible(plan: &SchedulerShellPlan) -> bool {
     let Some(dispatch) = plan
         .active
@@ -16578,7 +16106,10 @@ fn scheduler_graph_core_compatible(plan: &SchedulerShellPlan) -> bool {
     .all(|(scheduler, task_shape)| scheduler.depth == 0 && scheduler.recv_shape == task_shape)
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn scheduler_graph_core_enabled(plan: &SchedulerShellPlan) -> bool {
     std::env::var_os("LUMEN_JIT_NO_SCHED_GRAPH_CORE").is_none()
         && scheduler_method_epoch_enabled(plan)
@@ -16587,7 +16118,10 @@ fn scheduler_graph_core_enabled(plan: &SchedulerShellPlan) -> bool {
 
 /// Keep the second CORE consumer independently removable while its first benchmark slice is
 /// evaluated. The base all-six task-to-Scheduler proof and null-suspend tail remain published.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn scheduler_graph_core_incoming_enabled(plan: &SchedulerShellPlan) -> bool {
     std::env::var_os("LUMEN_JIT_NO_SCHED_GRAPH_CORE_INCOMING").is_none()
         && plan
@@ -16600,7 +16134,10 @@ fn scheduler_graph_core_incoming_enabled(plan: &SchedulerShellPlan) -> bool {
 /// Map a live TCB Rc pointer to its exact stack record. `sp_bias` accounts for a nested native
 /// spill. The current record is tried first because suspend and non-preempting queue keep it hot;
 /// the full six-way scan remains the defensive remap after every direct continuation.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_graph_find_record(
     a: &mut asm::Asm,
     tcb: u32,
@@ -16652,7 +16189,10 @@ fn emit_scheduler_graph_find_record(
     a.bind(done);
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_graph_task_role_guard(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -16682,7 +16222,10 @@ fn emit_scheduler_graph_task_role_guard(
 
 /// The second Handler/Device task only needs to reach the exact role prototype whose run method
 /// was proved by its first sibling earlier in the same no-user-code fill.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_graph_cached_task_role_guard(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -16711,7 +16254,10 @@ fn emit_scheduler_graph_cached_task_role_guard(
 /// Guard one already-addressed property metadata byte. Shape identity pins the slot/key; this
 /// compact check retains the live accessor/writable semantics without repeating receiver/vector
 /// discovery for every field.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_graph_entry_meta_guard(
     a: &mut asm::Asm,
     entries: u32,
@@ -16721,10 +16267,9 @@ fn emit_scheduler_graph_entry_meta_guard(
 ) {
     if writable {
         a.ldrb_imm(9, entries, meta_off);
-        let mask = asm::logical_imm_w(
-            (crate::value::PROP_ACCESSOR | crate::value::PROP_WRITABLE) as u32,
-        )
-        .unwrap();
+        let mask =
+            asm::logical_imm_w((crate::value::PROP_ACCESSOR | crate::value::PROP_WRITABLE) as u32)
+                .unwrap();
         a.logic_imm_w(0, 9, 9, mask);
         a.cmp_imm_w(9, crate::value::PROP_WRITABLE as u32);
         a.b_cond(C_NE, fail);
@@ -16736,7 +16281,10 @@ fn emit_scheduler_graph_entry_meta_guard(
 /// Eagerly validate and populate the complete six-TCB graph while x28 is zero. The runtime loop
 /// keeps static code compact; its cost is amortized across the following 1024 direct steps. No Rc
 /// is cloned, no helper is called, and no heap pointer is retained outside the current frame.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_graph_epoch_fill(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -16874,10 +16422,18 @@ fn emit_scheduler_graph_epoch_fill(
     a.ldr_imm(9, 3, layout.obj_proto as u32);
     a.cmp_reg_x(9, tcb_proto);
     a.b_cond(C_NE, fail);
-    a.ldr_imm(16, 3, (layout.obj_props + layout.props_entries + layout.vec_len_off) as u32);
+    a.ldr_imm(
+        16,
+        3,
+        (layout.obj_props + layout.props_entries + layout.vec_len_off) as u32,
+    );
     a.cmp_imm_x(16, max_slot + 1);
     a.b_cond(C_LO, fail);
-    a.ldr_imm(4, 3, (layout.obj_props + layout.props_entries + layout.vec_ptr_off) as u32);
+    a.ldr_imm(
+        4,
+        3,
+        (layout.obj_props + layout.props_entries + layout.vec_ptr_off) as u32,
+    );
 
     emit_scheduler_graph_entry_meta_guard(
         a,
@@ -16924,13 +16480,7 @@ fn emit_scheduler_graph_epoch_fill(
     a.str_imm(10, 12, SCHED_GRAPH_LINK_RECORD_OFF);
     a.bind(link_done);
 
-    emit_scheduler_graph_entry_meta_guard(
-        a,
-        4,
-        id_off + layout.entry_accessor as u32,
-        false,
-        fail,
-    );
+    emit_scheduler_graph_entry_meta_guard(a, 4, id_off + layout.entry_accessor as u32, false, fail);
     a.scvtf_d_w(0, 17);
     a.fmov_x_d(10, 0);
     a.ldur(13, 4, id_off as i32 + ev);
@@ -17080,7 +16630,10 @@ fn emit_scheduler_graph_epoch_fill(
 /// has no JS-visible effect and leaves the graph epoch usable with its ordinary guarded tails.
 /// The existing write-only graph-header word carries the validity bit, so this adds no frame or
 /// heap storage. The live current record is remapped after both outcomes before any cache is used.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_graph_core_fill(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -17161,7 +16714,10 @@ fn emit_scheduler_graph_core_fill(
 /// The standalone pc59 plans are rebuilt from the same bytecode/caches as Active's stitched
 /// dispatcher. Require their shared TCB.task recipe and role shapes to line up before an epoch
 /// selector is allowed to enter either emitter with x0/x5 prevalidated.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn scheduler_pc59_role_dispatch_compatible(
     device: &SchedulerDevicePlan,
     handler: &SchedulerHandlerSuspendPlan,
@@ -17186,7 +16742,10 @@ fn scheduler_pc59_role_dispatch_compatible(
 /// heap owner is created: x0/x5 remain borrowed from the materialized locals/current graph, and
 /// the existing four native-frame words cache only non-owning immediate-prototype pointers.
 /// Every miss branches to the untouched Device->Handler chain before either child can commit.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_pc59_role_selector(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -17290,7 +16849,10 @@ fn emit_scheduler_pc59_role_selector(
     a.b(fail);
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn scheduler_epoch_method_matches(
     left: crate::bytecode::IcState,
     left_expected: usize,
@@ -17308,7 +16870,10 @@ fn scheduler_epoch_method_matches(
 /// family once at its entry, then reuse those identities only while x28 keeps that session live.
 /// Handler and Worker suspend plans are compiled from separate call sites, so require their exact
 /// prototype entries and function identities to match the Device plan before sharing the proof.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn scheduler_method_epoch_compatible(plan: &SchedulerShellPlan) -> bool {
     let Some(dispatch) = plan
         .active
@@ -17352,7 +16917,10 @@ fn scheduler_method_epoch_compatible(plan: &SchedulerShellPlan) -> bool {
     })
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn scheduler_method_epoch_enabled(plan: &SchedulerShellPlan) -> bool {
     scheduler_role_epoch_enabled(plan)
         && std::env::var_os("LUMEN_JIT_NO_SCHED_METHOD_EPOCH").is_none()
@@ -17365,7 +16933,10 @@ fn scheduler_method_epoch_enabled(plan: &SchedulerShellPlan) -> bool {
 /// and cannot consume a non-null packet, while an unknown pointer fails closed to materialization.
 /// The fill already pinned each record's exact task identity/prototype/run method, so the selected
 /// arm receives that prevalidated task in x5 and must never cascade into a different role.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_active_packet_role_selector(
     a: &mut asm::Asm,
     worker: usize,
@@ -17384,11 +16955,7 @@ fn emit_scheduler_active_packet_role_selector(
         (5, device),
     ] {
         let next = a.new_label();
-        a.add_imm(
-            9,
-            31,
-            ACTIVE_SPILL + scheduler_graph_record_sp(index),
-        );
+        a.add_imm(9, 31, ACTIVE_SPILL + scheduler_graph_record_sp(index));
         a.cmp_reg_x(13, 9);
         a.b_cond(C_NE, next);
         // Dereference only after proving the non-owning pointer is inside this live frame.
@@ -17399,7 +16966,10 @@ fn emit_scheduler_active_packet_role_selector(
     a.b(fail);
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_active_null_role_selector(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -17440,16 +17010,7 @@ fn emit_scheduler_active_null_role_selector(
     // Every profiled TCB role uses the same own `task` slot. Prove the current receiver and load
     // the task once; a noncanonical TCB simply replays the untouched pc59 dispatch.
     if role_epoch {
-        emit_region_own_entry_trusted_shape(
-            a,
-            layout,
-            0,
-            3,
-            4,
-            dispatch.device.task,
-            false,
-            fail,
-        );
+        emit_region_own_entry_trusted_shape(a, layout, 0, 3, 4, dispatch.device.task, false, fail);
     } else {
         emit_region_own_entry(a, layout, 0, 3, 4, dispatch.device.task, false, fail);
     }
@@ -17483,30 +17044,22 @@ fn emit_scheduler_active_null_role_selector(
             handler,
             SCHED_ROLE_HANDLER_PROTO_SP,
         )),
-        dispatch
-            .idle
-            .as_ref()
-            .zip(idle)
-            .map(|(plan, target)| {
-                (
-                    plan.run_method,
-                    plan.run_expected,
-                    target,
-                    SCHED_ROLE_IDLE_PROTO_SP,
-                )
-            }),
-        dispatch
-            .worker
-            .as_ref()
-            .zip(worker)
-            .map(|(plan, target)| {
-                (
-                    plan.run_method,
-                    plan.run_expected,
-                    target,
-                    SCHED_ROLE_WORKER_PROTO_SP,
-                )
-            }),
+        dispatch.idle.as_ref().zip(idle).map(|(plan, target)| {
+            (
+                plan.run_method,
+                plan.run_expected,
+                target,
+                SCHED_ROLE_IDLE_PROTO_SP,
+            )
+        }),
+        dispatch.worker.as_ref().zip(worker).map(|(plan, target)| {
+            (
+                plan.run_method,
+                plan.run_expected,
+                target,
+                SCHED_ROLE_WORKER_PROTO_SP,
+            )
+        }),
     ];
     for (method, expected, target, proto_slot) in candidates.into_iter().flatten() {
         let next = a.new_label();
@@ -17535,7 +17088,10 @@ fn emit_scheduler_active_null_role_selector(
 /// Classify an exact-Null SchedulerActive packet while the active TCB remains virtual in x0.
 /// Only tails that preserve Scheduler.current are emitted: Device suspend and the empty,
 /// non-preempting Device.v1 queue transaction. Every guard precedes its selected tail's commit.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_device_active_null_region(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -17643,7 +17199,10 @@ fn emit_scheduler_device_active_null_region(
 /// exact Null by construction. Besides wait/suspend, an optional stitched plan consumes the two
 /// remaining work-list arms without materializing the compiler locals first: v2 delivery and
 /// completed-v1 queue. Every child transaction retains its own guard-before-commit boundary.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_handler_active_null_region(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -17790,7 +17349,10 @@ fn emit_scheduler_handler_active_null_region(
 
 /// WorkerTask's null packet is a pure bridge to `scheduler.suspendCurrent()`. The Active frame
 /// already contains scalar sentinels, so success only commits the shared numeric state tail.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_worker_active_null_region(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -17845,7 +17407,10 @@ fn emit_scheduler_worker_active_null_region(
 /// one old WORK packet in Handler.v1, or at most two old DEVICE packets in Handler.v2. Every
 /// observable guard precedes commit; failure restores the Active queue-commit register snapshot
 /// so the existing Rust materializer can replay TaskControlBlock.run and HandlerTask.run.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_handler_active_incoming_suspend_region(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -18393,7 +17958,10 @@ fn emit_scheduler_handler_active_incoming_suspend_region(
 /// from the live call/profile graph: no Richards name or object identity is baked into the code.
 /// A declined guard falls into Active's ordinary packet materialization, so accessors, coercions,
 /// uncommon aliases, method replacements, and partial throws retain exact source behavior.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_worker_active_packet_region(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -18574,13 +18142,7 @@ fn emit_scheduler_worker_active_packet_region(
     for (index, spill) in [(0u32, 128i32), (1, 136), (2, 144), (3, 152)] {
         a.movz(6, index, 0);
         emit_scheduler_packed_entry(a, layout, 8, 6, 15, fail);
-        guard_prop_writable(
-            a,
-            9,
-            15,
-            layout.property_meta as u32,
-            fail,
-        );
+        guard_prop_writable(a, 9, 15, layout.property_meta as u32, fail);
         emit_region_packed_number(a, 15, pv, 0, fail);
         a.stur(15, 31, spill);
     }
@@ -18853,7 +18415,10 @@ fn emit_scheduler_worker_active_packet_region(
 /// Execute IdleTask's hot release arm directly from SchedulerActive. The active TCB is saved on
 /// the native stack while x0 becomes the Idle receiver; success publishes the returned target to
 /// the pinned outer Scheduler.current entry and resumes the scheduler without a JIT call/return.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_idle_active_null_region(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -19063,7 +18628,10 @@ fn emit_scheduler_idle_active_null_region(
 /// Lower pcs 30..58 of the Richards-style scheduler transaction. Every check precedes the first
 /// write; failure replays at pc30. Success owns the exact TCB/packet locals and resumes at the
 /// polymorphic task dispatch with an empty operand stack.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_active_region(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -19144,13 +18712,7 @@ fn emit_scheduler_active_region(
     if trust_names {
         a.mov_imm64(5, plan.suspended_runnable as u64);
     } else {
-        emit_region_name_i32(
-            a,
-            layout,
-            plan.suspended_runnable_cache,
-            5,
-            fail,
-        );
+        emit_region_name_i32(a, layout, plan.suspended_runnable_cache, 5, fail);
     }
     a.cmp_reg_w(28, 5);
     a.b_cond(C_NE, no_packet);
@@ -19167,13 +18729,7 @@ fn emit_scheduler_active_region(
         emit_region_name_i32(a, layout, plan.running_cache, 6, fail);
         emit_region_name_i32(a, layout, plan.runnable_cache, 7, fail);
     }
-    guard_prop_writable(
-        a,
-        9,
-        state_entry,
-        layout.entry_writable as u32,
-        fail,
-    );
+    guard_prop_writable(a, 9, state_entry, layout.entry_writable as u32, fail);
     if trace {
         a.movz(26, 6, 0);
     }
@@ -19225,8 +18781,8 @@ fn emit_scheduler_active_region(
     a.mov(11, 6); // STATE_RUNNING
 
     a.bind(queue_commit);
-    let packet_role_dispatch = graph_epoch
-        && std::env::var_os("LUMEN_JIT_NO_SCHED_ACTIVE_PACKET_ROLE_DISPATCH").is_none();
+    let packet_role_dispatch =
+        graph_epoch && std::env::var_os("LUMEN_JIT_NO_SCHED_ACTIVE_PACKET_ROLE_DISPATCH").is_none();
     if packet_role_dispatch {
         let worker_role = a.new_label();
         let handler_role = a.new_label();
@@ -19263,13 +18819,9 @@ fn emit_scheduler_active_region(
         a.b(generic_packet);
 
         a.bind(handler_role);
-        if let Some(dispatch) = plan
-            .null_dispatch
-            .as_ref()
-            .filter(|dispatch| {
-                dispatch.handler_incoming_suspend || dispatch.handler_incoming_work_delivery
-            })
-        {
+        if let Some(dispatch) = plan.null_dispatch.as_ref().filter(|dispatch| {
+            dispatch.handler_incoming_suspend || dispatch.handler_incoming_work_delivery
+        }) {
             let handler_fail = emit_scheduler_handler_active_incoming_suspend_region(
                 a,
                 layout,
@@ -19317,13 +18869,9 @@ fn emit_scheduler_active_region(
             );
             a.bind(worker_fail);
         }
-        if let Some(dispatch) = plan
-            .null_dispatch
-            .as_ref()
-            .filter(|dispatch| {
-                dispatch.handler_incoming_suspend || dispatch.handler_incoming_work_delivery
-            })
-        {
+        if let Some(dispatch) = plan.null_dispatch.as_ref().filter(|dispatch| {
+            dispatch.handler_incoming_suspend || dispatch.handler_incoming_work_delivery
+        }) {
             let handler_fail = emit_scheduler_handler_active_incoming_suspend_region(
                 a,
                 layout,
@@ -19574,12 +19122,7 @@ fn emit_scheduler_active_region(
     } else if inline_null_materialize {
         let slow_materialize = a.new_label();
         let materialized = a.new_label();
-        emit_scheduler_active_materialize_null_inline(
-            a,
-            layout,
-            plan,
-            slow_materialize,
-        );
+        emit_scheduler_active_materialize_null_inline(a, layout, plan, slow_materialize);
         a.b(materialized);
 
         // BigInt, a last shared reference, or two stale locals whose common allocation lacks a
@@ -19630,7 +19173,10 @@ fn emit_scheduler_active_region(
 ///
 /// On the inline path x25/x27 hold the old reference payloads (zero for scalar locals). The
 /// surrounding active-region spill owns both registers, and x0 remains the borrowed current TCB.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_active_materialize_null_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -19654,7 +19200,10 @@ fn emit_scheduler_active_materialize_null_inline(
 /// Load the two stale wide-local owners into `old_tcb`/`old_packet` (zero represents a scalar)
 /// and prove that replacing them can use bare shared-count decrements. This is deliberately
 /// conservative: the rare BigInt/last-owner cases use the Rust materializer.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_active_guard_old_locals(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -19723,7 +19272,10 @@ fn emit_scheduler_active_guard_old_locals(
     a.bind(counts_ready);
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_active_drop_old_locals(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -19750,7 +19302,10 @@ fn emit_scheduler_active_drop_old_locals(
 /// scheduler's writable `current` entry, x5/x6 the live held/suspended globals, and x8 the pinned
 /// expected TCB prototype. Every successful held step commits the scheduler property (including
 /// exact Rc transfer) before the backedge, so any later guard can safely replay from `head`.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_scheduler_shell_region(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -19779,8 +19334,8 @@ fn emit_scheduler_shell_region(
     // descriptor and stored an integral packed number. Until x28 is cleared no user code can
     // alter that descriptor/value contract, so resumptions can load the fixed state slot
     // directly instead of repeating the object/shape/attribute/type guard chain.
-    let trust_state = fast_resume.is_some()
-        && std::env::var_os("LUMEN_JIT_NO_SCHED_TRUST_STATE").is_none();
+    let trust_state =
+        fast_resume.is_some() && std::env::var_os("LUMEN_JIT_NO_SCHED_TRUST_STATE").is_none();
     // The bounded session contains no user code. Pin TaskControlBlock.run on the already-proved
     // common TCB prototype once, and lazily pin each task-role prototype in native-frame scratch.
     let role_epoch = fast_resume.is_some() && scheduler_role_epoch_enabled(plan);
@@ -19790,8 +19345,7 @@ fn emit_scheduler_shell_region(
     // A graph epoch eagerly validates all six exact TCB/task identities and selected own-entry
     // pointers before publishing x28. Every resume remaps the live Scheduler.current through the
     // table before one cached pointer is dereferenced.
-    let graph_epoch =
-        fast_resume.is_some() && scheduler_graph_epoch_enabled(plan, layout);
+    let graph_epoch = fast_resume.is_some() && scheduler_graph_epoch_enabled(plan, layout);
     // A soft graph extension proves all six role-local Scheduler edges. Runtime rejection leaves
     // the graph session intact and is tested through the header flag by the cached suspend tail.
     let graph_core = graph_epoch && scheduler_graph_core_enabled(plan);
@@ -20134,7 +19688,10 @@ fn emit_scheduler_shell_region(
     (plain_h, fast_resume)
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_region_name_i32(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -20157,7 +19714,10 @@ fn emit_region_name_i32(
     emit_region_exact_i32(a, 0, out, fail);
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_numeric_diamond_flush(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -20172,7 +19732,10 @@ fn emit_numeric_diamond_flush(
     a.stur(9, 2, layout.entry_value as i32);
 }
 
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_linked_scan_materialize(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -20213,7 +19776,10 @@ fn emit_linked_scan_materialize(
 
 /// Linked-list SSA region.  The initial `next` frame owner roots the complete property chain, so
 /// x0 can walk borrowed packed object pointers without a clone/drop pair at every node.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_linked_scan_region(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -20295,7 +19861,10 @@ fn emit_linked_scan_region(
 /// Emit the first non-linear region tier.  x0=index, x1=limit, x2=counter entry, x3=array body,
 /// x4=mirror data, x5=mirror length, x6=index→entry map, x7=entry data, x8=counter.  The region
 /// is helper-free; frame/property owners remain GC roots for all borrowed pointers.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_numeric_diamond_region(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -20390,21 +19959,9 @@ fn emit_numeric_diamond_region(
     let dense_off = (layout.obj_props + layout.props_elems) as u32;
     a.ldr_imm(12, 3, dense_off);
     a.cbz(12, true, plain_h);
-    a.ldr_imm(
-        4,
-        12,
-        (layout.dense_mirror + layout.vec_ptr_off) as u32,
-    );
-    a.ldr_imm(
-        5,
-        12,
-        (layout.dense_mirror + layout.vec_len_off) as u32,
-    );
-    a.ldr_imm(
-        6,
-        12,
-        (layout.dense_elems + layout.vec_ptr_off) as u32,
-    );
+    a.ldr_imm(4, 12, (layout.dense_mirror + layout.vec_ptr_off) as u32);
+    a.ldr_imm(5, 12, (layout.dense_mirror + layout.vec_len_off) as u32);
+    a.ldr_imm(6, 12, (layout.dense_elems + layout.vec_ptr_off) as u32);
     a.ldr_imm(
         7,
         3,
@@ -20475,7 +20032,10 @@ fn emit_numeric_diamond_region(
 
 /// Emit the loop chain for `plan`. Returns the label for the plain fallback of the head op —
 /// the caller binds it immediately after and continues emitting the plain region.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_loop_chain(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -21609,14 +21169,20 @@ fn emit_loop_chain(
 /// The generic per-op helper call: `jit_exec(ctx, pc, sp)` → (new sp, threw?). The sp is taken
 /// unconditionally — it reflects consumed operands even when the op threw, which is what keeps
 /// the unwinder's cleanup from re-dropping moved-out slots.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_exec(a: &mut asm::Asm, pc: u32, l_unwind: usize) {
     emit_op_helper(a, H_EXEC, pc, l_unwind);
 }
 
 /// [`emit_exec`] through a DEDICATED helper slot (same `(ctx, pc, sp) → SpFlag` contract):
 /// hot op families skip the generic decode.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_op_helper(a: &mut asm::Asm, idx: usize, pc: u32, l_unwind: usize) {
     a.mov(0, 19);
     a.movz(1, pc, 0);
@@ -21628,7 +21194,10 @@ fn emit_op_helper(a: &mut asm::Asm, idx: usize, pc: u32, l_unwind: usize) {
 }
 
 /// An infallible helper (returns the new sp): return/handler bookkeeping.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_helper(a: &mut asm::Asm, idx: usize, imm: u32) {
     a.mov(0, 19);
     a.movz(1, imm, 0);
@@ -21639,7 +21208,10 @@ fn emit_helper(a: &mut asm::Asm, idx: usize, imm: u32) {
 }
 
 /// Condition helper: leaves the flag in w1, new sp in x0 (null = threw during ToBoolean).
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_cond(a: &mut asm::Asm, mode: u32, l_unwind: usize) {
     a.mov(0, 19);
     a.movz(1, mode, 0);
@@ -21653,7 +21225,10 @@ fn emit_cond(a: &mut asm::Asm, mode: u32, l_unwind: usize) {
 /// Non-owning conditional check for the short-circuit peek ops. ToBoolean cannot throw and the
 /// value stays on the operand stack, so common tags need neither refcount traffic nor a helper
 /// transition. BigInt and a possible HTMLDDA object retain the canonical helper path.
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn emit_peek_cond_inline(
     a: &mut asm::Asm,
     layout: &crate::value::JitLayout,
@@ -21745,8 +21320,14 @@ fn emit_peek_cond_inline(
 /// every such call through the layered path. Falls back to null (never needed) or the original
 /// panicking borrow (needed, but the global is mutably borrowed — same failure as before).
 #[cfg(any(
-    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")),
-    all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux", target_os = "windows"))
+    all(
+        target_arch = "aarch64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    ),
+    all(
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    )
 ))]
 fn jit_global_body(i: &Interp, code: &JitCode) -> *const u8 {
     if let Ok(b) = i.global.try_borrow() {
@@ -21762,8 +21343,14 @@ fn jit_global_body(i: &Interp, code: &JitCode) -> *const u8 {
 /// Execute a JIT-compiled chunk: mirrors `bytecode::run` (activation env, pooled slot buffer),
 /// with the operand stack in a pooled flat buffer sized by the static analysis.
 #[cfg(any(
-    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")),
-    all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux", target_os = "windows"))
+    all(
+        target_arch = "aarch64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    ),
+    all(
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    )
 ))]
 pub fn run(
     i: &mut Interp,
@@ -21820,7 +21407,7 @@ pub fn run(
     let ok = entry(&mut ctx);
     unsafe { ctx.unpack_slots() };
     drop(env); // the env handle must outlive the run (ctx.env_ref aliases it)
-    // Drop any operands left on the raw stack (a throw can leave temporaries).
+               // Drop any operands left on the raw stack (a throw can leave temporaries).
     unsafe {
         let mut p = ctx.stack_base;
         while p < ctx.final_sp {
@@ -21858,8 +21445,14 @@ pub(crate) const FRAME_BUF: usize = 256;
 /// `args..args+argc` must be initialized `Value`s the caller relinquishes entirely; `*env` must
 /// outlive the run.
 #[cfg(any(
-    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")),
-    all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux", target_os = "windows"))
+    all(
+        target_arch = "aarch64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    ),
+    all(
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    )
 ))]
 pub(crate) unsafe fn run_moved(
     i: &mut Interp,
@@ -21887,8 +21480,14 @@ pub(crate) unsafe fn run_moved(
 /// Same moved-argument and environment lifetime contract as [`run_moved`]. `caller` must be the
 /// live context whose machine code invoked the constructor helper.
 #[cfg(any(
-    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")),
-    all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux", target_os = "windows"))
+    all(
+        target_arch = "aarch64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    ),
+    all(
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    )
 ))]
 pub(crate) unsafe fn run_moved_shared(
     i: &mut Interp,
@@ -22053,8 +21652,14 @@ pub(crate) unsafe fn run_moved_shared(
 /// move into the fixed frame buffer, avoiding the second full clone and both growable `Vec`s used
 /// by [`run`]. An `arguments` exotic is materialized before the move and installed into its slot.
 #[cfg(any(
-    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")),
-    all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux", target_os = "windows"))
+    all(
+        target_arch = "aarch64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    ),
+    all(
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    )
 ))]
 pub(crate) unsafe fn run_moved_env(
     i: &mut Interp,
@@ -22090,8 +21695,14 @@ pub(crate) unsafe fn run_moved_env(
 }
 
 #[cfg(any(
-    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")),
-    all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux", target_os = "windows"))
+    all(
+        target_arch = "aarch64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    ),
+    all(
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    )
 ))]
 unsafe fn run_moved_inner(
     i: &mut Interp,
@@ -22248,8 +21859,14 @@ unsafe fn run_moved_inner(
 }
 
 #[cfg(not(any(
-    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")),
-    all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux", target_os = "windows"))
+    all(
+        target_arch = "aarch64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    ),
+    all(
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    )
 )))]
 pub fn run(
     _i: &mut Interp,
@@ -22264,8 +21881,14 @@ pub fn run(
 
 /// See the aarch64-macos definition; without machine code the fast call never commits.
 #[cfg(not(any(
-    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")),
-    all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux", target_os = "windows"))
+    all(
+        target_arch = "aarch64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    ),
+    all(
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    )
 )))]
 pub(crate) unsafe fn run_moved(
     _i: &mut Interp,
@@ -22282,8 +21905,14 @@ pub(crate) unsafe fn run_moved(
 
 /// See the native-code definition; without machine code the fast constructor never commits.
 #[cfg(not(any(
-    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")),
-    all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux", target_os = "windows"))
+    all(
+        target_arch = "aarch64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    ),
+    all(
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    )
 )))]
 pub(crate) unsafe fn run_moved_shared(
     _i: &mut Interp,
@@ -22301,8 +21930,14 @@ pub(crate) unsafe fn run_moved_shared(
 
 /// See the aarch64-macos definition; without machine code the fast call never commits.
 #[cfg(not(any(
-    all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")),
-    all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux", target_os = "windows"))
+    all(
+        target_arch = "aarch64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    ),
+    all(
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    )
 )))]
 pub(crate) unsafe fn run_moved_env(
     _i: &mut Interp,

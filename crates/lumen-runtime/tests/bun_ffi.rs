@@ -35,9 +35,18 @@ impl Captured {
 
 /// Locate a C compiler, honoring `$CC`. Returns `None` when none is usable (suite then skips).
 fn c_compiler() -> Option<String> {
-    let candidates = [std::env::var("CC").ok(), Some("cc".into()), Some("clang".into())];
+    let candidates = [
+        std::env::var("CC").ok(),
+        Some("cc".into()),
+        Some("clang".into()),
+    ];
     for c in candidates.into_iter().flatten() {
-        if Command::new(&c).arg("--version").output().map(|o| o.status.success()).unwrap_or(false) {
+        if Command::new(&c)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
             return Some(c);
         }
     }
@@ -105,7 +114,11 @@ fn run(src: &str) -> String {
 
 #[test]
 fn ffi_libc_calls_and_marshalling() {
-    let libc = if cfg!(target_os = "macos") { "libSystem.B.dylib" } else { "libc.so.6" };
+    let libc = if cfg!(target_os = "macos") {
+        "libSystem.B.dylib"
+    } else {
+        "libc.so.6"
+    };
     let out = run(&format!(
         r#"
         const {{ dlopen, FFIType: F, ptr, CString, read, toArrayBuffer }} = require("bun:ffi");
@@ -140,9 +153,15 @@ fn ffi_libc_calls_and_marshalling() {
     assert!(lines.contains(&"strlen 5 bigint"), "got: {out}");
     assert!(lines.contains(&"strlenTA 5"), "got: {out}");
     assert!(lines.contains(&"atoi 42"), "got: {out}");
-    assert!(lines.contains(&"cstring hi there 8 undefined true"), "got: {out}");
+    assert!(
+        lines.contains(&"cstring hi there 8 undefined true"),
+        "got: {out}"
+    );
     assert!(lines.contains(&"cstring2 hi"), "got: {out}");
-    assert!(lines.contains(&"toAB 104,105,32,116,104,101,114,101"), "got: {out}");
+    assert!(
+        lines.contains(&"toAB 104,105,32,116,104,101,114,101"),
+        "got: {out}"
+    );
     assert!(lines.contains(&"read.u8 104 read.i8 105"), "got: {out}");
     assert!(lines.contains(&"getenvMiss \"\""), "got: {out}");
     assert!(lines.contains(&"strstrMiss null"), "got: {out}");
@@ -195,7 +214,10 @@ fn ffi_fixture_abi_shapes_and_callback() {
     assert!(lines.contains(&"sum8i 36 bigint"), "got: {out}");
     assert!(lines.contains(&"sum8mix 36"), "got: {out}");
     assert!(lines.contains(&"add_via_ptr 123"), "got: {out}");
-    assert!(lines.contains(&"ret_u8 250 ret_i8 -7 ret_u64 18446744073709551615"), "got: {out}");
+    assert!(
+        lines.contains(&"ret_u8 250 ret_i8 -7 ret_u64 18446744073709551615"),
+        "got: {out}"
+    );
     assert!(lines.contains(&"apply_sum 30"), "got: {out}");
 }
 
@@ -228,8 +250,7 @@ fn ffi_cc_compiles_and_links_c_at_runtime() {
 
 #[test]
 fn ffi_honest_throws() {
-    let out = run(
-        r#"
+    let out = run(r#"
         const { dlopen, FFIType: F, JSCallback, viewSource } = require("bun:ffi");
         const libc = process.platform === "darwin" ? "libSystem.B.dylib" : "libc.so.6";
         const lib = dlopen(libc, { strlen: { args: [F.ptr], returns: F.u64 } });
@@ -239,11 +260,13 @@ fn ffi_honest_throws() {
         // float-typed JSCallback is unsupported
         check("floatCb", () => new JSCallback(() => 0, { args: [F.f64], returns: F.i32 }));
         check("viewSource", () => viewSource());
-        "#,
-    );
+        "#);
     assert!(
         out.contains("To convert a string to a pointer, encode it as a buffer"),
         "got: {out}"
     );
-    assert!(out.contains("floatCb") && out.contains("floating-point"), "got: {out}");
+    assert!(
+        out.contains("floatCb") && out.contains("floating-point"),
+        "got: {out}"
+    );
 }

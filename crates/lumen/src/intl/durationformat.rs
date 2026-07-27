@@ -9,7 +9,7 @@ use super::{
     ab, arg, canonicalize_locale_list, get_options_object as coerce_options, make_service,
 };
 use crate::interpreter::Interp;
-use crate::value::{Gc, Value, set_builtin, set_data};
+use crate::value::{set_builtin, set_data, Gc, Value};
 
 /// (plural, singular, index): years..nanoseconds.
 const UNITS: &[(&str, &str)] = &[
@@ -251,7 +251,11 @@ fn parse_iso_duration(s: &str) -> Option<[f64; 10]> {
             }
         }
         // A trailing number with no designator is invalid.
-        if buf.is_empty() { Some(()) } else { None }
+        if buf.is_empty() {
+            Some(())
+        } else {
+            None
+        }
     };
     consume(
         date_part,

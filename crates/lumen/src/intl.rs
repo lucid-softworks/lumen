@@ -4,7 +4,7 @@
 //! option coercion, locale negotiation — is complete; the per-locale data is a deliberate subset.
 
 use crate::interpreter::Interp;
-use crate::value::{Gc, Object, Property, Value, set_builtin};
+use crate::value::{set_builtin, Gc, Object, Property, Value};
 use std::rc::Rc;
 
 mod collator;

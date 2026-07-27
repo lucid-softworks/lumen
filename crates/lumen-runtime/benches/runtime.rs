@@ -135,12 +135,12 @@ fn main() {
     // WebSocket echo round trips: a long-lived echo server, one socket (connect→20 echoes→close)
     // per iteration through a fresh-per-iteration eval on a persistent runtime.
     {
-        let port = lumen_web::ws_testing::spawn_echo(
-            lumen_web::ws_testing::Mode::Echo,
-            1_000_000,
+        let port = lumen_web::ws_testing::spawn_echo(lumen_web::ws_testing::Mode::Echo, 1_000_000);
+        let src: &'static str = Box::leak(
+            WS_ECHO_ROUND_TRIPS
+                .replace("{PORT}", &port.to_string())
+                .into_boxed_str(),
         );
-        let src: &'static str =
-            Box::leak(WS_ECHO_ROUND_TRIPS.replace("{PORT}", &port.to_string()).into_boxed_str());
         let mut rt = Runtime::new();
         b.run("websocket: connect + 20 echo round trips + close", || {
             black_box(rt.eval(src).expect("ws bench parses"));
@@ -163,9 +163,12 @@ fn main() {
                 .into_boxed_str(),
         );
         let mut rt = Runtime::new();
-        b.run("eventsource: connect + parse 3-event stream + close", || {
-            black_box(rt.eval(src).expect("sse bench parses"));
-        });
+        b.run(
+            "eventsource: connect + parse 3-event stream + close",
+            || {
+                black_box(rt.eval(src).expect("sse bench parses"));
+            },
+        );
     }
 
     let mut rt = Runtime::new();
@@ -174,11 +177,31 @@ fn main() {
             black_box(rt.eval(src).expect("bench source parses"));
         });
     };
-    bench_js(&mut b, "messaging: MessageChannel 100 round trips", MESSAGE_CHANNEL_ROUND_TRIP);
-    bench_js(&mut b, "messaging: BroadcastChannel 50 msgs x 4 receivers", BROADCAST_FANOUT);
-    bench_js(&mut b, "messaging: postMessage 50 structured payloads", STRUCTURED_PAYLOAD);
-    bench_js(&mut b, "error reporting: 200 suppressed reportError", REPORT_ERROR_SUPPRESSED);
-    bench_js(&mut b, "abort: 100 AbortSignal.any composites", ABORT_SIGNAL_ANY);
+    bench_js(
+        &mut b,
+        "messaging: MessageChannel 100 round trips",
+        MESSAGE_CHANNEL_ROUND_TRIP,
+    );
+    bench_js(
+        &mut b,
+        "messaging: BroadcastChannel 50 msgs x 4 receivers",
+        BROADCAST_FANOUT,
+    );
+    bench_js(
+        &mut b,
+        "messaging: postMessage 50 structured payloads",
+        STRUCTURED_PAYLOAD,
+    );
+    bench_js(
+        &mut b,
+        "error reporting: 200 suppressed reportError",
+        REPORT_ERROR_SUPPRESSED,
+    );
+    bench_js(
+        &mut b,
+        "abort: 100 AbortSignal.any composites",
+        ABORT_SIGNAL_ANY,
+    );
 
     b.report();
 }

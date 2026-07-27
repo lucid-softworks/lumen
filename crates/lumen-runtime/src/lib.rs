@@ -250,7 +250,12 @@ impl Runtime {
     /// running the loop — the caller arms the message inbox first, then pumps the loop itself so
     /// the worker stays alive for messages. `base` seeds relative-import resolution. `Err` is the
     /// rendered load/parse/top-level error.
-    pub fn eval_worker_entry(&mut self, source: &str, base: &str, is_module: bool) -> Result<(), String> {
+    pub fn eval_worker_entry(
+        &mut self,
+        source: &str,
+        base: &str,
+        is_module: bool,
+    ) -> Result<(), String> {
         let loader = esm::make_loader(self.builtin_modules());
         self.engine.set_module_loader_attrs(loader);
         self.engine.set_import_base(base);
@@ -264,9 +269,11 @@ impl Runtime {
         self.engine.run_microtasks();
         match result {
             Ok(Completion::Value(_)) => Ok(()),
-            Ok(Completion::Throw { name, message }) => {
-                Err(if name.is_empty() { message } else { format!("{name}: {message}") })
-            }
+            Ok(Completion::Throw { name, message }) => Err(if name.is_empty() {
+                message
+            } else {
+                format!("{name}: {message}")
+            }),
             Err(e) => Err(format!("SyntaxError: {} (line {})", e.message, e.line)),
         }
     }
@@ -439,7 +446,9 @@ impl Runtime {
         let timers_pending = state
             .get::<lumen_timers::Timers>()
             .is_some_and(|t| t.has_pending());
-        let tasks_pending = state.get::<TaskRegistry>().is_some_and(|r| r.has_ref_pending());
+        let tasks_pending = state
+            .get::<TaskRegistry>()
+            .is_some_and(|r| r.has_ref_pending());
         !callbacks_queued && !timers_pending && !tasks_pending
     }
 

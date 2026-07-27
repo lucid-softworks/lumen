@@ -7,8 +7,13 @@ use lumen_runtime::{Completion, ConsoleOut, Runtime};
 #[derive(Clone, Default)]
 struct Captured(Rc<RefCell<Vec<u8>>>);
 impl Write for Captured {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> { self.0.borrow_mut().extend_from_slice(bytes); Ok(bytes.len()) }
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]
@@ -16,7 +21,8 @@ fn sql_sqlite_adapter_binds_templates_helpers_and_transactions() {
     let mut runtime = Runtime::new();
     let out = Captured::default();
     runtime.engine().ctx().op_state().put(ConsoleOut {
-        out: Box::new(out.clone()), err: Box::new(Captured::default()),
+        out: Box::new(out.clone()),
+        err: Box::new(Captured::default()),
     });
     let source = r#"
       (async () => {
@@ -51,7 +57,10 @@ fn sql_sqlite_adapter_binds_templates_helpers_and_transactions() {
         Completion::Throw { name, message } => panic!("uncaught {name}: {message}"),
     }
     assert_eq!(
-        String::from_utf8(out.0.borrow().clone()).unwrap().lines().collect::<Vec<_>>(),
+        String::from_utf8(out.0.borrow().clone())
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
         [
             "shape true function sqlite function postgres",
             "insert 1 1",

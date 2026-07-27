@@ -7,8 +7,13 @@ use lumen_runtime::{Completion, ConsoleOut, Runtime};
 #[derive(Clone, Default)]
 struct Captured(Rc<RefCell<Vec<u8>>>);
 impl Write for Captured {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> { self.0.borrow_mut().extend_from_slice(bytes); Ok(bytes.len()) }
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]
@@ -16,7 +21,8 @@ fn s3_presign_matches_sigv4_vector_and_validates_credentials() {
     let mut runtime = Runtime::new();
     let out = Captured::default();
     runtime.engine().ctx().op_state().put(ConsoleOut {
-        out: Box::new(out.clone()), err: Box::new(Captured::default()),
+        out: Box::new(out.clone()),
+        err: Box::new(Captured::default()),
     });
     let source = r#"
         const client = new Bun.S3Client({
@@ -38,7 +44,10 @@ fn s3_presign_matches_sigv4_vector_and_validates_credentials() {
         Completion::Throw { name, message } => panic!("uncaught {name}: {message}"),
     }
     assert_eq!(
-        String::from_utf8(out.0.borrow().clone()).unwrap().lines().collect::<Vec<_>>(),
+        String::from_utf8(out.0.borrow().clone())
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
         [
             "path /examplebucket/test.txt",
             "credential AKIDEXAMPLE/20130524/us-east-1/s3/aws4_request",
@@ -54,7 +63,8 @@ fn s3_client_executes_signed_object_lifecycle() {
     let mut runtime = Runtime::new();
     let out = Captured::default();
     runtime.engine().ctx().op_state().put(ConsoleOut {
-        out: Box::new(out.clone()), err: Box::new(Captured::default()),
+        out: Box::new(out.clone()),
+        err: Box::new(Captured::default()),
     });
     let source = r#"
         const objects = new Map();
@@ -92,7 +102,17 @@ fn s3_client_executes_signed_object_lifecycle() {
         Completion::Throw { name, message } => panic!("uncaught {name}: {message}"),
     }
     assert_eq!(
-        String::from_utf8(out.0.borrow().clone()).unwrap().lines().collect::<Vec<_>>(),
-        ["write 5 true", "exists true", "stat 5 \"etag\" text/plain", "list bucket true next folder/a&b.txt Owner folder/sub/", "read hello", "deleted false true"]
+        String::from_utf8(out.0.borrow().clone())
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        [
+            "write 5 true",
+            "exists true",
+            "stat 5 \"etag\" text/plain",
+            "list bucket true next folder/a&b.txt Owner folder/sub/",
+            "read hello",
+            "deleted false true"
+        ]
     );
 }

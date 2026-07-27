@@ -18,7 +18,9 @@ const XXH_P4: u64 = 0x85EB_CA77_C2B2_AE63;
 const XXH_P5: u64 = 0x27D4_EB2F_1656_67C5;
 
 fn xxh_round(acc: u64, lane: u64) -> u64 {
-    acc.wrapping_add(lane.wrapping_mul(XXH_P2)).rotate_left(31).wrapping_mul(XXH_P1)
+    acc.wrapping_add(lane.wrapping_mul(XXH_P2))
+        .rotate_left(31)
+        .wrapping_mul(XXH_P1)
 }
 
 pub fn xxh64(data: &[u8], seed: u64) -> u64 {
@@ -45,7 +47,9 @@ pub fn xxh64(data: &[u8], seed: u64) -> u64 {
             .wrapping_add(v[2].rotate_left(12))
             .wrapping_add(v[3].rotate_left(18));
         for vi in v {
-            acc = (acc ^ xxh_round(0, vi)).wrapping_mul(XXH_P1).wrapping_add(XXH_P4);
+            acc = (acc ^ xxh_round(0, vi))
+                .wrapping_mul(XXH_P1)
+                .wrapping_add(XXH_P4);
         }
     } else {
         acc = seed.wrapping_add(XXH_P5);
@@ -53,12 +57,18 @@ pub fn xxh64(data: &[u8], seed: u64) -> u64 {
     acc = acc.wrapping_add(data.len() as u64);
     while pos + 8 <= data.len() {
         acc ^= xxh_round(0, le64(&data[pos..]));
-        acc = acc.rotate_left(27).wrapping_mul(XXH_P1).wrapping_add(XXH_P4);
+        acc = acc
+            .rotate_left(27)
+            .wrapping_mul(XXH_P1)
+            .wrapping_add(XXH_P4);
         pos += 8;
     }
     if pos + 4 <= data.len() {
         acc ^= (le32(&data[pos..]) as u64).wrapping_mul(XXH_P1);
-        acc = acc.rotate_left(23).wrapping_mul(XXH_P2).wrapping_add(XXH_P3);
+        acc = acc
+            .rotate_left(23)
+            .wrapping_mul(XXH_P2)
+            .wrapping_add(XXH_P3);
         pos += 4;
     }
     for &b in &data[pos..] {
@@ -173,10 +183,20 @@ struct FseTable {
 impl FseTable {
     /// Single-symbol table for RLE mode: accuracy log 0, every decode yields `symbol`.
     fn rle(symbol: u8) -> FseTable {
-        FseTable { log: 0, cells: vec![FseCell { symbol, nbits: 0, base: 0 }] }
+        FseTable {
+            log: 0,
+            cells: vec![FseCell {
+                symbol,
+                nbits: 0,
+                base: 0,
+            }],
+        }
     }
     fn cell(&self, state: usize) -> Result<FseCell, String> {
-        self.cells.get(state).copied().ok_or_else(|| "zstd: FSE state out of range".to_string())
+        self.cells
+            .get(state)
+            .copied()
+            .ok_or_else(|| "zstd: FSE state out of range".to_string())
     }
 }
 
@@ -246,7 +266,10 @@ fn fse_read_distribution(
 /// Build a decoding table from normalized probabilities (RFC 8878 §4.1.1.2).
 fn fse_build(probs: &[i32], log: u32) -> Result<FseTable, String> {
     let size = 1usize << log;
-    let total: i64 = probs.iter().map(|&p| if p == -1 { 1 } else { i64::from(p.max(0)) }).sum();
+    let total: i64 = probs
+        .iter()
+        .map(|&p| if p == -1 { 1 } else { i64::from(p.max(0)) })
+        .sum();
     if total != size as i64 {
         return Err("zstd: FSE probabilities do not sum to table size".into());
     }
@@ -277,14 +300,21 @@ fn fse_build(probs: &[i32], log: u32) -> Result<FseTable, String> {
     if pos != 0 {
         return Err("zstd: corrupted FSE table spread".into());
     }
-    let mut next: Vec<u32> = probs.iter().map(|&p| if p < 0 { 1 } else { p as u32 }).collect();
+    let mut next: Vec<u32> = probs
+        .iter()
+        .map(|&p| if p < 0 { 1 } else { p as u32 })
+        .collect();
     let mut cells = Vec::with_capacity(size);
     for &sym in &symbols {
         let x = next[sym as usize];
         next[sym as usize] += 1;
         let nbits = log - (31 - x.leading_zeros());
         let base = ((x as usize) << nbits) - size;
-        cells.push(FseCell { symbol: sym, nbits: nbits as u8, base: base as u16 });
+        cells.push(FseCell {
+            symbol: sym,
+            nbits: nbits as u8,
+            base: base as u16,
+        });
     }
     Ok(FseTable { log, cells })
 }
@@ -412,7 +442,10 @@ fn huf_from_weights(weights: &[u8]) -> Result<HufTable, String> {
     if pos != size {
         return Err("zstd: corrupted Huffman weights".into());
     }
-    Ok(HufTable { log: max_bits, cells })
+    Ok(HufTable {
+        log: max_bits,
+        cells,
+    })
 }
 
 fn huf_decode_stream(
@@ -442,11 +475,17 @@ fn huf_decode_stream(
 /// Decode the literals section of a compressed block. Returns the literals and the number of
 /// block bytes consumed.
 fn decode_literals(block: &[u8], ctx: &mut FrameCtx) -> Result<(Vec<u8>, usize), String> {
-    let b0 = *block.first().ok_or("zstd: missing literals section header")? as usize;
+    let b0 = *block
+        .first()
+        .ok_or("zstd: missing literals section header")? as usize;
     let lit_type = b0 & 3;
     let size_format = (b0 >> 2) & 3;
     let need = |n: usize| -> Result<(), String> {
-        if n > block.len() { Err("zstd: truncated literals section".into()) } else { Ok(()) }
+        if n > block.len() {
+            Err("zstd: truncated literals section".into())
+        } else {
+            Ok(())
+        }
     };
     if lit_type <= 1 {
         // Raw or RLE literals.
@@ -458,7 +497,10 @@ fn decode_literals(block: &[u8], ctx: &mut FrameCtx) -> Result<(Vec<u8>, usize),
             }
             _ => {
                 need(3)?;
-                ((b0 >> 4) | ((block[1] as usize) << 4) | ((block[2] as usize) << 12), 3)
+                (
+                    (b0 >> 4) | ((block[1] as usize) << 4) | ((block[2] as usize) << 12),
+                    3,
+                )
             }
         };
         if regen > MAX_BLOCK_SIZE {
@@ -495,7 +537,12 @@ fn decode_literals(block: &[u8], ctx: &mut FrameCtx) -> Result<(Vec<u8>, usize),
                 | ((block[2] as u64) << 16)
                 | ((block[3] as u64) << 24)
                 | ((block[4] as u64) << 32);
-            (((v >> 4) & 0x3FFFF) as usize, ((v >> 22) & 0x3FFFF) as usize, true, 5)
+            (
+                ((v >> 4) & 0x3FFFF) as usize,
+                ((v >> 22) & 0x3FFFF) as usize,
+                true,
+                5,
+            )
         }
     };
     if regen > MAX_BLOCK_SIZE {
@@ -509,8 +556,10 @@ fn decode_literals(block: &[u8], ctx: &mut FrameCtx) -> Result<(Vec<u8>, usize),
         ctx.huf = Some(table);
         off = used;
     }
-    let table =
-        ctx.huf.as_ref().ok_or("zstd: treeless literals without a previous Huffman table")?;
+    let table = ctx
+        .huf
+        .as_ref()
+        .ok_or("zstd: treeless literals without a previous Huffman table")?;
     let streams = &section[off..];
     let mut lits = Vec::with_capacity(regen);
     if !four_streams {
@@ -522,11 +571,13 @@ fn decode_literals(block: &[u8], ctx: &mut FrameCtx) -> Result<(Vec<u8>, usize),
         let le16 = |i: usize| streams[i] as usize | ((streams[i + 1] as usize) << 8);
         let (s1, s2, s3) = (le16(0), le16(2), le16(4));
         let rest = streams.len() - 6;
-        let s4 =
-            rest.checked_sub(s1 + s2 + s3).ok_or("zstd: literals jump table exceeds section")?;
+        let s4 = rest
+            .checked_sub(s1 + s2 + s3)
+            .ok_or("zstd: literals jump table exceeds section")?;
         let quarter = regen.div_ceil(4);
-        let last =
-            regen.checked_sub(3 * quarter).ok_or("zstd: corrupted 4-stream literals sizes")?;
+        let last = regen
+            .checked_sub(3 * quarter)
+            .ok_or("zstd: corrupted 4-stream literals sizes")?;
         let body = &streams[6..];
         let bounds = [(0, s1), (s1, s2), (s1 + s2, s3), (s1 + s2 + s3, s4)];
         let counts = [quarter, quarter, quarter, last];
@@ -672,7 +723,11 @@ fn execute_sequences(
             *rep = [o, rep[0], rep[1]];
             o
         } else {
-            let idx = if ll_val == 0 { of_value as usize } else { of_value as usize - 1 };
+            let idx = if ll_val == 0 {
+                of_value as usize
+            } else {
+                of_value as usize - 1
+            };
             match idx {
                 0 => rep[0],
                 1 => {
@@ -750,7 +805,9 @@ fn decode_compressed_block(
     let block_start = out.len();
     let (literals, used) = decode_literals(block, ctx)?;
     let seq = &block[used..];
-    let b0 = *seq.first().ok_or("zstd: missing sequences section header")? as usize;
+    let b0 = *seq
+        .first()
+        .ok_or("zstd: missing sequences section header")? as usize;
     let (nseq, mut pos) = if b0 == 0 {
         (0, 1)
     } else if b0 < 128 {
@@ -774,22 +831,58 @@ fn decode_compressed_block(
         out.extend_from_slice(&literals);
         return Ok(());
     }
-    let modes = *seq.get(pos).ok_or("zstd: missing sequence compression modes")?;
+    let modes = *seq
+        .get(pos)
+        .ok_or("zstd: missing sequence compression modes")?;
     pos += 1;
     if modes & 3 != 0 {
         return Err("zstd: reserved sequence mode bits set".into());
     }
-    let ll =
-        seq_table_for_mode((modes >> 6) & 3, seq, &mut pos, 9, 35, &LL_DEFAULT, 6, &mut ctx.ll)?;
-    let of =
-        seq_table_for_mode((modes >> 4) & 3, seq, &mut pos, 8, 31, &OF_DEFAULT, 5, &mut ctx.of)?;
-    let ml =
-        seq_table_for_mode((modes >> 2) & 3, seq, &mut pos, 9, 52, &ML_DEFAULT, 6, &mut ctx.ml)?;
+    let ll = seq_table_for_mode(
+        (modes >> 6) & 3,
+        seq,
+        &mut pos,
+        9,
+        35,
+        &LL_DEFAULT,
+        6,
+        &mut ctx.ll,
+    )?;
+    let of = seq_table_for_mode(
+        (modes >> 4) & 3,
+        seq,
+        &mut pos,
+        8,
+        31,
+        &OF_DEFAULT,
+        5,
+        &mut ctx.of,
+    )?;
+    let ml = seq_table_for_mode(
+        (modes >> 2) & 3,
+        seq,
+        &mut pos,
+        9,
+        52,
+        &ML_DEFAULT,
+        6,
+        &mut ctx.ml,
+    )?;
     if pos >= seq.len() {
         return Err("zstd: missing sequences bitstream".into());
     }
     let mut rep = ctx.rep;
-    execute_sequences(&seq[pos..], nseq, &ll, &of, &ml, &literals, out, &mut rep, block_start)?;
+    execute_sequences(
+        &seq[pos..],
+        nseq,
+        &ll,
+        &of,
+        &ml,
+        &literals,
+        out,
+        &mut rep,
+        block_start,
+    )?;
     ctx.rep = rep;
     Ok(())
 }
@@ -843,7 +936,13 @@ fn decode_frame(data: &[u8], mut pos: usize, out: &mut Vec<u8>) -> Result<usize,
     } else {
         None
     };
-    let mut ctx = FrameCtx { huf: None, ll: None, of: None, ml: None, rep: [1, 4, 8] };
+    let mut ctx = FrameCtx {
+        huf: None,
+        ll: None,
+        of: None,
+        ml: None,
+        rep: [1, 4, 8],
+    };
     loop {
         if pos + 3 > data.len() {
             return Err("zstd: truncated block header".into());
@@ -990,7 +1089,10 @@ mod tests {
     fn unhex(s: &str) -> Vec<u8> {
         let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(s.len() % 2 == 0);
-        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
 
     fn roundtrip(data: &[u8]) {
@@ -1043,7 +1145,7 @@ mod tests {
         let repetitive: Vec<u8> = (0..5000).map(|i| (i % 7) as u8).collect();
         roundtrip(&repetitive);
         roundtrip(&[0x42; 300_000]); // multi-block RLE
-        // ~256 KB pseudo-random buffer: exercises the multi-block raw path.
+                                     // ~256 KB pseudo-random buffer: exercises the multi-block raw path.
         let mut s = 0x1234_5678u32;
         let big: Vec<u8> = (0..262_144)
             .map(|_| {
@@ -1097,9 +1199,11 @@ mod tests {
         assert!(zstd_decompress(&[]).is_err());
         assert!(zstd_decompress(b"not a zstd frame").is_err());
         assert!(zstd_decompress(&[0x28, 0xb5, 0x2f, 0xfd]).is_err()); // truncated
-        // Dictionary frames are honestly rejected: magic, FHD with a 1-byte dictionary id,
-        // window descriptor, dictionary id 1, then a (never reached) block header.
+                                                                      // Dictionary frames are honestly rejected: magic, FHD with a 1-byte dictionary id,
+                                                                      // window descriptor, dictionary id 1, then a (never reached) block header.
         let dict_frame = [0x28, 0xb5, 0x2f, 0xfd, 0x01, 0x00, 0x01, 0x01, 0x00, 0x00];
-        assert!(zstd_decompress(&dict_frame).unwrap_err().contains("dictionar"));
+        assert!(zstd_decompress(&dict_frame)
+            .unwrap_err()
+            .contains("dictionar"));
     }
 }

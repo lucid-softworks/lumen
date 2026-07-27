@@ -14,7 +14,9 @@ impl Write for Captured {
         self.0.borrow_mut().extend_from_slice(buffer);
         Ok(buffer.len())
     }
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]
@@ -29,9 +31,11 @@ fn ownership_calls_use_real_path_and_descriptor_syscalls() {
     let mut runtime = Runtime::new();
     let out = Captured::default();
     runtime.engine().ctx().op_state().put(ConsoleOut {
-        out: Box::new(out.clone()), err: Box::new(Captured::default()),
+        out: Box::new(out.clone()),
+        err: Box::new(Captured::default()),
     });
-    let source = format!(r#"
+    let source = format!(
+        r#"
         const fs = require("node:fs");
         const owner = fs.statSync({file:?});
         fs.chownSync({file:?}, owner.uid, owner.gid);
@@ -43,13 +47,21 @@ fn ownership_calls_use_real_path_and_descriptor_syscalls() {
         console.log("sync", fs.statSync({file:?}).uid === owner.uid);
         fs.chown({file:?}, owner.uid, owner.gid, error => console.log("callback", !error));
         fs.promises.lchown({link:?}, linkOwner.uid, linkOwner.gid).then(() => console.log("promise", true));
-    "#);
+    "#
+    );
     match runtime.eval(&source).expect("source parses") {
         Completion::Value(_) => {}
-        Completion::Throw { name, message } => panic!("uncaught {name}: {message}; output={:?}", String::from_utf8_lossy(&out.0.borrow())),
+        Completion::Throw { name, message } => panic!(
+            "uncaught {name}: {message}; output={:?}",
+            String::from_utf8_lossy(&out.0.borrow())
+        ),
     }
     let _ = std::fs::remove_dir_all(directory);
-    let lines: Vec<_> = String::from_utf8(out.0.borrow().clone()).unwrap().lines().map(str::to_string).collect();
+    let lines: Vec<_> = String::from_utf8(out.0.borrow().clone())
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
     assert_eq!(lines.first().map(String::as_str), Some("sync true"));
     assert!(lines.contains(&"callback true".to_string()), "{lines:?}");
     assert!(lines.contains(&"promise true".to_string()), "{lines:?}");

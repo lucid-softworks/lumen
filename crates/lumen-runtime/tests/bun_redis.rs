@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::io::{BufRead, BufReader, Write};
-use std::rc::Rc;
 use std::process::{Command, Stdio};
+use std::rc::Rc;
 
 use lumen_runtime::{Completion, ConsoleOut, Runtime};
 
@@ -13,7 +13,9 @@ impl Write for Captured {
         self.0.borrow_mut().extend_from_slice(buf);
         Ok(buf.len())
     }
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl Captured {
@@ -42,8 +44,7 @@ fn run(source: &str) -> Vec<String> {
 
 #[test]
 fn redis_client_pipelines_and_decodes_resp_values() {
-    let lines = run(
-        r#"
+    let lines = run(r#"
         const net = require("node:net");
         let requests = "";
         let replied = false;
@@ -69,8 +70,7 @@ fn redis_client_pipelines_and_decodes_resp_values() {
             redis.onclose = () => { console.log("closed", redis.connected); server.close(); };
             redis.close();
         });
-        "#,
-    );
+        "#);
     assert_eq!(
         lines,
         [
@@ -83,8 +83,7 @@ fn redis_client_pipelines_and_decodes_resp_values() {
 
 #[test]
 fn redis_client_preserves_binary_bulk_strings_and_rejects_errors() {
-    let lines = run(
-        r#"
+    let lines = run(r#"
         const net = require("node:net");
         let count = 0;
         const server = net.createServer(socket => socket.on("data", () => {
@@ -100,18 +99,19 @@ fn redis_client_preserves_binary_bulk_strings_and_rejects_errors() {
             redis.close();
             server.close();
         });
-        "#,
-    );
+        "#);
     assert_eq!(
         lines,
-        ["binary true 3 0 255 65", "error WRONGTYPE WRONGTYPE bad value"]
+        [
+            "binary true 3 0 255 65",
+            "error WRONGTYPE WRONGTYPE bad value"
+        ]
     );
 }
 
 #[test]
 fn redis_convenience_methods_encode_arguments_and_convert_results() {
-    let lines = run(
-        r#"
+    let lines = run(r#"
         const net = require("node:net");
         let input = "";
         const server = net.createServer(socket => socket.on("data", chunk => {
@@ -129,11 +129,13 @@ fn redis_convenience_methods_encode_arguments_and_convert_results() {
             redis.close();
             server.close();
         });
-        "#,
-    );
+        "#);
     assert_eq!(
         lines,
-        ["converted [true,false,{\"a\":\"1\",\"b\":\"2\"}]", "encoded true true true"]
+        [
+            "converted [true,false,{\"a\":\"1\",\"b\":\"2\"}]",
+            "encoded true true true"
+        ]
     );
 }
 
@@ -149,34 +151,55 @@ fn redis_client_connects_over_tls() {
     let certificate = directory.join("cert.pem");
     let key = directory.join("key.pem");
     let generated = Command::new("openssl")
-        .args(["req", "-x509", "-newkey", "rsa:2048", "-sha256", "-days", "1", "-nodes"])
-        .arg("-keyout").arg(&key).arg("-out").arg(&certificate)
-        .args(["-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost"])
-        .output().unwrap();
+        .args([
+            "req", "-x509", "-newkey", "rsa:2048", "-sha256", "-days", "1", "-nodes",
+        ])
+        .arg("-keyout")
+        .arg(&key)
+        .arg("-out")
+        .arg(&certificate)
+        .args([
+            "-subj",
+            "/CN=localhost",
+            "-addext",
+            "subjectAltName=DNS:localhost",
+        ])
+        .output()
+        .unwrap();
     assert!(generated.status.success());
     let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = reservation.local_addr().unwrap().port();
     drop(reservation);
-    let server_source = format!(r#"
+    let server_source = format!(
+        r#"
       const fs = require("node:fs"), tls = require("node:tls");
       const server = tls.createServer({{
         cert: fs.readFileSync({certificate:?}), key: fs.readFileSync({key:?})
       }}, socket => socket.once("data", () => socket.end("+PONG\r\n")));
       server.listen({port}, "127.0.0.1", () => console.log("ready"));
       server.on("secureConnection", socket => socket.on("close", () => server.close()));
-    "#);
-    let mut server = Command::new("node").args(["-e", &server_source])
-        .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    "#
+    );
+    let mut server = Command::new("node")
+        .args(["-e", &server_source])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
     let mut ready = String::new();
-    BufReader::new(server.stdout.take().unwrap()).read_line(&mut ready).unwrap();
+    BufReader::new(server.stdout.take().unwrap())
+        .read_line(&mut ready)
+        .unwrap();
     assert_eq!(ready.trim(), "ready");
-    let lines = run(&format!(r#"
+    let lines = run(&format!(
+        r#"
         (async () => {{
           const redis = new Bun.RedisClient("rediss://localhost:{port}", {{ tls: {{ rejectUnauthorized: false }} }});
           console.log("secure", await redis.ping());
           redis.close();
         }})();
-    "#));
+    "#
+    ));
     let status = server.wait().unwrap();
     let _ = std::fs::remove_dir_all(directory);
     assert!(status.success());

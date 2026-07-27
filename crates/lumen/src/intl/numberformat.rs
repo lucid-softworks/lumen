@@ -5,7 +5,7 @@ use super::service::{
 };
 use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
 use crate::interpreter::Interp;
-use crate::value::{Gc, Value, set_builtin, set_data};
+use crate::value::{set_builtin, set_data, Gc, Value};
 
 pub fn install(it: &mut Interp, ns: &Gc) {
     let (ctor, proto) = make_service(it, ns, "NumberFormat", 0, construct);
@@ -1517,7 +1517,11 @@ fn unit_long_en(unit: &str, plural: bool) -> String {
         return format!("{} per {}", unit_long_en(a, plural), unit_long_en(b, false));
     }
     let name = unit.replace('-', " ");
-    if plural { format!("{name}s") } else { name }
+    if plural {
+        format!("{name}s")
+    } else {
+        name
+    }
 }
 
 /// Replace the ASCII digits of a formatted number with the glyphs of numbering system `nu` (a no-op

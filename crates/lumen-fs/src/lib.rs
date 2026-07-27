@@ -197,7 +197,12 @@ fn op_open_sync(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Va
         "a" => opts.append(true).create(true).open(&path),
         // Read+write variants back FileHandle and the fd read/write ops.
         "r+" => opts.read(true).write(true).open(&path),
-        "w+" => opts.read(true).write(true).create(true).truncate(true).open(&path),
+        "w+" => opts
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path),
         "a+" => opts.read(true).append(true).create(true).open(&path),
         other => return Err(ctx.make_error("TypeError", format!("openSync: bad mode '{other}'"))),
     }
@@ -260,7 +265,11 @@ fn op_pread_sync(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, V
         file.seek(SeekFrom::Start(pos as u64))
             .map_err(|e| io_error(ctx, "read", "fd", e))?;
     }
-    let cap = if length.is_finite() && length > 0.0 { length as usize } else { 0 };
+    let cap = if length.is_finite() && length > 0.0 {
+        length as usize
+    } else {
+        0
+    };
     let mut buf = vec![0u8; cap];
     let n = file
         .read(&mut buf)
@@ -321,7 +330,11 @@ fn stat_value(ctx: &mut Ctx, meta: &std::fs::Metadata) -> Value {
     {
         use std::os::unix::fs::MetadataExt;
         set("mode", meta.mode() as f64, ctx);
-        set("ctimeMs", meta.ctime() as f64 * 1000.0 + meta.ctime_nsec() as f64 / 1e6, ctx);
+        set(
+            "ctimeMs",
+            meta.ctime() as f64 * 1000.0 + meta.ctime_nsec() as f64 / 1e6,
+            ctx,
+        );
         set("ino", meta.ino() as f64, ctx);
         set("dev", meta.dev() as f64, ctx);
         set("nlink", meta.nlink() as f64, ctx);
@@ -335,7 +348,11 @@ fn stat_value(ctx: &mut Ctx, meta: &std::fs::Metadata) -> Value {
     {
         let type_bits = if ft.is_dir() { 0o040000 } else { 0o100000 };
         let readonly = meta.permissions().readonly();
-        set("mode", (type_bits | if readonly { 0o444 } else { 0o666 }) as f64, ctx);
+        set(
+            "mode",
+            (type_bits | if readonly { 0o444 } else { 0o666 }) as f64,
+            ctx,
+        );
         set("ctimeMs", ms(meta.modified()), ctx);
         set("ino", 0.0, ctx);
         set("dev", 0.0, ctx);
@@ -366,7 +383,11 @@ fn op_ftruncate_sync(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Valu
     let handle = fd_handle(ctx, args)?;
     handle
         .borrow()
-        .set_len(if len.is_finite() && len >= 0.0 { len as u64 } else { 0 })
+        .set_len(if len.is_finite() && len >= 0.0 {
+            len as u64
+        } else {
+            0
+        })
         .map_err(|e| io_error(ctx, "ftruncate", "fd", e))?;
     Ok(Value::Undefined)
 }
@@ -429,7 +450,10 @@ fn op_fchown_sync(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, 
         result
     }
     #[cfg(not(unix))]
-    { let _ = (uid, gid, handle); Err(ctx.make_error("Error", "ENOSYS: fchown is not supported on this platform")) }
+    {
+        let _ = (uid, gid, handle);
+        Err(ctx.make_error("Error", "ENOSYS: fchown is not supported on this platform"))
+    }
 }
 
 /// `futimesSync(fd, atimeSec, mtimeSec)` — set access/modification times on an open handle.
@@ -446,7 +470,12 @@ fn op_futimes_sync(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value,
         // SAFETY: `fd` is a live descriptor from the handle; `times` is a valid 2-element array.
         let rc = unsafe { futimes(fd, times.as_ptr()) };
         if rc != 0 {
-            return Err(io_error(ctx, "futime", "fd", std::io::Error::last_os_error()));
+            return Err(io_error(
+                ctx,
+                "futime",
+                "fd",
+                std::io::Error::last_os_error(),
+            ));
         }
         Ok(Value::Undefined)
     }

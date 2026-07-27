@@ -1025,13 +1025,7 @@ fn hoisted_vars_stmt(
 
 impl CaptureScan {
     /// Analyze `func`, returning (captured names, inner-arrow-reads-this) or `None` to bail.
-    fn run(
-        func: &Function,
-    ) -> Option<(
-        std::collections::HashSet<String>,
-        bool,
-        Vec<String>,
-    )> {
+    fn run(func: &Function) -> Option<(std::collections::HashSet<String>, bool, Vec<String>)> {
         let mut sc = CaptureScan {
             scopes: Vec::new(),
             fn_depth: 0,
@@ -1726,9 +1720,7 @@ fn property_cache_seeds(chunk: &Chunk) -> Vec<(Rc<str>, [IcState; PROP_IC_WAYS])
                 Op::UpdateProp(n, c, _) => (n, c),
                 _ => return None,
             };
-            let states = std::array::from_fn(|way| {
-                chunk.caches[cache as usize + way].get()
-            });
+            let states = std::array::from_fn(|way| chunk.caches[cache as usize + way].get());
             Some((chunk.names[name as usize].clone(), states))
         })
         .collect()
@@ -2055,9 +2047,11 @@ fn compile_inner(
     // vectors back. Keep only Weak pins referenced by the surviving fixed-size sites so failed
     // speculation neither retains dead Rc allocation blocks nor consumes the runtime pin budget.
     c.call_pins.retain(|callee, _| {
-        c.call_caches
-            .iter()
-            .any(|site| site.entries.iter().any(|entry| entry.get().callee == *callee))
+        c.call_caches.iter().any(|site| {
+            site.entries
+                .iter()
+                .any(|entry| entry.get().callee == *callee)
+        })
     });
     Some(Rc::new(Chunk {
         ops: c.ops,
@@ -2073,7 +2067,9 @@ fn compile_inner(
         funcs: c.funcs,
         cap_inits: c.cap_inits,
         env_this: c.env_this,
-        obj_maps: (0..c.obj_maps).map(|_| std::cell::OnceCell::new()).collect(),
+        obj_maps: (0..c.obj_maps)
+            .map(|_| std::cell::OnceCell::new())
+            .collect(),
         caches: c.caches,
         name_pins: std::cell::RefCell::new(c.name_pins),
         name_caches: c.name_caches,
@@ -2515,12 +2511,15 @@ impl Compiler {
         // others at `cache_ptr + k` (see `Interp::ic_way`). Keeps every existing call site
         // untouched.
         let idx = self.caches.len() as u32;
-        let seed = self.cache_seed_stack.last_mut().and_then(|(sites, cursor)| {
-            let site = sites.get(*cursor);
-            *cursor += 1;
-            site.filter(|(hot_name, _)| &**hot_name == &*self.names[name as usize])
-                .map(|(_, states)| *states)
-        });
+        let seed = self
+            .cache_seed_stack
+            .last_mut()
+            .and_then(|(sites, cursor)| {
+                let site = sites.get(*cursor);
+                *cursor += 1;
+                site.filter(|(hot_name, _)| &**hot_name == &*self.names[name as usize])
+                    .map(|(_, states)| *states)
+            });
         for way in 0..PROP_IC_WAYS {
             self.caches.push(std::cell::Cell::new(
                 seed.map(|states| states[way]).unwrap_or(IcState::EMPTY),
@@ -2538,15 +2537,12 @@ impl Compiler {
     }
     /// Reserve a fresh name-cache slot for a free-name op.
     fn new_name_cache(&mut self, name: u32) -> u32 {
-        let seed = self
-            .name_seed_stack
-            .last_mut()
-            .and_then(|(sites, cursor)| {
-                let site = sites.get(*cursor);
-                *cursor += 1;
-                site.filter(|(hot_name, ..)| &**hot_name == &*self.names[name as usize])
-                    .cloned()
-            });
+        let seed = self.name_seed_stack.last_mut().and_then(|(sites, cursor)| {
+            let site = sites.get(*cursor);
+            *cursor += 1;
+            site.filter(|(hot_name, ..)| &**hot_name == &*self.names[name as usize])
+                .cloned()
+        });
         let (ic, pin, number) = match seed {
             Some((_, ic, pin, number)) => (ic, pin, number),
             None => (NameIc::EMPTY, None, None),
@@ -2987,9 +2983,7 @@ impl Compiler {
     /// interleaved order when nothing evaluates after the spread part, so any other spread
     /// position bails).
     fn call_args(&mut self, args: &[ArrayElem]) -> Result<bool, Bail> {
-        let spread_at = args
-            .iter()
-            .position(|a| !matches!(a, ArrayElem::Item(_)));
+        let spread_at = args.iter().position(|a| !matches!(a, ArrayElem::Item(_)));
         if let Some(k) = spread_at {
             if k != args.len() - 1 || !matches!(args[k], ArrayElem::Spread(_)) {
                 log_bail("expr", "spread argument (non-final)");
@@ -3720,11 +3714,12 @@ impl Compiler {
                         // the oracle.
                         let mut leaf_names = std::collections::HashSet::new();
                         pat_idents(pat, &mut leaf_names);
-                        if leaf_names.iter().any(|n| {
-                            self.env_names.contains_key(n) && !self.homed_lets.contains(n)
-                        }) || self
-                            .declare_lexical_pattern(pat, matches!(kind, DeclKind::Const))
-                            .is_err()
+                        if leaf_names
+                            .iter()
+                            .any(|n| self.env_names.contains_key(n) && !self.homed_lets.contains(n))
+                            || self
+                                .declare_lexical_pattern(pat, matches!(kind, DeclKind::Const))
+                                .is_err()
                         {
                             self.scopes.pop();
                             return Err(Bail);
@@ -4660,26 +4655,24 @@ impl Compiler {
     fn update_target(&mut self, arg: &Expr, kind: UpdKind) -> CResult {
         match arg {
             Expr::Paren(inner) => self.update_target(inner, kind),
-            Expr::Ident(name) => {
-                match self.home(name) {
-                    Some(Home::Slot(slot, false)) => {
-                        self.emit(Op::UpdateLocal(slot, kind));
-                        Ok(())
-                    }
-                    Some(Home::Env(false)) => {
-                        let n = self.name_idx(name);
-                        self.emit(Op::UpdateCap(n, kind));
-                        Ok(())
-                    }
-                    Some(Home::Slot(_, true)) | Some(Home::Env(true)) => Err(Bail),
-                    None => {
-                        let n = self.name_idx(name);
-                        let c = self.new_name_cache(n);
-                        self.emit(Op::UpdateNameCached(n, c, kind));
-                        Ok(())
-                    }
+            Expr::Ident(name) => match self.home(name) {
+                Some(Home::Slot(slot, false)) => {
+                    self.emit(Op::UpdateLocal(slot, kind));
+                    Ok(())
                 }
-            }
+                Some(Home::Env(false)) => {
+                    let n = self.name_idx(name);
+                    self.emit(Op::UpdateCap(n, kind));
+                    Ok(())
+                }
+                Some(Home::Slot(_, true)) | Some(Home::Env(true)) => Err(Bail),
+                None => {
+                    let n = self.name_idx(name);
+                    let c = self.new_name_cache(n);
+                    self.emit(Op::UpdateNameCached(n, c, kind));
+                    Ok(())
+                }
+            },
             Expr::Member {
                 obj,
                 prop,
@@ -5670,10 +5663,9 @@ fn run_vm(
                 stack.push(v);
             }
             Op::MakeRegExp(body, flags) => {
-                stack.push(i.make_regexp(
-                    &chunk.names[body as usize],
-                    &chunk.names[flags as usize],
-                )?);
+                stack.push(
+                    i.make_regexp(&chunk.names[body as usize], &chunk.names[flags as usize])?,
+                );
             }
             Op::MakeArray(n) => {
                 let at = stack.len() - n as usize;
@@ -6024,8 +6016,8 @@ impl Chunk {
         // choosing way 0 at a polymorphic virtual-method call makes every other stable way fall
         // through to Rust. Seeded second-stage chunks preserve all hot ways, so keep their full
         // native probe whenever warmup observed more than one receiver shape.
-        let mono = (1..PROP_IC_WAYS)
-            .all(|way| self.caches[idx as usize + way].get().depth == IC_EMPTY);
+        let mono =
+            (1..PROP_IC_WAYS).all(|way| self.caches[idx as usize + way].get().depth == IC_EMPTY);
         (st.depth != IC_EMPTY && mono).then_some(st)
     }
     /// The property-cache way for one exact receiver shape at a polymorphic site. Region
@@ -6288,9 +6280,7 @@ impl Chunk {
         let value = if ic.env == raw {
             let b = env.borrow_mut();
             if b.vars.generation() == ic.gen {
-                let bd = unsafe {
-                    &mut *(ic.binding as usize as *mut crate::interpreter::Binding)
-                };
+                let bd = unsafe { &mut *(ic.binding as usize as *mut crate::interpreter::Binding) };
                 if bd.initialized && bd.mutable && bd.import_ref.is_none() {
                     bd.value = value;
                     return Ok(());
@@ -6361,14 +6351,15 @@ impl Chunk {
         else {
             return None;
         };
-        (self.arguments_slot == Some(*arguments) && &*self.names[*apply as usize] == "apply")
-            .then(|| {
+        (self.arguments_slot == Some(*arguments) && &*self.names[*apply as usize] == "apply").then(
+            || {
                 (
                     &*self.names[*initializer as usize],
                     &self.caches[*initializer_cache as usize],
                     &self.caches[*apply_cache as usize],
                 )
-            })
+            },
+        )
     }
     /// Whether calls run without an activation environment (nothing captured, no lexical
     /// `this`) — the precondition for the JIT→JIT fast call's moved-argument entry.
@@ -6386,7 +6377,10 @@ impl Chunk {
         if self.jit_var_force_resets().is_empty() {
             f |= 1;
         }
-        #[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        #[cfg(all(
+            target_arch = "aarch64",
+            any(target_os = "macos", target_os = "linux", target_os = "windows")
+        ))]
         {
             if code.needs_global {
                 f |= 2;
@@ -6399,7 +6393,10 @@ impl Chunk {
                 f |= 8;
             }
         }
-        #[cfg(not(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "windows"))))]
+        #[cfg(not(all(
+            target_arch = "aarch64",
+            any(target_os = "macos", target_os = "linux", target_os = "windows")
+        )))]
         let _ = code;
         f
     }
@@ -6660,7 +6657,7 @@ pub(crate) unsafe extern "C" fn jit_intrinsic(
         INTRINSIC_ARRAY_PUSH => 3, // [receiver, callee, arg]
         INTRINSIC_ARRAY_POP => 2,  // [receiver, callee]
         INTRINSIC_FUNCTION_CALL => call_argc + 2,
-        _ => 4,                    // [receiver, callee, arg0, arg1]
+        _ => 4, // [receiver, callee, arg0, arg1]
     };
     let base = sp.sub(width);
     let mut this_moved = false;
@@ -6677,173 +6674,181 @@ pub(crate) unsafe extern "C" fn jit_intrinsic(
             let saved_ctor = std::mem::replace(&mut i.constructing, false);
             let saved_nt = std::mem::replace(&mut i.new_target, Value::Undefined);
             let r = match intrinsic {
-            INTRINSIC_STRING_SLICE => {
-                let Value::Str(s) = &*base else {
-                    unreachable!("slice intrinsic receiver guard")
-                };
-                let Value::Num(start) = &*base.add(2) else {
-                    unreachable!("slice intrinsic start guard")
-                };
-                let Value::Num(end) = &*base.add(3) else {
-                    unreachable!("slice intrinsic end guard")
-                };
-                debug_assert!(s.ascii_hint());
-                let len = s.len() as i64;
-                let norm = |n: f64| {
-                    if n.is_nan() {
-                        return 0;
-                    }
-                    let n = if n.is_infinite() {
-                        if n > 0.0 { len } else { -len - 1 }
-                    } else {
-                        n as i64
+                INTRINSIC_STRING_SLICE => {
+                    let Value::Str(s) = &*base else {
+                        unreachable!("slice intrinsic receiver guard")
                     };
-                    if n < 0 { (len + n).max(0) } else { n.min(len) }
-                };
-                let (start, end) = (norm(*start), norm(*end));
-                Ok(if start < end {
-                    Value::str(&s[start as usize..end as usize])
-                } else {
-                    Value::str("")
-                })
-            }
-            INTRINSIC_OBJECT_HAS_OWN => {
-                let Value::Obj(o) = &*base.add(2) else {
-                    unreachable!("hasOwn intrinsic object guard")
-                };
-                let Value::Str(key) = &*base.add(3) else {
-                    unreachable!("hasOwn intrinsic key guard")
-                };
-                Ok(Value::Bool(o.borrow().props.contains(key.as_str())))
-            }
-            INTRINSIC_FUNCTION_CALL => {
-                // `target.call(thisArg, arg)`: transfer thisArg + the single forwarded argument
-                // directly into a compiled target frame. A failed applicability probe has no
-                // side effects, so proxies, native targets, and unusual closures invoke the
-                // exact Function.prototype.call builtin.
-                debug_assert!(call_argc >= 1);
-                let forwarded = call_argc - 1;
-                match i.call_jit_fast(&*base, base.add(2), base.add(3), forwarded, None) {
-                    Some(r) => {
-                        this_moved = true;
-                        call_args_moved = forwarded;
-                        r
-                    }
-                    None => crate::builtins::nf_function_call(
-                        i,
-                        (*base).clone(),
-                        std::slice::from_raw_parts(base.add(2), call_argc),
-                    )
-                    .map_err(Abrupt::Throw),
-                }
-            }
-            INTRINSIC_FUNCTION_APPLY => {
-                // The dominant `initialize.apply(this, arguments)` shape has an unmapped,
-                // own-dense arguments object. Clone its entries once, then move them straight
-                // into an already-JIT-compiled target frame. No observable operation occurs
-                // before every list guard has passed; unusual array-likes and non-JIT targets
-                // execute the named builtin unchanged.
-                let dense = match (&*base, &*base.add(3)) {
-                    (Value::Obj(_), Value::Obj(list))
-                        if i.ordinary_get_ptr(Rc::as_ptr(list) as usize)
-                            && !i
-                                .mapped_arguments
-                                .contains_key(&(Rc::as_ptr(list) as usize)) =>
-                    {
-                        let b = list.borrow();
-                        let len = match b.props.get("length") {
-                            Some(p) if !p.accessor() => match p.value() {
-                                Value::Num(n)
-                                    if n >= 0.0
-                                        && n.is_finite()
-                                        && n.fract() == 0.0
-                                        && n <= crate::interpreter::MAX_ARRAY_OP_LEN as f64 =>
-                                {
-                                    Some(n as usize)
-                                }
-                                _ => None,
-                            },
-                            _ => None,
-                        };
-                        len.and_then(|len| {
-                            let mut values = Vec::with_capacity(len);
-                            for k in 0..len {
-                                let value = b
-                                    .props
-                                    .get_index(k as u32)
-                                    .filter(|p| !p.accessor())
-                                    .map(|p| p.value())?;
-                                values.push(value);
+                    let Value::Num(start) = &*base.add(2) else {
+                        unreachable!("slice intrinsic start guard")
+                    };
+                    let Value::Num(end) = &*base.add(3) else {
+                        unreachable!("slice intrinsic end guard")
+                    };
+                    debug_assert!(s.ascii_hint());
+                    let len = s.len() as i64;
+                    let norm = |n: f64| {
+                        if n.is_nan() {
+                            return 0;
+                        }
+                        let n = if n.is_infinite() {
+                            if n > 0.0 {
+                                len
+                            } else {
+                                -len - 1
                             }
-                            Some(values)
-                        })
-                    }
-                    _ => None,
-                };
-                if let Some(mut values) = dense {
-                    match i.call_jit_fast(
-                        &*base,
-                        base.add(2),
-                        values.as_mut_ptr(),
-                        values.len(),
-                        None,
-                    ) {
+                        } else {
+                            n as i64
+                        };
+                        if n < 0 {
+                            (len + n).max(0)
+                        } else {
+                            n.min(len)
+                        }
+                    };
+                    let (start, end) = (norm(*start), norm(*end));
+                    Ok(if start < end {
+                        Value::str(&s[start as usize..end as usize])
+                    } else {
+                        Value::str("")
+                    })
+                }
+                INTRINSIC_OBJECT_HAS_OWN => {
+                    let Value::Obj(o) = &*base.add(2) else {
+                        unreachable!("hasOwn intrinsic object guard")
+                    };
+                    let Value::Str(key) = &*base.add(3) else {
+                        unreachable!("hasOwn intrinsic key guard")
+                    };
+                    Ok(Value::Bool(o.borrow().props.contains(key.as_str())))
+                }
+                INTRINSIC_FUNCTION_CALL => {
+                    // `target.call(thisArg, arg)`: transfer thisArg + the single forwarded argument
+                    // directly into a compiled target frame. A failed applicability probe has no
+                    // side effects, so proxies, native targets, and unusual closures invoke the
+                    // exact Function.prototype.call builtin.
+                    debug_assert!(call_argc >= 1);
+                    let forwarded = call_argc - 1;
+                    match i.call_jit_fast(&*base, base.add(2), base.add(3), forwarded, None) {
                         Some(r) => {
-                            // `call_jit_fast` moved every Vec element and the original thisArg.
-                            values.set_len(0);
                             this_moved = true;
+                            call_args_moved = forwarded;
                             r
                         }
-                        None => crate::builtins::nf_function_apply(
+                        None => crate::builtins::nf_function_call(
+                            i,
+                            (*base).clone(),
+                            std::slice::from_raw_parts(base.add(2), call_argc),
+                        )
+                        .map_err(Abrupt::Throw),
+                    }
+                }
+                INTRINSIC_FUNCTION_APPLY => {
+                    // The dominant `initialize.apply(this, arguments)` shape has an unmapped,
+                    // own-dense arguments object. Clone its entries once, then move them straight
+                    // into an already-JIT-compiled target frame. No observable operation occurs
+                    // before every list guard has passed; unusual array-likes and non-JIT targets
+                    // execute the named builtin unchanged.
+                    let dense = match (&*base, &*base.add(3)) {
+                        (Value::Obj(_), Value::Obj(list))
+                            if i.ordinary_get_ptr(Rc::as_ptr(list) as usize)
+                                && !i
+                                    .mapped_arguments
+                                    .contains_key(&(Rc::as_ptr(list) as usize)) =>
+                        {
+                            let b = list.borrow();
+                            let len = match b.props.get("length") {
+                                Some(p) if !p.accessor() => match p.value() {
+                                    Value::Num(n)
+                                        if n >= 0.0
+                                            && n.is_finite()
+                                            && n.fract() == 0.0
+                                            && n <= crate::interpreter::MAX_ARRAY_OP_LEN as f64 =>
+                                    {
+                                        Some(n as usize)
+                                    }
+                                    _ => None,
+                                },
+                                _ => None,
+                            };
+                            len.and_then(|len| {
+                                let mut values = Vec::with_capacity(len);
+                                for k in 0..len {
+                                    let value = b
+                                        .props
+                                        .get_index(k as u32)
+                                        .filter(|p| !p.accessor())
+                                        .map(|p| p.value())?;
+                                    values.push(value);
+                                }
+                                Some(values)
+                            })
+                        }
+                        _ => None,
+                    };
+                    if let Some(mut values) = dense {
+                        match i.call_jit_fast(
+                            &*base,
+                            base.add(2),
+                            values.as_mut_ptr(),
+                            values.len(),
+                            None,
+                        ) {
+                            Some(r) => {
+                                // `call_jit_fast` moved every Vec element and the original thisArg.
+                                values.set_len(0);
+                                this_moved = true;
+                                r
+                            }
+                            None => crate::builtins::nf_function_apply(
+                                i,
+                                (*base).clone(),
+                                std::slice::from_raw_parts(base.add(2), 2),
+                            )
+                            .map_err(Abrupt::Throw),
+                        }
+                    } else {
+                        crate::builtins::nf_function_apply(
                             i,
                             (*base).clone(),
                             std::slice::from_raw_parts(base.add(2), 2),
                         )
-                        .map_err(Abrupt::Throw),
-                    }
-                } else {
-                    crate::builtins::nf_function_apply(
-                        i,
-                        (*base).clone(),
-                        std::slice::from_raw_parts(base.add(2), 2),
-                    )
-                    .map_err(Abrupt::Throw)
-                }
-            }
-            INTRINSIC_ARRAY_PUSH => {
-                let Value::Obj(o) = &*base else {
-                    unreachable!("push intrinsic receiver guard")
-                };
-                let arg = base.add(2).read();
-                push_arg_moved = true;
-                match crate::builtins::jit_array_push_one(i, o, arg) {
-                    Ok(v) => Ok(v),
-                    Err(arg) => {
-                        // The transfer helper promises a guard miss has no side effects and
-                        // returns the original owner, so the generic builtin sees the exact
-                        // operand stack it would have seen without specialization.
-                        base.add(2).write(arg);
-                        push_arg_moved = false;
-                        crate::builtins::nf_array_push(
-                            i,
-                            (*base).clone(),
-                            std::slice::from_raw_parts(base.add(2), 1),
-                        )
                         .map_err(Abrupt::Throw)
                     }
                 }
-            }
-            INTRINSIC_ARRAY_POP => {
-                let Value::Obj(o) = &*base else {
-                    unreachable!("pop intrinsic receiver guard")
-                };
-                match crate::builtins::jit_array_pop(i, o) {
-                    Some(v) => Ok(v),
-                    None => crate::builtins::nf_array_pop(i, (*base).clone(), &[])
-                        .map_err(Abrupt::Throw),
+                INTRINSIC_ARRAY_PUSH => {
+                    let Value::Obj(o) = &*base else {
+                        unreachable!("push intrinsic receiver guard")
+                    };
+                    let arg = base.add(2).read();
+                    push_arg_moved = true;
+                    match crate::builtins::jit_array_push_one(i, o, arg) {
+                        Ok(v) => Ok(v),
+                        Err(arg) => {
+                            // The transfer helper promises a guard miss has no side effects and
+                            // returns the original owner, so the generic builtin sees the exact
+                            // operand stack it would have seen without specialization.
+                            base.add(2).write(arg);
+                            push_arg_moved = false;
+                            crate::builtins::nf_array_push(
+                                i,
+                                (*base).clone(),
+                                std::slice::from_raw_parts(base.add(2), 1),
+                            )
+                            .map_err(Abrupt::Throw)
+                        }
+                    }
                 }
-            }
-            _ => unreachable!("unknown JIT intrinsic"),
+                INTRINSIC_ARRAY_POP => {
+                    let Value::Obj(o) = &*base else {
+                        unreachable!("pop intrinsic receiver guard")
+                    };
+                    match crate::builtins::jit_array_pop(i, o) {
+                        Some(v) => Ok(v),
+                        None => crate::builtins::nf_array_pop(i, (*base).clone(), &[])
+                            .map_err(Abrupt::Throw),
+                    }
+                }
+                _ => unreachable!("unknown JIT intrinsic"),
             };
             i.constructing = saved_ctor;
             i.new_target = saved_nt;
@@ -6906,7 +6911,10 @@ pub(crate) unsafe extern "C" fn jit_direct_finish(
         p = p.add(1);
     }
     // Slot drops with the shared-reference fast path (mirrors run_moved's exit loop).
-    let rc_dec_ok = i.jit_layout.get().is_some_and(|l| l.valid && l.rc_strong_off == 0);
+    let rc_dec_ok = i
+        .jit_layout
+        .get()
+        .is_some_and(|l| l.valid && l.rc_strong_off == 0);
     for k in 0..ctx.n_slots {
         let p = ctx.slots.add(k);
         let tag = *(p as *const u8);
@@ -6946,9 +6954,7 @@ pub(crate) unsafe extern "C" fn jit_direct_finish(
             match i.pending_tail.take() {
                 Some(bx) => {
                     let (f, t, a) = *bx;
-                    let r = i
-                        .gc_check_amortized()
-                        .and_then(|()| i.call_inner(f, t, &a));
+                    let r = i.gc_check_amortized().and_then(|()| i.call_inner(f, t, &a));
                     match r {
                         Ok(v) => ctx.ret = v,
                         Err(e) => {
@@ -7124,15 +7130,9 @@ unsafe fn jit_new_inner(
     let args_ptr = unsafe { sp.sub(argc) };
     // Identity-cached construct: on Some the arguments were MOVED into the callee's frame — pop
     // them virtually and drop only the callee slot.
-    if let Some(r) = unsafe {
-        i.construct_jit_fast(
-            &*sp.sub(argc + 1),
-            args_ptr,
-            argc,
-            caller_ctx,
-            site,
-        )
-    } {
+    if let Some(r) =
+        unsafe { i.construct_jit_fast(&*sp.sub(argc + 1), args_ptr, argc, caller_ctx, site) }
+    {
         *sp = unsafe { args_ptr.sub(1) };
         match unsafe { sp.read() } {
             Value::Obj(o) => {
@@ -7172,53 +7172,56 @@ pub(crate) unsafe extern "C" fn jit_set_prop(
     jit_opstat(ctx, pc);
     let i = &mut *ctx.interp;
     let chunk = &*ctx.chunk;
-    let r: Result<(), Abrupt> = (|| {
-        match chunk.ops[pc as usize] {
-            Op::SetProp(n, c) => {
-                sp = sp.sub(1);
-                let v = sp.read();
-                sp = sp.sub(1);
-                let obj = sp.read();
-                i.set_prop_ic(
-                    &obj,
-                    &chunk.names[n as usize],
-                    v.clone(),
-                    &chunk.caches[c as usize],
-                )?;
-                sp.write(v);
-                sp = sp.add(1);
-                Ok(())
-            }
-            Op::SetPropDrop(n, c) => {
-                sp = sp.sub(1);
-                let v = sp.read();
-                sp = sp.sub(1);
-                let obj = sp.read();
-                i.set_prop_ic(&obj, &chunk.names[n as usize], v, &chunk.caches[c as usize])
-            }
-            Op::SetPropThisDrop(n, c) => {
-                sp = sp.sub(1);
-                let v = sp.read();
-                let this = (*ctx.this_raw).clone();
-                i.set_prop_ic(&this, &chunk.names[n as usize], v, &chunk.caches[c as usize])
-            }
-            Op::SetPropLocalDrop(s, n, c) => {
-                sp = sp.sub(1);
-                let v = sp.read();
-                let obj = (*ctx.slots.add(s as usize)).clone();
-                if matches!(obj, Value::Empty) {
-                    return Err(i.throw(
-                        "ReferenceError",
-                        format!(
-                            "cannot access '{}' before initialization",
-                            chunk.slot_names[s as usize]
-                        ),
-                    ));
-                }
-                i.set_prop_ic(&obj, &chunk.names[n as usize], v, &chunk.caches[c as usize])
-            }
-            _ => unreachable!("jit_set_prop emitted only for property stores"),
+    let r: Result<(), Abrupt> = (|| match chunk.ops[pc as usize] {
+        Op::SetProp(n, c) => {
+            sp = sp.sub(1);
+            let v = sp.read();
+            sp = sp.sub(1);
+            let obj = sp.read();
+            i.set_prop_ic(
+                &obj,
+                &chunk.names[n as usize],
+                v.clone(),
+                &chunk.caches[c as usize],
+            )?;
+            sp.write(v);
+            sp = sp.add(1);
+            Ok(())
         }
+        Op::SetPropDrop(n, c) => {
+            sp = sp.sub(1);
+            let v = sp.read();
+            sp = sp.sub(1);
+            let obj = sp.read();
+            i.set_prop_ic(&obj, &chunk.names[n as usize], v, &chunk.caches[c as usize])
+        }
+        Op::SetPropThisDrop(n, c) => {
+            sp = sp.sub(1);
+            let v = sp.read();
+            let this = (*ctx.this_raw).clone();
+            i.set_prop_ic(
+                &this,
+                &chunk.names[n as usize],
+                v,
+                &chunk.caches[c as usize],
+            )
+        }
+        Op::SetPropLocalDrop(s, n, c) => {
+            sp = sp.sub(1);
+            let v = sp.read();
+            let obj = (*ctx.slots.add(s as usize)).clone();
+            if matches!(obj, Value::Empty) {
+                return Err(i.throw(
+                    "ReferenceError",
+                    format!(
+                        "cannot access '{}' before initialization",
+                        chunk.slot_names[s as usize]
+                    ),
+                ));
+            }
+            i.set_prop_ic(&obj, &chunk.names[n as usize], v, &chunk.caches[c as usize])
+        }
+        _ => unreachable!("jit_set_prop emitted only for property stores"),
     })();
     match r {
         Ok(()) => crate::jit::SpFlag { sp, flag: 0 },
@@ -7279,8 +7282,7 @@ pub(crate) unsafe extern "C" fn jit_get_prop(
             Op::GetProp(n, c) => {
                 sp = sp.sub(1);
                 let obj = sp.read();
-                let v =
-                    i.get_prop_ic(&obj, &chunk.names[n as usize], &chunk.caches[c as usize])?;
+                let v = i.get_prop_ic(&obj, &chunk.names[n as usize], &chunk.caches[c as usize])?;
                 sp.write(v);
                 sp = sp.add(1);
                 Ok(())
@@ -7304,16 +7306,14 @@ pub(crate) unsafe extern "C" fn jit_get_prop(
                         ),
                     ));
                 }
-                let v =
-                    i.get_prop_ic(&obj, &chunk.names[n as usize], &chunk.caches[c as usize])?;
+                let v = i.get_prop_ic(&obj, &chunk.names[n as usize], &chunk.caches[c as usize])?;
                 sp.write(v);
                 sp = sp.add(1);
                 Ok(())
             }
             Op::GetMethod(n, c) => {
                 let obj = &*sp.sub(1); // receiver stays on the stack
-                let m =
-                    i.get_prop_ic(obj, &chunk.names[n as usize], &chunk.caches[c as usize])?;
+                let m = i.get_prop_ic(obj, &chunk.names[n as usize], &chunk.caches[c as usize])?;
                 sp.write(m);
                 sp = sp.add(1);
                 Ok(())
@@ -7429,22 +7429,26 @@ unsafe fn jit_call_inner(
                                 native: nf as usize,
                                 intrinsic: match nf as *const () as usize {
                                     p if p
-                                        == crate::builtins::nf_char_code_at as *const () as usize =>
+                                        == crate::builtins::nf_char_code_at as *const ()
+                                            as usize =>
                                     {
                                         INTRINSIC_CHAR_CODE_AT
                                     }
                                     p if p
-                                        == crate::builtins::nf_string_slice as *const () as usize =>
+                                        == crate::builtins::nf_string_slice as *const ()
+                                            as usize =>
                                     {
                                         INTRINSIC_STRING_SLICE
                                     }
                                     p if p
-                                        == crate::builtins::nf_object_has_own as *const () as usize =>
+                                        == crate::builtins::nf_object_has_own as *const ()
+                                            as usize =>
                                     {
                                         INTRINSIC_OBJECT_HAS_OWN
                                     }
                                     p if p
-                                        == crate::builtins::nf_function_apply as *const () as usize =>
+                                        == crate::builtins::nf_function_apply as *const ()
+                                            as usize =>
                                     {
                                         INTRINSIC_FUNCTION_APPLY
                                     }
@@ -7464,7 +7468,8 @@ unsafe fn jit_call_inner(
                                         INTRINSIC_ARRAY_POP
                                     }
                                     p if p
-                                        == crate::builtins::nf_function_call as *const () as usize =>
+                                        == crate::builtins::nf_function_call as *const ()
+                                            as usize =>
                                     {
                                         INTRINSIC_FUNCTION_CALL
                                     }
@@ -7598,21 +7603,24 @@ unsafe fn jit_callstat(
     {
         NATIVES.with(|counts| {
             let mut counts = counts.borrow_mut();
-            let entry = counts.0.entry((ic.native, argc, with_this)).or_insert_with(|| {
-                let name = match &*sp.sub(argc + 1) {
-                    Value::Obj(o) => o
-                        .borrow()
-                        .props
-                        .get("name")
-                        .and_then(|p| match p.value() {
-                            Value::Str(s) => Some(s.to_string()),
-                            _ => None,
-                        })
-                        .unwrap_or_else(|| "<native>".to_string()),
-                    _ => "<native>".to_string(),
-                };
-                (format!("{name} argc={argc} this={with_this}"), 0)
-            });
+            let entry = counts
+                .0
+                .entry((ic.native, argc, with_this))
+                .or_insert_with(|| {
+                    let name = match &*sp.sub(argc + 1) {
+                        Value::Obj(o) => o
+                            .borrow()
+                            .props
+                            .get("name")
+                            .and_then(|p| match p.value() {
+                                Value::Str(s) => Some(s.to_string()),
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| "<native>".to_string()),
+                        _ => "<native>".to_string(),
+                    };
+                    (format!("{name} argc={argc} this={with_this}"), 0)
+                });
             entry.1 += 1;
         });
     }
@@ -7845,18 +7853,14 @@ unsafe fn jit_exec_inner(
         Op::UpdateName(n, kind) => {
             let name = &chunk.names[n as usize];
             let old = i.get_var(name, env)?;
-            if let Some(v) = step_value(i, kind, old, |i, v| {
-                i.assign_free_name(name, v, env)
-            })? {
+            if let Some(v) = step_value(i, kind, old, |i, v| i.assign_free_name(name, v, env))? {
                 push!(v);
             }
         }
         Op::UpdateNameCached(n, c, kind) => {
             let name = &chunk.names[n as usize];
             let old = chunk.load_name_ic(i, env, n, c)?;
-            if let Some(v) = step_value(i, kind, old, |i, v| {
-                i.assign_free_name(name, v, env)
-            })? {
+            if let Some(v) = step_value(i, kind, old, |i, v| i.assign_free_name(name, v, env))? {
                 push!(v);
             }
         }
@@ -8399,15 +8403,10 @@ unsafe fn jit_exec_inner(
             push!(v);
         }
         Op::New(argc, cache) => {
-            unsafe {
-                jit_new_inner(i, None, Some((chunk, cache)), argc as usize, sp)
-            }?;
+            unsafe { jit_new_inner(i, None, Some((chunk, cache)), argc as usize, sp) }?;
         }
         Op::MakeRegExp(body, flags) => {
-            push!(i.make_regexp(
-                &chunk.names[body as usize],
-                &chunk.names[flags as usize],
-            )?);
+            push!(i.make_regexp(&chunk.names[body as usize], &chunk.names[flags as usize],)?);
         }
         Op::MakeArray(n) => {
             let n = n as usize;

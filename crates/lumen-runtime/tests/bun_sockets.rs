@@ -44,8 +44,7 @@ fn run(source: &str) -> Vec<String> {
 
 #[test]
 fn bun_tcp_listen_and_connect_echo() {
-    let lines = run(
-        r#"
+    let lines = run(r#"
         const server = Bun.listen({
             hostname: "127.0.0.1",
             port: 0,
@@ -73,11 +72,16 @@ fn bun_tcp_listen_and_connect_echo() {
             });
             console.log("address", client.remoteAddress, server.hostname, server.port > 0);
         });
-        "#,
-    );
+        "#);
     assert_eq!(lines.len(), 4, "{lines:?}");
-    assert!(lines.contains(&"server-open server".to_string()), "{lines:?}");
-    assert!(lines.contains(&"client-open client".to_string()), "{lines:?}");
+    assert!(
+        lines.contains(&"server-open server".to_string()),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"client-open client".to_string()),
+        "{lines:?}"
+    );
     assert!(
         lines.contains(&"address 127.0.0.1 127.0.0.1 true".to_string()),
         "{lines:?}"
@@ -87,8 +91,7 @@ fn bun_tcp_listen_and_connect_echo() {
 
 #[test]
 fn bun_udp_socket_sends_data_with_peer_metadata() {
-    let lines = run(
-        r#"
+    let lines = run(r#"
         (async () => {
             const receiver = await Bun.udpSocket({
                 hostname: "127.0.0.1",
@@ -105,10 +108,6 @@ fn bun_udp_socket_sends_data_with_peer_metadata() {
             globalThis.sender = await Bun.udpSocket({ hostname: "127.0.0.1", port: 0 });
             console.log("sent", sender.send("pong", receiver.port, receiver.hostname));
         })();
-        "#,
-    );
-    assert_eq!(
-        lines,
-        ["sent 4", "udp receiver pong true 127.0.0.1"]
-    );
+        "#);
+    assert_eq!(lines, ["sent 4", "udp receiver pong true 127.0.0.1"]);
 }

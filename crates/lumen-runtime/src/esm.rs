@@ -124,7 +124,9 @@ fn read_raw(file: &Path, attr_type: Option<&str>) -> Option<String> {
         },
         _ => {
             let text = String::from_utf8_lossy(&bytes).into_owned();
-            text.strip_prefix('\u{feff}').map(str::to_owned).unwrap_or(text)
+            text.strip_prefix('\u{feff}')
+                .map(str::to_owned)
+                .unwrap_or(text)
         }
     })
 }
@@ -258,7 +260,10 @@ fn load_as_module(file: &Path, cjs_default: bool) -> Option<(String, String)> {
             // pollution vector), where JSON.parse creates a plain own data property — the same
             // semantics as a `with { type: "json" }` import.
             let text = std::fs::read_to_string(file).ok()?;
-            Some((key, format!("export default JSON.parse({});", js_string_literal(&text))))
+            Some((
+                key,
+                format!("export default JSON.parse({});", js_string_literal(&text)),
+            ))
         }
         // `.mjs` is always ESM regardless of package type; `.cjs` is always CommonJS.
         "mjs" => Some((key.clone(), std::fs::read_to_string(file).ok()?)),
@@ -344,7 +349,10 @@ fn collect_cjs_exports(
         if !spec.starts_with('.') {
             continue; // only follow relative re-exports (a bare package is its own module)
         }
-        if let Some(target) = file.parent().and_then(|d| resolve_relative_cjs(&d.join(&spec))) {
+        if let Some(target) = file
+            .parent()
+            .and_then(|d| resolve_relative_cjs(&d.join(&spec)))
+        {
             if let Ok(sub) = std::fs::read_to_string(&target) {
                 collect_cjs_exports(&sub, &target, depth + 1, names, seen);
             }
@@ -574,7 +582,10 @@ fn is_export_ident(name: &str) -> bool {
     if !(first.is_ascii_alphabetic() || first == '_' || first == '$') {
         return false;
     }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+    {
         return false;
     }
     !is_reserved_word(name)
@@ -584,11 +595,46 @@ fn is_export_ident(name: &str) -> bool {
 fn is_reserved_word(name: &str) -> bool {
     matches!(
         name,
-        "break" | "case" | "catch" | "class" | "const" | "continue" | "debugger" | "default"
-            | "delete" | "do" | "else" | "enum" | "export" | "extends" | "false" | "finally"
-            | "for" | "function" | "if" | "import" | "in" | "instanceof" | "new" | "null"
-            | "return" | "super" | "switch" | "this" | "throw" | "true" | "try" | "typeof"
-            | "var" | "void" | "while" | "with" | "yield" | "let" | "static" | "await"
+        "break"
+            | "case"
+            | "catch"
+            | "class"
+            | "const"
+            | "continue"
+            | "debugger"
+            | "default"
+            | "delete"
+            | "do"
+            | "else"
+            | "enum"
+            | "export"
+            | "extends"
+            | "false"
+            | "finally"
+            | "for"
+            | "function"
+            | "if"
+            | "import"
+            | "in"
+            | "instanceof"
+            | "new"
+            | "null"
+            | "return"
+            | "super"
+            | "switch"
+            | "this"
+            | "throw"
+            | "true"
+            | "try"
+            | "typeof"
+            | "var"
+            | "void"
+            | "while"
+            | "with"
+            | "yield"
+            | "let"
+            | "static"
+            | "await"
     )
 }
 
@@ -738,7 +784,10 @@ mod tests {
         // `"module"` appears first as the *value* of `"type"`, then as a real key. The scan must
         // return the key's value, not choke on the value occurrence (the hono package.json shape).
         let pkg = r#"{ "main": "dist/cjs/index.js", "type": "module", "module": "dist/index.js" }"#;
-        assert_eq!(json_string_field(pkg, "module").as_deref(), Some("dist/index.js"));
+        assert_eq!(
+            json_string_field(pkg, "module").as_deref(),
+            Some("dist/index.js")
+        );
         assert_eq!(json_string_field(pkg, "type").as_deref(), Some("module"));
     }
 
@@ -768,14 +817,20 @@ mod tests {
             pkg_entry(r#"{ "module": "./mod.js", "main": "./m.js" }"#).as_deref(),
             Some("./mod.js")
         );
-        assert_eq!(pkg_entry(r#"{ "main": "./m.js" }"#).as_deref(), Some("./m.js"));
+        assert_eq!(
+            pkg_entry(r#"{ "main": "./m.js" }"#).as_deref(),
+            Some("./m.js")
+        );
     }
 
     #[test]
     fn package_subpath_splits_plain_and_scoped() {
         assert_eq!(package_subpath("hono"), None);
         assert_eq!(package_subpath("hono/logger").as_deref(), Some("logger"));
-        assert_eq!(package_subpath("hono/dist/x.js").as_deref(), Some("dist/x.js"));
+        assert_eq!(
+            package_subpath("hono/dist/x.js").as_deref(),
+            Some("dist/x.js")
+        );
         assert_eq!(package_subpath("@scope/pkg"), None);
         assert_eq!(package_subpath("@scope/pkg/sub").as_deref(), Some("sub"));
     }
@@ -806,7 +861,10 @@ mod tests {
     #[test]
     fn package_dir_handles_plain_and_scoped_subpaths() {
         let root = Path::new("/app");
-        assert_eq!(package_dir(root, "hono"), PathBuf::from("/app/node_modules/hono"));
+        assert_eq!(
+            package_dir(root, "hono"),
+            PathBuf::from("/app/node_modules/hono")
+        );
         assert_eq!(
             package_dir(root, "hono/dist/index.js"),
             PathBuf::from("/app/node_modules/hono")

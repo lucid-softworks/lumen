@@ -67,7 +67,8 @@ trait SseStream: Read + Write + Send {}
 impl<T: Read + Write + Send> SseStream for T {}
 
 fn sse_registry(ctx: &mut Ctx) -> &mut SseRegistry {
-    ctx.host_mut::<SseRegistry>().expect("web installs SseRegistry")
+    ctx.host_mut::<SseRegistry>()
+        .expect("web installs SseRegistry")
 }
 
 /// `__sse.connect(url, lastEventId, dispatch)` → id. Opens the stream on the pool; the JS side
@@ -89,7 +90,10 @@ pub(crate) fn op_sse_connect(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Res
     match u.scheme.as_str() {
         "http" | "https" => {}
         other => {
-            return Err(ctx.make_error("SyntaxError", format!("EventSource: unsupported scheme '{other}'")))
+            return Err(ctx.make_error(
+                "SyntaxError",
+                format!("EventSource: unsupported scheme '{other}'"),
+            ))
         }
     }
 
@@ -133,7 +137,10 @@ fn open_stream(target: &str, last_event_id: &str) -> Result<Box<dyn SseStream>, 
     for _ in 0..=MAX_REDIRECTS {
         let u = url::parse(&target, None).map_err(ConnectError::Fatal)?;
         if u.scheme != "http" && u.scheme != "https" {
-            return Err(ConnectError::Fatal(format!("unsupported scheme '{}'", u.scheme)));
+            return Err(ConnectError::Fatal(format!(
+                "unsupported scheme '{}'",
+                u.scheme
+            )));
         }
         let port = u.port.unwrap_or(if u.scheme == "https" { 443 } else { 80 });
         let host = u.host.trim_matches(['[', ']']);
@@ -143,14 +150,20 @@ fn open_stream(target: &str, last_event_id: &str) -> Result<Box<dyn SseStream>, 
         tcp.set_read_timeout(Some(READ_TIMEOUT)).ok();
         let mut stream: Box<dyn SseStream> = if u.scheme == "https" {
             Box::new(lumen_tls::TlsStream::connect(tcp, host).map_err(ConnectError::Retriable)?)
-        } else { Box::new(tcp) };
+        } else {
+            Box::new(tcp)
+        };
 
         let host_header = if u.port.is_some() && u.port != Some(80) {
             format!("{}:{}", u.host, port)
         } else {
             u.host.clone()
         };
-        let mut path = if u.path.is_empty() { "/".to_string() } else { u.path.clone() };
+        let mut path = if u.path.is_empty() {
+            "/".to_string()
+        } else {
+            u.path.clone()
+        };
         path.push_str(&u.query);
         let mut req = format!(
             "GET {path} HTTP/1.1\r\nHost: {host_header}\r\nAccept: text/event-stream\r\n\
@@ -160,7 +173,8 @@ fn open_stream(target: &str, last_event_id: &str) -> Result<Box<dyn SseStream>, 
             req.push_str(&format!("Last-Event-ID: {last_event_id}\r\n"));
         }
         req.push_str("\r\n");
-        stream.write_all(req.as_bytes())
+        stream
+            .write_all(req.as_bytes())
             .map_err(|e| ConnectError::Retriable(format!("request write: {e}")))?;
 
         // Read the response head byte-wise (a BufReader would swallow body bytes).
@@ -186,7 +200,9 @@ fn open_stream(target: &str, last_event_id: &str) -> Result<Box<dyn SseStream>, 
         let mut location = None;
         let mut content_type = String::new();
         for line in lines {
-            let Some((k, v)) = line.split_once(':') else { continue };
+            let Some((k, v)) = line.split_once(':') else {
+                continue;
+            };
             let (k, v) = (k.trim(), v.trim());
             if k.eq_ignore_ascii_case("location") {
                 location = Some(v.to_string());
@@ -197,7 +213,13 @@ fn open_stream(target: &str, last_event_id: &str) -> Result<Box<dyn SseStream>, 
 
         match status {
             200 => {
-                if !content_type.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("text/event-stream") {
+                if !content_type
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .eq_ignore_ascii_case("text/event-stream")
+                {
                     return Err(ConnectError::Fatal(format!(
                         "EventSource response Content-Type is '{content_type}', not text/event-stream"
                     )));
@@ -213,31 +235,53 @@ fn open_stream(target: &str, last_event_id: &str) -> Result<Box<dyn SseStream>, 
                     .href();
             }
             // 204 No Content and 205 tell the client to STOP (no reconnect).
-            204 | 205 => return Err(ConnectError::Fatal(format!("server returned {status} (stop)"))),
-            _ => return Err(ConnectError::Fatal(format!("server returned HTTP {status}"))),
+            204 | 205 => {
+                return Err(ConnectError::Fatal(format!(
+                    "server returned {status} (stop)"
+                )))
+            }
+            _ => {
+                return Err(ConnectError::Fatal(format!(
+                    "server returned HTTP {status}"
+                )))
+            }
         }
     }
     Err(ConnectError::Fatal("too many redirects".into()))
 }
 
-fn decode_connect(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<Vec<Value>, Value> {
+fn decode_connect(
+    ctx: &mut Ctx,
+    payload: Box<dyn std::any::Any + Send>,
+) -> Result<Vec<Value>, Value> {
     let ConnectResult { id, outcome } = *payload.downcast::<ConnectResult>().expect("sse payload");
     match outcome {
         Ok(stream) => {
             let closed = match sse_registry(ctx).conns.get(&id) {
                 Some(e) if !e.dead => Arc::clone(&e.closed),
-                _ => return Ok(vec![Value::from_string("fatal".into()), Value::from_string("closed".into())]),
+                _ => {
+                    return Ok(vec![
+                        Value::from_string("fatal".into()),
+                        Value::from_string("closed".into()),
+                    ])
+                }
             };
             arm_read(ctx, id, StreamReader { stream, closed });
             Ok(vec![Value::from_string("open".into())])
         }
         Err(ConnectError::Fatal(msg)) => {
             sse_registry(ctx).conns.remove(&id);
-            Ok(vec![Value::from_string("fatal".into()), Value::from_string(msg)])
+            Ok(vec![
+                Value::from_string("fatal".into()),
+                Value::from_string(msg),
+            ])
         }
         Err(ConnectError::Retriable(msg)) => {
             sse_registry(ctx).conns.remove(&id);
-            Ok(vec![Value::from_string("drop".into()), Value::from_string(msg)])
+            Ok(vec![
+                Value::from_string("drop".into()),
+                Value::from_string(msg),
+            ])
         }
     }
 }
@@ -265,7 +309,8 @@ fn arm_read(ctx: &mut Ctx, id: u64, reader: StreamReader) {
             reader.stream.read(&mut buf).map(|n| buf[..n].to_vec())
         };
         // EOF (0 bytes) or a closed flag ends the loop → the JS side reconnects.
-        let keep = matches!(&outcome, Ok(b) if !b.is_empty()) && !reader.closed.load(Ordering::SeqCst);
+        let keep =
+            matches!(&outcome, Ok(b) if !b.is_empty()) && !reader.closed.load(Ordering::SeqCst);
         Box::new(ReadResult {
             id,
             outcome,
@@ -275,7 +320,11 @@ fn arm_read(ctx: &mut Ctx, id: u64, reader: StreamReader) {
 }
 
 fn decode_read(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<Vec<Value>, Value> {
-    let ReadResult { id, outcome, reader } = *payload.downcast::<ReadResult>().expect("sse payload");
+    let ReadResult {
+        id,
+        outcome,
+        reader,
+    } = *payload.downcast::<ReadResult>().expect("sse payload");
     // A close() while this read was in flight: swallow and stop.
     let closed_now = sse_registry(ctx)
         .conns
@@ -297,7 +346,10 @@ fn decode_read(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<
             if closed_now {
                 Ok(vec![Value::from_string("closed".into())])
             } else {
-                Ok(vec![Value::from_string("drop".into()), Value::from_string("stream ended".into())])
+                Ok(vec![
+                    Value::from_string("drop".into()),
+                    Value::from_string("stream ended".into()),
+                ])
             }
         }
         Err(e) => {
@@ -305,7 +357,10 @@ fn decode_read(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<
             if closed_now {
                 Ok(vec![Value::from_string("closed".into())])
             } else {
-                Ok(vec![Value::from_string("drop".into()), Value::from_string(e.to_string())])
+                Ok(vec![
+                    Value::from_string("drop".into()),
+                    Value::from_string(e.to_string()),
+                ])
             }
         }
     }
@@ -355,7 +410,9 @@ pub mod testing {
         std::thread::spawn(move || {
             let mut n = 0usize;
             for _ in 0..conns {
-                let Ok((stream, _)) = listener.accept() else { return };
+                let Ok((stream, _)) = listener.accept() else {
+                    return;
+                };
                 serve_one(stream, mode, n);
                 n += 1;
             }
@@ -375,7 +432,9 @@ pub mod testing {
         let head = String::from_utf8_lossy(&head);
         let last_event_id = head.lines().find_map(|l| {
             let (k, v) = l.split_once(':')?;
-            k.trim().eq_ignore_ascii_case("last-event-id").then(|| v.trim().to_string())
+            k.trim()
+                .eq_ignore_ascii_case("last-event-id")
+                .then(|| v.trim().to_string())
         });
 
         let write = |body: &str, ctype: &str, status: &str| {
@@ -389,9 +448,8 @@ pub mod testing {
         match mode {
             Mode::WrongContentType => write("nope", "text/plain", "200 OK"),
             Mode::NoContent => {
-                let _ = (&stream).write_all(
-                    b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n",
-                );
+                let _ =
+                    (&stream).write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
             }
             Mode::Events => write(
                 "data: hello\n\nevent: tick\ndata: 42\n\nid: 9\ndata: line one\ndata: line two\n\n",
@@ -408,7 +466,10 @@ pub mod testing {
                     );
                     // Close mid-stream by dropping `stream` here.
                 } else {
-                    let body = format!("data: resumed-from-{}\n\n", last_event_id.unwrap_or_default());
+                    let body = format!(
+                        "data: resumed-from-{}\n\n",
+                        last_event_id.unwrap_or_default()
+                    );
                     write(&body, "text/event-stream", "200 OK");
                 }
             }

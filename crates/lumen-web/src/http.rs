@@ -115,8 +115,10 @@ fn one_request(
     req.push_str("\r\n");
 
     let mut stream: Box<dyn ReadWrite> = if u.scheme == "https" {
-        Box::new(lumen_tls::TlsStream::connect(stream, u.host.trim_matches(['[', ']']))
-            .map_err(|error| format!("fetch '{}': {error}", u.href()))?)
+        Box::new(
+            lumen_tls::TlsStream::connect(stream, u.host.trim_matches(['[', ']']))
+                .map_err(|error| format!("fetch '{}': {error}", u.href()))?,
+        )
     } else {
         Box::new(stream)
     };

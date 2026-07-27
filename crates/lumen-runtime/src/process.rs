@@ -169,7 +169,9 @@ pub(crate) fn install_data_props(engine: &mut Engine) {
         _ => unreachable!("install() defined the process namespace"),
     };
 
-    let argv0_str = std::env::args().next().unwrap_or_else(|| "lumen".to_string());
+    let argv0_str = std::env::args()
+        .next()
+        .unwrap_or_else(|| "lumen".to_string());
     let argv: Vec<Value> = std::env::args().map(Value::from_string).collect();
     let argv = ctx.make_array(argv);
     let _ = ctx.set_member(&process, "argv", argv);
@@ -226,7 +228,12 @@ fn op_read_stdin(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, V
         (Some(resolve), Some(reject)) if resolve.is_callable() && reject.is_callable() => {
             (resolve.clone(), reject.clone())
         }
-        _ => return Err(ctx.make_error("TypeError", "readStdin expects resolve and reject functions")),
+        _ => {
+            return Err(ctx.make_error(
+                "TypeError",
+                "readStdin expects resolve and reject functions",
+            ))
+        }
     };
     let id = ctx
         .host_mut::<TaskRegistry>()
@@ -271,8 +278,14 @@ fn write_raw(ctx: &mut Ctx, args: &[Value], to_err: bool) -> Result<Value, Value
         Some(b) => b,
         None => ctx.coerce_string(arg)?.as_bytes().to_vec(),
     };
-    let sinks = ctx.host_mut::<ConsoleOut>().expect("console state installed");
-    let sink = if to_err { &mut sinks.err } else { &mut sinks.out };
+    let sinks = ctx
+        .host_mut::<ConsoleOut>()
+        .expect("console state installed");
+    let sink = if to_err {
+        &mut sinks.err
+    } else {
+        &mut sinks.out
+    };
     // A broken pipe shouldn't crash the runtime (matches console's behavior).
     let _ = sink.write_all(&bytes);
     let _ = sink.flush();
@@ -282,7 +295,10 @@ fn write_raw(ctx: &mut Ctx, args: &[Value], to_err: bool) -> Result<Value, Value
 /// `[seconds, nanoseconds]` elapsed since process start, from a monotonic clock (Node's
 /// `process.hrtime()` contract). The js_init wrapper handles the optional `prev` diff + `.bigint`.
 fn op_hrtime(ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Value> {
-    let start = ctx.host_mut::<ProcStart>().expect("process start installed").0;
+    let start = ctx
+        .host_mut::<ProcStart>()
+        .expect("process start installed")
+        .0;
     let e = start.elapsed();
     Ok(ctx.make_array(vec![
         Value::Num(e.as_secs() as f64),
@@ -309,9 +325,13 @@ fn op_metrics(ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Val
     let max_rss_kib = usage.max_rss;
     let rss_bytes = current_rss_bytes().unwrap_or_else(|| {
         #[cfg(target_os = "macos")]
-        { usage.max_rss as u64 }
+        {
+            usage.max_rss as u64
+        }
         #[cfg(not(target_os = "macos"))]
-        { (usage.max_rss as u64) * 1024 }
+        {
+            (usage.max_rss as u64) * 1024
+        }
     });
     let (available_memory, constrained_memory) = system_memory(rss_bytes);
     Ok(ctx.make_array(
@@ -341,34 +361,58 @@ fn op_metrics(ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Val
 
 #[cfg(target_os = "linux")]
 fn current_rss_bytes() -> Option<u64> {
-    let pages = std::fs::read_to_string("/proc/self/statm").ok()?.split_whitespace().nth(1)?.parse::<u64>().ok()?;
+    let pages = std::fs::read_to_string("/proc/self/statm")
+        .ok()?
+        .split_whitespace()
+        .nth(1)?
+        .parse::<u64>()
+        .ok()?;
     Some(pages * 4096)
 }
 
 #[cfg(target_os = "macos")]
 fn current_rss_bytes() -> Option<u64> {
     let mut info = ffi::RUsageInfoV2::default();
-    let result = unsafe { ffi::proc_pid_rusage(std::process::id() as i32, 2, (&mut info as *mut ffi::RUsageInfoV2).cast()) };
+    let result = unsafe {
+        ffi::proc_pid_rusage(
+            std::process::id() as i32,
+            2,
+            (&mut info as *mut ffi::RUsageInfoV2).cast(),
+        )
+    };
     (result == 0).then_some(info.resident_size)
 }
 
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-fn current_rss_bytes() -> Option<u64> { None }
+fn current_rss_bytes() -> Option<u64> {
+    None
+}
 
 #[cfg(target_os = "linux")]
 fn system_memory(rss: u64) -> (u64, u64) {
     let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
-    let value = |name: &str| meminfo.lines().find(|line| line.starts_with(name))
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|value| value.parse::<u64>().ok()).unwrap_or(0) * 1024;
+    let value = |name: &str| {
+        meminfo
+            .lines()
+            .find(|line| line.starts_with(name))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+            * 1024
+    };
     let total = value("MemTotal:");
     let host_available = value("MemAvailable:");
-    let raw_limit = std::fs::read_to_string("/sys/fs/cgroup/memory.max").ok()
+    let raw_limit = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
+        .ok()
         .or_else(|| std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes").ok());
-    let limit = raw_limit.as_deref().and_then(|value| value.trim().parse::<u64>().ok())
+    let limit = raw_limit
+        .as_deref()
+        .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|limit| *limit > 0 && *limit < total);
     let constrained = limit.unwrap_or(0);
-    let available = limit.map_or(host_available, |limit| host_available.min(limit.saturating_sub(rss)));
+    let available = limit.map_or(host_available, |limit| {
+        host_available.min(limit.saturating_sub(rss))
+    });
     (available, constrained)
 }
 
@@ -379,11 +423,18 @@ fn system_memory(rss: u64) -> (u64, u64) {
         + ffi::sysctl_u64("vm.page_inactive_count").unwrap_or(0)
         + ffi::sysctl_u64("vm.page_purgeable_count").unwrap_or(0);
     let page_size = ffi::sysctl_u64("hw.pagesize").unwrap_or(4096);
-    (pages.saturating_mul(page_size).min(total.saturating_sub(rss)), 0)
+    (
+        pages
+            .saturating_mul(page_size)
+            .min(total.saturating_sub(rss)),
+        0,
+    )
 }
 
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-fn system_memory(_rss: u64) -> (u64, u64) { (0, 0) }
+fn system_memory(_rss: u64) -> (u64, u64) {
+    (0, 0)
+}
 
 #[cfg(not(unix))]
 fn op_metrics(ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Value> {
@@ -506,69 +557,155 @@ fn op_execve(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
     use std::ffi::CString;
     use std::os::raw::c_char;
 
-    let path = ctx.coerce_string(args.first().unwrap_or(&Value::Undefined))?.to_string();
-    let argv = ctx.coerce_string(args.get(1).unwrap_or(&Value::Undefined))?.to_string();
-    let env = ctx.coerce_string(args.get(2).unwrap_or(&Value::Undefined))?.to_string();
-    let path = CString::new(path).map_err(|_| ctx.make_error("TypeError", "execve path contains a null byte"))?;
-    let argv = argv.split('\0').filter(|value| !value.is_empty()).map(CString::new).collect::<Result<Vec<_>, _>>()
+    let path = ctx
+        .coerce_string(args.first().unwrap_or(&Value::Undefined))?
+        .to_string();
+    let argv = ctx
+        .coerce_string(args.get(1).unwrap_or(&Value::Undefined))?
+        .to_string();
+    let env = ctx
+        .coerce_string(args.get(2).unwrap_or(&Value::Undefined))?
+        .to_string();
+    let path = CString::new(path)
+        .map_err(|_| ctx.make_error("TypeError", "execve path contains a null byte"))?;
+    let argv = argv
+        .split('\0')
+        .filter(|value| !value.is_empty())
+        .map(CString::new)
+        .collect::<Result<Vec<_>, _>>()
         .map_err(|_| ctx.make_error("TypeError", "execve argument contains a null byte"))?;
-    let env = env.split('\0').filter(|value| !value.is_empty()).map(CString::new).collect::<Result<Vec<_>, _>>()
+    let env = env
+        .split('\0')
+        .filter(|value| !value.is_empty())
+        .map(CString::new)
+        .collect::<Result<Vec<_>, _>>()
         .map_err(|_| ctx.make_error("TypeError", "execve environment contains a null byte"))?;
-    let mut argv_ptrs: Vec<*const c_char> = argv.iter().map(|value| value.as_ptr()).collect(); argv_ptrs.push(std::ptr::null());
-    let mut env_ptrs: Vec<*const c_char> = env.iter().map(|value| value.as_ptr()).collect(); env_ptrs.push(std::ptr::null());
-    unsafe { ffi::execve(path.as_ptr(), argv_ptrs.as_ptr(), env_ptrs.as_ptr()); }
-    Err(ctx.make_error("Error", format!("execve failed: {}", std::io::Error::last_os_error())))
+    let mut argv_ptrs: Vec<*const c_char> = argv.iter().map(|value| value.as_ptr()).collect();
+    argv_ptrs.push(std::ptr::null());
+    let mut env_ptrs: Vec<*const c_char> = env.iter().map(|value| value.as_ptr()).collect();
+    env_ptrs.push(std::ptr::null());
+    unsafe {
+        ffi::execve(path.as_ptr(), argv_ptrs.as_ptr(), env_ptrs.as_ptr());
+    }
+    Err(ctx.make_error(
+        "Error",
+        format!("execve failed: {}", std::io::Error::last_os_error()),
+    ))
 }
 
 #[cfg(unix)]
 fn identity_result(ctx: &mut Ctx, rc: i32, name: &str) -> Result<Value, Value> {
-    if rc == 0 { Ok(Value::Undefined) } else { Err(ctx.make_error("Error", format!("{name} failed: {}", std::io::Error::last_os_error()))) }
+    if rc == 0 {
+        Ok(Value::Undefined)
+    } else {
+        Err(ctx.make_error(
+            "Error",
+            format!("{name} failed: {}", std::io::Error::last_os_error()),
+        ))
+    }
 }
 #[cfg(unix)]
-fn op_setuid(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> { let id = ctx.coerce_number(args.first().unwrap_or(&Value::Undefined))? as u32; identity_result(ctx, unsafe { ffi::setuid(id) }, "setuid") }
+fn op_setuid(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    let id = ctx.coerce_number(args.first().unwrap_or(&Value::Undefined))? as u32;
+    identity_result(ctx, unsafe { ffi::setuid(id) }, "setuid")
+}
 #[cfg(unix)]
-fn op_seteuid(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> { let id = ctx.coerce_number(args.first().unwrap_or(&Value::Undefined))? as u32; identity_result(ctx, unsafe { ffi::seteuid(id) }, "seteuid") }
+fn op_seteuid(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    let id = ctx.coerce_number(args.first().unwrap_or(&Value::Undefined))? as u32;
+    identity_result(ctx, unsafe { ffi::seteuid(id) }, "seteuid")
+}
 #[cfg(unix)]
-fn op_setgid(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> { let id = ctx.coerce_number(args.first().unwrap_or(&Value::Undefined))? as u32; identity_result(ctx, unsafe { ffi::setgid(id) }, "setgid") }
+fn op_setgid(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    let id = ctx.coerce_number(args.first().unwrap_or(&Value::Undefined))? as u32;
+    identity_result(ctx, unsafe { ffi::setgid(id) }, "setgid")
+}
 #[cfg(unix)]
-fn op_setegid(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> { let id = ctx.coerce_number(args.first().unwrap_or(&Value::Undefined))? as u32; identity_result(ctx, unsafe { ffi::setegid(id) }, "setegid") }
+fn op_setegid(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
+    let id = ctx.coerce_number(args.first().unwrap_or(&Value::Undefined))? as u32;
+    identity_result(ctx, unsafe { ffi::setegid(id) }, "setegid")
+}
 #[cfg(unix)]
 fn op_getgroups(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> {
     let count = unsafe { ffi::getgroups(0, std::ptr::null_mut()) };
-    if count < 0 { return Err(ctx.make_error("Error", format!("getgroups failed: {}", std::io::Error::last_os_error()))); }
+    if count < 0 {
+        return Err(ctx.make_error(
+            "Error",
+            format!("getgroups failed: {}", std::io::Error::last_os_error()),
+        ));
+    }
     let mut groups = vec![0u32; count as usize];
     let count = unsafe { ffi::getgroups(count, groups.as_mut_ptr()) };
-    if count < 0 { return Err(ctx.make_error("Error", format!("getgroups failed: {}", std::io::Error::last_os_error()))); }
-    groups.truncate(count as usize); Ok(ctx.make_array(groups.into_iter().map(|id| Value::Num(id as f64)).collect()))
+    if count < 0 {
+        return Err(ctx.make_error(
+            "Error",
+            format!("getgroups failed: {}", std::io::Error::last_os_error()),
+        ));
+    }
+    groups.truncate(count as usize);
+    Ok(ctx.make_array(groups.into_iter().map(|id| Value::Num(id as f64)).collect()))
 }
 #[cfg(unix)]
 fn op_setgroups(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
-    let text = ctx.coerce_string(args.first().unwrap_or(&Value::Undefined))?.to_string();
-    let groups = if text.is_empty() { Vec::new() } else { text.split(',').map(str::parse::<u32>).collect::<Result<Vec<_>, _>>().map_err(|_| ctx.make_error("TypeError", "group ids must be numbers"))? };
-    identity_result(ctx, unsafe { ffi::setgroups(groups.len(), groups.as_ptr()) }, "setgroups")
+    let text = ctx
+        .coerce_string(args.first().unwrap_or(&Value::Undefined))?
+        .to_string();
+    let groups = if text.is_empty() {
+        Vec::new()
+    } else {
+        text.split(',')
+            .map(str::parse::<u32>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| ctx.make_error("TypeError", "group ids must be numbers"))?
+    };
+    identity_result(
+        ctx,
+        unsafe { ffi::setgroups(groups.len(), groups.as_ptr()) },
+        "setgroups",
+    )
 }
 #[cfg(unix)]
 fn op_initgroups(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
     use std::ffi::CString;
-    let user = ctx.coerce_string(args.first().unwrap_or(&Value::Undefined))?.to_string();
-    let user = CString::new(user).map_err(|_| ctx.make_error("TypeError", "user contains a null byte"))?;
+    let user = ctx
+        .coerce_string(args.first().unwrap_or(&Value::Undefined))?
+        .to_string();
+    let user =
+        CString::new(user).map_err(|_| ctx.make_error("TypeError", "user contains a null byte"))?;
     let group = ctx.coerce_number(args.get(1).unwrap_or(&Value::Undefined))? as u32;
-    identity_result(ctx, unsafe { ffi::initgroups(user.as_ptr(), group) }, "initgroups")
+    identity_result(
+        ctx,
+        unsafe { ffi::initgroups(user.as_ptr(), group) },
+        "initgroups",
+    )
 }
 #[cfg(not(unix))]
-fn op_setuid(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> { Err(ctx.make_error("Error", "setuid is not supported on this platform")) }
+fn op_setuid(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> {
+    Err(ctx.make_error("Error", "setuid is not supported on this platform"))
+}
 #[cfg(not(unix))]
-fn op_seteuid(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> { Err(ctx.make_error("Error", "seteuid is not supported on this platform")) }
+fn op_seteuid(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> {
+    Err(ctx.make_error("Error", "seteuid is not supported on this platform"))
+}
 #[cfg(not(unix))]
-fn op_setgid(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> { Err(ctx.make_error("Error", "setgid is not supported on this platform")) }
+fn op_setgid(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> {
+    Err(ctx.make_error("Error", "setgid is not supported on this platform"))
+}
 #[cfg(not(unix))]
-fn op_setegid(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> { Err(ctx.make_error("Error", "setegid is not supported on this platform")) }
+fn op_setegid(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> {
+    Err(ctx.make_error("Error", "setegid is not supported on this platform"))
+}
 #[cfg(not(unix))]
-fn op_getgroups(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> { Ok(ctx.make_array(Vec::new())) }
+fn op_getgroups(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> {
+    Ok(ctx.make_array(Vec::new()))
+}
 #[cfg(not(unix))]
-fn op_setgroups(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> { Err(ctx.make_error("Error", "setgroups is not supported on this platform")) }
+fn op_setgroups(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> {
+    Err(ctx.make_error("Error", "setgroups is not supported on this platform"))
+}
 #[cfg(not(unix))]
-fn op_initgroups(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> { Err(ctx.make_error("Error", "initgroups is not supported on this platform")) }
+fn op_initgroups(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> {
+    Err(ctx.make_error("Error", "initgroups is not supported on this platform"))
+}
 #[cfg(not(unix))]
 fn op_execve(ctx: &mut Ctx, _t: Value, _args: &[Value]) -> Result<Value, Value> {
     Err(ctx.make_error("Error", "process.execve is not supported on this platform"))
@@ -634,13 +771,25 @@ mod ffi {
     #[derive(Default)]
     #[repr(C)]
     pub struct RUsageInfoV2 {
-        pub uuid: [u8; 16], pub user_time: u64, pub system_time: u64,
-        pub pkg_idle_wkups: u64, pub interrupt_wkups: u64, pub pageins: u64,
-        pub wired_size: u64, pub resident_size: u64, pub phys_footprint: u64,
-        pub proc_start_abstime: u64, pub proc_exit_abstime: u64, pub child_user_time: u64,
-        pub child_system_time: u64, pub child_pkg_idle_wkups: u64,
-        pub child_interrupt_wkups: u64, pub child_pageins: u64, pub child_elapsed_abstime: u64,
-        pub diskio_bytesread: u64, pub diskio_byteswritten: u64,
+        pub uuid: [u8; 16],
+        pub user_time: u64,
+        pub system_time: u64,
+        pub pkg_idle_wkups: u64,
+        pub interrupt_wkups: u64,
+        pub pageins: u64,
+        pub wired_size: u64,
+        pub resident_size: u64,
+        pub phys_footprint: u64,
+        pub proc_start_abstime: u64,
+        pub proc_exit_abstime: u64,
+        pub child_user_time: u64,
+        pub child_system_time: u64,
+        pub child_pkg_idle_wkups: u64,
+        pub child_interrupt_wkups: u64,
+        pub child_pageins: u64,
+        pub child_elapsed_abstime: u64,
+        pub diskio_bytesread: u64,
+        pub diskio_byteswritten: u64,
     }
 
     #[cfg(target_os = "macos")]
@@ -648,7 +797,15 @@ mod ffi {
         let name = std::ffi::CString::new(name).ok()?;
         let mut value = 0_u64;
         let mut size = std::mem::size_of_val(&value);
-        let result = unsafe { sysctlbyname(name.as_ptr(), (&mut value as *mut u64).cast(), &mut size, std::ptr::null_mut(), 0) };
+        let result = unsafe {
+            sysctlbyname(
+                name.as_ptr(),
+                (&mut value as *mut u64).cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
         (result == 0).then_some(value)
     }
 
@@ -657,8 +814,13 @@ mod ffi {
         #[cfg(target_os = "macos")]
         pub fn proc_pid_rusage(pid: c_int, flavor: c_int, buffer: *mut std::ffi::c_void) -> c_int;
         #[cfg(target_os = "macos")]
-        pub fn sysctlbyname(name: *const c_char, old: *mut std::ffi::c_void, old_len: *mut usize,
-            new: *mut std::ffi::c_void, new_len: usize) -> c_int;
+        pub fn sysctlbyname(
+            name: *const c_char,
+            old: *mut std::ffi::c_void,
+            old_len: *mut usize,
+            new: *mut std::ffi::c_void,
+            new_len: usize,
+        ) -> c_int;
         pub fn getuid() -> c_uint;
         pub fn geteuid() -> c_uint;
         pub fn getgid() -> c_uint;
@@ -668,7 +830,11 @@ mod ffi {
         // mode_t is 16-bit on macOS / 32-bit on Linux; c_uint is ABI-safe for both (small values,
         // masked on the way out). Passing/returning through a register truncates harmlessly.
         pub fn umask(mask: c_uint) -> c_uint;
-        pub fn execve(path: *const c_char, argv: *const *const c_char, envp: *const *const c_char) -> c_int;
+        pub fn execve(
+            path: *const c_char,
+            argv: *const *const c_char,
+            envp: *const *const c_char,
+        ) -> c_int;
         pub fn setuid(uid: c_uint) -> c_int;
         pub fn seteuid(uid: c_uint) -> c_int;
         pub fn setgid(gid: c_uint) -> c_int;

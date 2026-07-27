@@ -59,7 +59,9 @@ fn read_string_array(ctx: &mut Ctx, v: &Value) -> Result<Vec<String>, Value> {
         _ => return Ok(out),
     };
     for i in 0..len {
-        let el = ctx.get_member(v, &i.to_string()).unwrap_or(Value::Undefined);
+        let el = ctx
+            .get_member(v, &i.to_string())
+            .unwrap_or(Value::Undefined);
         out.push(ctx.coerce_string(&el)?.to_string());
     }
     Ok(out)
@@ -104,10 +106,15 @@ fn build_command(
         if let Ok(Value::Num(n)) = ctx.get_member(&env_pairs, "length") {
             command.env_clear();
             for i in 0..(n as usize) {
-                let pair = ctx.get_member(&env_pairs, &i.to_string()).unwrap_or(Value::Undefined);
+                let pair = ctx
+                    .get_member(&env_pairs, &i.to_string())
+                    .unwrap_or(Value::Undefined);
                 let k = ctx.get_member(&pair, "0").unwrap_or(Value::Undefined);
                 let v = ctx.get_member(&pair, "1").unwrap_or(Value::Undefined);
-                command.env(ctx.coerce_string(&k)?.to_string(), ctx.coerce_string(&v)?.to_string());
+                command.env(
+                    ctx.coerce_string(&k)?.to_string(),
+                    ctx.coerce_string(&v)?.to_string(),
+                );
             }
         }
     }
@@ -119,7 +126,9 @@ fn build_command(
 
 /// `(cmd, argsArray, cwd, envPairsOrNull, stdioArray) -> { childId, pid }`.
 fn op_spawn(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
-    let cmd = ctx.coerce_string(args.first().unwrap_or(&Value::Undefined))?.to_string();
+    let cmd = ctx
+        .coerce_string(args.first().unwrap_or(&Value::Undefined))?
+        .to_string();
     let (mut command, stdio) = build_command(ctx, &cmd, args)?;
     command
         .stdin(stdio_for(&stdio[0]))
@@ -140,7 +149,9 @@ fn op_spawn(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
         unref: false,
         pending_tasks: Vec::new(),
     };
-    let reg = ctx.host_mut::<ChildRegistry>().expect("child registry installed");
+    let reg = ctx
+        .host_mut::<ChildRegistry>()
+        .expect("child registry installed");
     let id = reg.next;
     reg.next += 1;
     reg.procs.insert(id, proc);
@@ -151,7 +162,11 @@ fn op_spawn(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
     Ok(o)
 }
 
-fn take_resolve_reject(ctx: &mut Ctx, res: Option<&Value>, rej: Option<&Value>) -> Result<(Value, Value), Value> {
+fn take_resolve_reject(
+    ctx: &mut Ctx,
+    res: Option<&Value>,
+    rej: Option<&Value>,
+) -> Result<(Value, Value), Value> {
     match (res, rej) {
         (Some(r), Some(j)) if r.is_callable() && j.is_callable() => Ok((r.clone(), j.clone())),
         _ => Err(ctx.make_error("TypeError", "child op expects (resolve, reject)")),
@@ -179,7 +194,11 @@ fn op_read(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
         .host_mut::<ChildRegistry>()
         .and_then(|r| r.procs.get(&child_id))
         .map(|p| {
-            let h = if which == 2 { p.stderr.clone() } else { p.stdout.clone() };
+            let h = if which == 2 {
+                p.stderr.clone()
+            } else {
+                p.stdout.clone()
+            };
             (h, p.unref)
         })
         .ok_or_else(|| ctx.make_error("Error", "child: unknown process"))?;
@@ -213,7 +232,10 @@ fn op_read(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
 }
 
 fn decode_read(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<Vec<Value>, Value> {
-    match *payload.downcast::<Result<Vec<u8>, String>>().expect("read payload") {
+    match *payload
+        .downcast::<Result<Vec<u8>, String>>()
+        .expect("read payload")
+    {
         Ok(bytes) if bytes.is_empty() => Ok(vec![Value::Null]), // EOF
         Ok(bytes) => Ok(vec![ctx.make_uint8array(&bytes)?]),
         Err(e) => Err(ctx.make_error("Error", e)),
@@ -234,14 +256,18 @@ fn op_write(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
         .map(|p| p.stdin.clone())
         .ok_or_else(|| ctx.make_error("Error", "child: unknown process"))?;
 
-    let id = ctx
-        .host_mut::<TaskRegistry>()
-        .expect("registry")
-        .register(resolve, Some(reject), decode_ok);
+    let id = ctx.host_mut::<TaskRegistry>().expect("registry").register(
+        resolve,
+        Some(reject),
+        decode_ok,
+    );
     completions(ctx).run_blocking(id, move || {
         let mut guard = handle.lock().expect("stdin lock");
         let result: Result<(), String> = match guard.as_mut() {
-            Some(stdin) => stdin.write_all(&data).and_then(|()| stdin.flush()).map_err(|e| format!("write: {e}")),
+            Some(stdin) => stdin
+                .write_all(&data)
+                .and_then(|()| stdin.flush())
+                .map_err(|e| format!("write: {e}")),
             None => Err("child stdin is closed".to_string()),
         };
         Box::new(result)
@@ -250,7 +276,10 @@ fn op_write(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
 }
 
 fn decode_ok(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<Vec<Value>, Value> {
-    match *payload.downcast::<Result<(), String>>().expect("ok payload") {
+    match *payload
+        .downcast::<Result<(), String>>()
+        .expect("ok payload")
+    {
         Ok(()) => Ok(vec![]),
         Err(e) => Err(ctx.make_error("Error", e)),
     }
@@ -291,7 +320,10 @@ fn op_wait(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
 }
 
 fn decode_exit(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<Vec<Value>, Value> {
-    match *payload.downcast::<Result<Option<i32>, String>>().expect("exit payload") {
+    match *payload
+        .downcast::<Result<Option<i32>, String>>()
+        .expect("exit payload")
+    {
         Ok(Some(code)) => Ok(vec![Value::Num(code as f64)]),
         Ok(None) => Ok(vec![Value::Null]), // terminated by signal
         Err(e) => Err(ctx.make_error("Error", e)),
@@ -357,7 +389,10 @@ fn op_kill(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
 
 fn op_close_stdin(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
     let child_id = args.first().and_then(Value::as_num_opt).unwrap_or(0.0) as u32;
-    if let Some(p) = ctx.host_mut::<ChildRegistry>().and_then(|r| r.procs.get(&child_id)) {
+    if let Some(p) = ctx
+        .host_mut::<ChildRegistry>()
+        .and_then(|r| r.procs.get(&child_id))
+    {
         p.stdin.lock().expect("stdin lock").take(); // drop → EOF to the child
     }
     Ok(Value::Undefined)
@@ -366,14 +401,23 @@ fn op_close_stdin(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Val
 /// `(cmd, argsArray, inputBytesOrNull, cwd) -> { stdout, stderr, status }`. Synchronous: spawns,
 /// writes optional stdin, waits, and captures output — for `execFileSync`/`spawnSync`/`execSync`.
 fn op_exec_sync(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
-    let cmd = ctx.coerce_string(args.first().unwrap_or(&Value::Undefined))?.to_string();
+    let cmd = ctx
+        .coerce_string(args.first().unwrap_or(&Value::Undefined))?
+        .to_string();
     let arg_list = read_string_array(ctx, args.get(1).unwrap_or(&Value::Undefined))?;
     let input = ctx.typed_array_bytes(args.get(2).unwrap_or(&Value::Undefined));
     let cwd = opt_string(ctx, args.get(3));
 
     let mut command = Command::new(&cmd);
-    command.args(&arg_list).stdout(Stdio::piped()).stderr(Stdio::piped());
-    command.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() });
+    command
+        .args(&arg_list)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command.stdin(if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
@@ -394,6 +438,14 @@ fn op_exec_sync(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value
     let stderr = ctx.make_uint8array(&output.stderr)?;
     let _ = ctx.set_member(&o, "stdout", stdout);
     let _ = ctx.set_member(&o, "stderr", stderr);
-    let _ = ctx.set_member(&o, "status", output.status.code().map(|c| Value::Num(c as f64)).unwrap_or(Value::Null));
+    let _ = ctx.set_member(
+        &o,
+        "status",
+        output
+            .status
+            .code()
+            .map(|c| Value::Num(c as f64))
+            .unwrap_or(Value::Null),
+    );
     Ok(o)
 }

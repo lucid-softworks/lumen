@@ -12,7 +12,9 @@ impl Write for Captured {
         self.0.borrow_mut().extend_from_slice(buf);
         Ok(buf.len())
     }
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]
@@ -51,10 +53,13 @@ fn constrained_prime_generation_matches_node_options() {
     }
 
     let text = String::from_utf8(out.0.borrow().clone()).unwrap();
-    assert_eq!(text.lines().collect::<Vec<_>>(), [
-        "ordinary 1 true",
-        "safe 11 true true",
-        "ignored true",
-        "invalid RangeError",
-    ]);
+    assert_eq!(
+        text.lines().collect::<Vec<_>>(),
+        [
+            "ordinary 1 true",
+            "safe 11 true true",
+            "ignored true",
+            "invalid RangeError",
+        ]
+    );
 }

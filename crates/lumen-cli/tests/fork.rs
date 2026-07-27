@@ -52,7 +52,10 @@ fn child_process_fork_exchanges_messages() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        String::from_utf8(output.stdout).unwrap().lines().collect::<Vec<_>>(),
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
         ["message 42", "close 0 ordinary child output"]
     );
 }

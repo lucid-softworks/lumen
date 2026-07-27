@@ -6,7 +6,7 @@ use super::service::{
 };
 use super::{ab, arg, canonicalize_locale_list, coerce_options, make_service};
 use crate::interpreter::Interp;
-use crate::value::{Gc, Value, set_builtin, set_data};
+use crate::value::{set_builtin, set_data, Gc, Value};
 use std::rc::Rc;
 
 /// Days since the Unix epoch for a proleptic-Gregorian date (Howard Hinnant's algorithm).
@@ -628,7 +628,7 @@ fn ymd(ms: f64) -> (i64, u32, u32, u32, u32, u32, u32) {
     rem %= 60_000;
     let sec = (rem / 1000) as u32;
     let weekday = ((days % 7 + 4) % 7 + 7) as u32 % 7; // 0=Sun; 1970-01-01 was Thursday(4)
-    // civil from days
+                                                       // civil from days
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;
@@ -1386,7 +1386,11 @@ fn canon_utc_offset(s: &str) -> Option<String> {
 /// forms; only `narrow` noon differs).
 fn day_period_word(h: u32, width: &str) -> &'static str {
     if h == 12 {
-        if width == "narrow" { "n" } else { "noon" }
+        if width == "narrow" {
+            "n"
+        } else {
+            "noon"
+        }
     } else if h < 12 {
         "in the morning"
     } else if h < 18 {

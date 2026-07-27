@@ -73,7 +73,8 @@ struct WorkerEntry {
 }
 
 fn registry(ctx: &mut Ctx) -> &mut WorkerRegistry {
-    ctx.host_mut::<WorkerRegistry>().expect("worker registry installed")
+    ctx.host_mut::<WorkerRegistry>()
+        .expect("worker registry installed")
 }
 
 /// The worker→main inbox, carried by value through each completion so the next receive re-arms.
@@ -191,7 +192,11 @@ pub(crate) fn op_worker_post(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result
 /// `__worker.terminate(id)` — set the shared stop flag and drop the worker's inbox sender (so a
 /// blocked receive unblocks). The worker loop exits at its next poll and posts `Exited`, which is
 /// still delivered (the registry entry lives until then) so `'exit'` fires with the code.
-pub(crate) fn op_worker_terminate(ctx: &mut Ctx, _t: Value, args: &[Value]) -> Result<Value, Value> {
+pub(crate) fn op_worker_terminate(
+    ctx: &mut Ctx,
+    _t: Value,
+    args: &[Value],
+) -> Result<Value, Value> {
     let id = match args.first() {
         Some(Value::Num(n)) => *n as u64,
         _ => return Err(ctx.make_error("TypeError", "terminate: bad worker id")),
@@ -234,7 +239,9 @@ fn arm_main_inbox(ctx: &mut Ctx, inbox: MainInbox) {
         Some(w) => (w.dispatch.clone(), w.keep_alive),
         None => return, // already gone
     };
-    let reg = ctx.host_mut::<TaskRegistry>().expect("task registry installed");
+    let reg = ctx
+        .host_mut::<TaskRegistry>()
+        .expect("task registry installed");
     let task = reg.register(dispatch, None, decode_main_inbox);
     if !keep_alive {
         reg.set_unref(task);
@@ -258,8 +265,13 @@ fn arm_main_inbox(ctx: &mut Ctx, inbox: MainInbox) {
     });
 }
 
-fn decode_main_inbox(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<Vec<Value>, Value> {
-    let MainInboxResult { id, event, inbox } = *payload.downcast::<MainInboxResult>().expect("main inbox payload");
+fn decode_main_inbox(
+    ctx: &mut Ctx,
+    payload: Box<dyn std::any::Any + Send>,
+) -> Result<Vec<Value>, Value> {
+    let MainInboxResult { id, event, inbox } = *payload
+        .downcast::<MainInboxResult>()
+        .expect("main inbox payload");
     if let Some(inbox) = inbox {
         arm_main_inbox(ctx, inbox);
     }
@@ -269,10 +281,16 @@ fn decode_main_inbox(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> R
             let arr = ctx.make_uint8array(&bytes)?;
             Ok(vec![Value::from_string("message".into()), arr])
         }
-        ToMain::Error(msg) => Ok(vec![Value::from_string("error".into()), Value::from_string(msg)]),
+        ToMain::Error(msg) => Ok(vec![
+            Value::from_string("error".into()),
+            Value::from_string(msg),
+        ]),
         ToMain::Exited(code) => {
             registry(ctx).workers.remove(&id);
-            Ok(vec![Value::from_string("exit".into()), Value::Num(code as f64)])
+            Ok(vec![
+                Value::from_string("exit".into()),
+                Value::Num(code as f64),
+            ])
         }
     }
 }
@@ -316,7 +334,11 @@ fn run_worker(
     let boot = if spec.is_node {
         let ctx = rt.engine().ctx();
         let global = ctx.global_this();
-        let _ = ctx.set_member(&global, "__lumenWorkerThreadId", Value::Num(spec.thread_id as f64));
+        let _ = ctx.set_member(
+            &global,
+            "__lumenWorkerThreadId",
+            Value::Num(spec.thread_id as f64),
+        );
         if let Some(bytes) = &spec.init {
             match ctx.make_uint8array(bytes) {
                 Ok(arr) => {
@@ -402,7 +424,9 @@ fn arm_worker_inbox(ctx: &mut Ctx, inbox: WorkerInbox) {
         .get::<WorkerSelf>()
         .map(|w| w.keep_alive)
         .unwrap_or(true);
-    let reg = ctx.host_mut::<TaskRegistry>().expect("task registry installed");
+    let reg = ctx
+        .host_mut::<TaskRegistry>()
+        .expect("task registry installed");
     let task = reg.register(dispatch, None, decode_worker_inbox);
     if !keep_alive {
         reg.set_unref(task);
@@ -427,8 +451,13 @@ fn arm_worker_inbox(ctx: &mut Ctx, inbox: WorkerInbox) {
     });
 }
 
-fn decode_worker_inbox(ctx: &mut Ctx, payload: Box<dyn std::any::Any + Send>) -> Result<Vec<Value>, Value> {
-    let WorkerInboxResult { bytes, inbox } = *payload.downcast::<WorkerInboxResult>().expect("worker inbox payload");
+fn decode_worker_inbox(
+    ctx: &mut Ctx,
+    payload: Box<dyn std::any::Any + Send>,
+) -> Result<Vec<Value>, Value> {
+    let WorkerInboxResult { bytes, inbox } = *payload
+        .downcast::<WorkerInboxResult>()
+        .expect("worker inbox payload");
     if let Some(inbox) = inbox {
         arm_worker_inbox(ctx, inbox);
     }

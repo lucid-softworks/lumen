@@ -7,8 +7,13 @@ use lumen_runtime::{Completion, ConsoleOut, Runtime};
 #[derive(Clone, Default)]
 struct Captured(Rc<RefCell<Vec<u8>>>);
 impl Write for Captured {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> { self.0.borrow_mut().extend_from_slice(bytes); Ok(bytes.len()) }
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]
@@ -16,7 +21,8 @@ fn repl_evaluates_streamed_commands_and_multiline_input() {
     let mut runtime = Runtime::new();
     let out = Captured::default();
     runtime.engine().ctx().op_state().put(ConsoleOut {
-        out: Box::new(out.clone()), err: Box::new(Captured::default()),
+        out: Box::new(out.clone()),
+        err: Box::new(Captured::default()),
     });
     let source = r#"
       const repl = require("node:repl"), { Readable } = require("node:stream");
@@ -42,7 +48,10 @@ fn repl_evaluates_streamed_commands_and_multiline_input() {
         Completion::Throw { name, message } => panic!("uncaught {name}: {message}"),
     }
     assert_eq!(
-        String::from_utf8(out.0.borrow().clone()).unwrap().lines().collect::<Vec<_>>(),
+        String::from_utf8(out.0.borrow().clone())
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
         [
             "shape true L>  3",
             "output \"L> 3\\nL> ... ... { answer: 42 }\\nL> echo:hello\\nL> L> \"",

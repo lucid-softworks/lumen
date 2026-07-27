@@ -14,16 +14,21 @@ impl Write for Captured {
         Ok(buffer.len())
     }
 
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]
 fn client_multiplexes_requests_against_node_server() {
-    if Command::new("node").arg("--version").output().is_err() { return; }
+    if Command::new("node").arg("--version").output().is_err() {
+        return;
+    }
     let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = reservation.local_addr().unwrap().port();
     drop(reservation);
-    let server_source = format!(r#"
+    let server_source = format!(
+        r#"
         const http2 = require("node:http2");
         const server = http2.createServer();
         server.on("stream", (stream, headers) => {{
@@ -36,7 +41,8 @@ fn client_multiplexes_requests_against_node_server() {
         }});
         server.listen({port}, "127.0.0.1", () => console.log("ready"));
         server.on("session", session => session.on("close", () => server.close()));
-    "#);
+    "#
+    );
     let mut child = Command::new("node")
         .args(["-e", &server_source])
         .stdout(Stdio::piped())
@@ -44,7 +50,9 @@ fn client_multiplexes_requests_against_node_server() {
         .spawn()
         .unwrap();
     let mut ready = String::new();
-    BufReader::new(child.stdout.take().unwrap()).read_line(&mut ready).unwrap();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut ready)
+        .unwrap();
     assert_eq!(ready.trim(), "ready");
 
     let mut runtime = Runtime::new();
@@ -53,7 +61,8 @@ fn client_multiplexes_requests_against_node_server() {
         out: Box::new(out.clone()),
         err: Box::new(Captured::default()),
     });
-    let source = format!(r#"
+    let source = format!(
+        r#"
         const http2 = require("node:http2");
         const client = http2.connect("http://127.0.0.1:{port}");
         let completed = 0;
@@ -73,7 +82,8 @@ fn client_multiplexes_requests_against_node_server() {
         }}
         request({{ ":method": "GET", ":path": "/first" }}, "");
         request({{ ":method": "POST", ":path": "/second" }}, "hello");
-    "#);
+    "#
+    );
     match runtime.eval(&source).expect("source parses") {
         Completion::Value(_) => {}
         Completion::Throw { name, message } => panic!("uncaught {name}: {message}"),

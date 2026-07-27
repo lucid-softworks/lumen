@@ -36,7 +36,10 @@ fn val_to_js(v: Val) -> Value {
 fn js_to_val(ctx: &mut Ctx, v: &Value, ty: ValType) -> Val {
     match ty {
         ValType::I32 => Val::I32(ctx.coerce_number(v).unwrap_or(0.0) as i64 as i32),
-        ValType::I64 => Val::I64(v.bigint_as_i64().unwrap_or_else(|| ctx.coerce_number(v).unwrap_or(0.0) as i64)),
+        ValType::I64 => Val::I64(
+            v.bigint_as_i64()
+                .unwrap_or_else(|| ctx.coerce_number(v).unwrap_or(0.0) as i64),
+        ),
         ValType::F32 => Val::F32(ctx.coerce_number(v).unwrap_or(0.0) as f32),
         ValType::F64 => Val::F64(ctx.coerce_number(v).unwrap_or(0.0)),
         ValType::FuncRef | ValType::ExternRef => Val::Ref(None),
@@ -65,8 +68,17 @@ struct CtxHost<'a> {
 }
 
 impl Host for CtxHost<'_> {
-    fn call_host(&mut self, id: usize, args: &[Val], results: &[ValType]) -> Result<Vec<Val>, String> {
-        let callback = self.host_funcs.get(id).cloned().ok_or("wasm: bad import id")?;
+    fn call_host(
+        &mut self,
+        id: usize,
+        args: &[Val],
+        results: &[ValType],
+    ) -> Result<Vec<Val>, String> {
+        let callback = self
+            .host_funcs
+            .get(id)
+            .cloned()
+            .ok_or("wasm: bad import id")?;
         let js_args: Vec<Value> = args.iter().map(|v| val_to_js(*v)).collect();
         let ret = match self.ctx.invoke(callback, Value::Undefined, &js_args) {
             Ok(v) => v,
@@ -81,7 +93,10 @@ impl Host for CtxHost<'_> {
             _ => {
                 let mut out = Vec::with_capacity(results.len());
                 for (i, &ty) in results.iter().enumerate() {
-                    let el = self.ctx.get_member(&ret, &i.to_string()).unwrap_or(Value::Undefined);
+                    let el = self
+                        .ctx
+                        .get_member(&ret, &i.to_string())
+                        .unwrap_or(Value::Undefined);
                     out.push(js_to_val(self.ctx, &el, ty));
                 }
                 Ok(out)
@@ -95,10 +110,17 @@ impl Host for CtxHost<'_> {
 fn run_func(ctx: &mut Ctx, func_addr: usize, args: Vec<Val>) -> Result<Vec<Val>, Value> {
     let (mut store, host_funcs) = {
         let ws = ctx.host_mut::<WasmStore>().expect("wasm store");
-        (std::mem::take(&mut ws.store), std::mem::take(&mut ws.host_funcs))
+        (
+            std::mem::take(&mut ws.store),
+            std::mem::take(&mut ws.host_funcs),
+        )
     };
     let (result, host_err) = {
-        let mut host = CtxHost { ctx: &mut *ctx, host_funcs: &host_funcs, error: None };
+        let mut host = CtxHost {
+            ctx: &mut *ctx,
+            host_funcs: &host_funcs,
+            error: None,
+        };
         let r = store.invoke(func_addr, args, &mut host, 0);
         (r, host.error)
     };
@@ -107,7 +129,9 @@ fn run_func(ctx: &mut Ctx, func_addr: usize, args: Vec<Val>) -> Result<Vec<Val>,
         ws.store = store;
         ws.host_funcs = host_funcs;
     }
-    result.map_err(|msg| host_err.unwrap_or_else(|| ctx.make_error("Error", format!("RuntimeError: {msg}"))))
+    result.map_err(|msg| {
+        host_err.unwrap_or_else(|| ctx.make_error("Error", format!("RuntimeError: {msg}")))
+    })
 }
 
 // ---- ops --------------------------------------------------------------------------------------
@@ -207,23 +231,46 @@ pub(crate) fn op_instantiate(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Va
     }
     let mut parsed = Vec::new();
     for (i, imp) in module.imports.iter().enumerate() {
-        let entry = ctx.get_member(&resolved, &i.to_string()).unwrap_or(Value::Undefined);
+        let entry = ctx
+            .get_member(&resolved, &i.to_string())
+            .unwrap_or(Value::Undefined);
         match &imp.kind {
             wasm::ImportKind::Func(tyidx) => {
                 let f = ctx.get_member(&entry, "fn").unwrap_or(Value::Undefined);
                 if !f.is_callable() {
-                    return Err(ctx.make_error("Error", format!("LinkError: import {}.{} is not a function", imp.module, imp.name)));
+                    return Err(ctx.make_error(
+                        "Error",
+                        format!(
+                            "LinkError: import {}.{} is not a function",
+                            imp.module, imp.name
+                        ),
+                    ));
                 }
                 parsed.push(Parsed::Func(f, module.types[*tyidx as usize].clone()));
             }
             wasm::ImportKind::Memory(_) => {
-                parsed.push(Parsed::Mem(ctx.get_member(&entry, "memAddr").ok().and_then(|v| v.as_num_opt()).unwrap_or(0.0) as usize));
+                parsed.push(Parsed::Mem(
+                    ctx.get_member(&entry, "memAddr")
+                        .ok()
+                        .and_then(|v| v.as_num_opt())
+                        .unwrap_or(0.0) as usize,
+                ));
             }
             wasm::ImportKind::Table(_) => {
-                parsed.push(Parsed::Table(ctx.get_member(&entry, "tableAddr").ok().and_then(|v| v.as_num_opt()).unwrap_or(0.0) as usize));
+                parsed.push(Parsed::Table(
+                    ctx.get_member(&entry, "tableAddr")
+                        .ok()
+                        .and_then(|v| v.as_num_opt())
+                        .unwrap_or(0.0) as usize,
+                ));
             }
             wasm::ImportKind::Global(_) => {
-                parsed.push(Parsed::Global(ctx.get_member(&entry, "globalAddr").ok().and_then(|v| v.as_num_opt()).unwrap_or(0.0) as usize));
+                parsed.push(Parsed::Global(
+                    ctx.get_member(&entry, "globalAddr")
+                        .ok()
+                        .and_then(|v| v.as_num_opt())
+                        .unwrap_or(0.0) as usize,
+                ));
             }
         }
     }
@@ -263,7 +310,11 @@ pub(crate) fn op_instantiate(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Va
         module
             .exports
             .iter()
-            .filter_map(|e| ws.store.export_addr(inst_idx, &e.name).map(|(k, addr)| (e.name.clone(), k, addr)))
+            .filter_map(|e| {
+                ws.store
+                    .export_addr(inst_idx, &e.name)
+                    .map(|(k, addr)| (e.name.clone(), k, addr))
+            })
             .collect()
     };
     let exports: Vec<Value> = names
@@ -304,7 +355,9 @@ pub(crate) fn op_call(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Va
     };
     let mut args = Vec::with_capacity(params.len());
     for (i, &ty) in params.iter().enumerate() {
-        let v = ctx.get_member(&args_arr, &i.to_string()).unwrap_or(Value::Undefined);
+        let v = ctx
+            .get_member(&args_arr, &i.to_string())
+            .unwrap_or(Value::Undefined);
         args.push(js_to_val(ctx, &v, ty));
     }
 
@@ -356,7 +409,12 @@ pub(crate) fn op_table_get(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Valu
     let addr = num(a, 0) as usize;
     let i = num(a, 1) as usize;
     let ws = ctx.host_mut::<WasmStore>().expect("wasm store");
-    let slot = ws.store.tables.get(addr).and_then(|t| t.elems.get(i)).copied();
+    let slot = ws
+        .store
+        .tables
+        .get(addr)
+        .and_then(|t| t.elems.get(i))
+        .copied();
     match slot {
         Some(Some(faddr)) => Ok(Value::Num(faddr as f64)),
         Some(None) => Ok(Value::Num(-1.0)),
@@ -369,7 +427,12 @@ pub(crate) fn op_table_set(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Valu
     let i = num(a, 1) as usize;
     let faddr = a.get(2).and_then(Value::as_num_opt);
     let ws = ctx.host_mut::<WasmStore>().expect("wasm store");
-    match ws.store.tables.get_mut(addr).and_then(|t| t.elems.get_mut(i)) {
+    match ws
+        .store
+        .tables
+        .get_mut(addr)
+        .and_then(|t| t.elems.get_mut(i))
+    {
         Some(slot) => {
             *slot = faddr.filter(|n| *n >= 0.0).map(|n| n as usize);
             Ok(Value::Undefined)
@@ -381,7 +444,13 @@ pub(crate) fn op_table_set(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Valu
 pub(crate) fn op_table_size(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Value> {
     let addr = num(a, 0) as usize;
     let ws = ctx.host_mut::<WasmStore>().expect("wasm store");
-    Ok(Value::Num(ws.store.tables.get(addr).map(|t| t.elems.len()).unwrap_or(0) as f64))
+    Ok(Value::Num(
+        ws.store
+            .tables
+            .get(addr)
+            .map(|t| t.elems.len())
+            .unwrap_or(0) as f64,
+    ))
 }
 
 pub(crate) fn op_global_get(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Value> {

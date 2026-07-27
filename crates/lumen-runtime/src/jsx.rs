@@ -97,7 +97,11 @@ impl T {
                         }
                     }
                     let word: String = self.c[start..self.i].iter().collect();
-                    self.prev = if is_expr_keyword(&word) { Prev::Start } else { Prev::Value };
+                    self.prev = if is_expr_keyword(&word) {
+                        Prev::Start
+                    } else {
+                        Prev::Value
+                    };
                 }
                 c if c.is_ascii_digit() => {
                     // A numeric literal is a value; copy its run (digits, `.`, exponent, radix).
@@ -523,7 +527,9 @@ fn quote_key(name: &str) -> String {
             .next()
             .map(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
             .unwrap_or(false)
-        && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$');
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '$');
     if ident {
         name.to_string()
     } else {
@@ -555,7 +561,11 @@ fn json_string(s: &str) -> String {
 fn clean_jsx_text(text: &str) -> Option<String> {
     if !text.contains('\n') {
         // Single line: keep as-is only if it isn't pure whitespace.
-        return if text.trim().is_empty() { None } else { Some(text.to_string()) };
+        return if text.trim().is_empty() {
+            None
+        } else {
+            Some(text.to_string())
+        };
     }
     let lines: Vec<&str> = text.split('\n').collect();
     let last = lines.len() - 1;

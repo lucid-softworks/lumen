@@ -12,7 +12,9 @@ impl Write for Captured {
         self.0.borrow_mut().extend_from_slice(buf);
         Ok(buf.len())
     }
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]
@@ -57,7 +59,11 @@ fn p256_ecdsa_matches_bun_and_supports_both_encodings() {
     let lines = String::from_utf8(out.0.borrow().clone()).unwrap();
     let lines: Vec<_> = lines.lines().collect();
     assert_eq!(lines[0], "bun true");
-    assert!(lines[1].starts_with("der ") && lines[1].ends_with(" true false"), "{}", lines[1]);
+    assert!(
+        lines[1].starts_with("der ") && lines[1].ends_with(" true false"),
+        "{}",
+        lines[1]
+    );
     assert_eq!(lines[2], "ieee-p1363 64 true false");
     assert_eq!(lines[3], "generated true");
 }

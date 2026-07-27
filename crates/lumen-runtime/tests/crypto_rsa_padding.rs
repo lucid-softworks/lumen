@@ -12,7 +12,9 @@ impl Write for Captured {
         self.0.borrow_mut().extend_from_slice(buf);
         Ok(buf.len())
     }
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]
@@ -51,5 +53,8 @@ fn rsa_no_padding_supports_public_and_private_transforms() {
         Completion::Throw { name, message } => panic!("uncaught {name}: {message}"),
     }
     let text = String::from_utf8(out.0.borrow().clone()).unwrap();
-    assert_eq!(text.lines().collect::<Vec<_>>(), ["roundtrip true true", "size true"]);
+    assert_eq!(
+        text.lines().collect::<Vec<_>>(),
+        ["roundtrip true true", "size true"]
+    );
 }

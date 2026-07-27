@@ -8,7 +8,7 @@ use super::{
     ab, arg, canonicalize_locale_list, get_options_object as coerce_options, make_service,
 };
 use crate::interpreter::Interp;
-use crate::value::{Gc, Value, set_builtin, set_data};
+use crate::value::{set_builtin, set_data, Gc, Value};
 
 pub fn install(it: &mut Interp, ns: &Gc) {
     let (ctor, proto) = make_service(it, ns, "Segmenter", 0, construct);
@@ -184,7 +184,11 @@ fn grapheme_boundaries(s: &[u16]) -> Vec<(usize, bool)> {
         }
         // Fold cls[k] into the running state.
         ri_run = if b == Gcb::Ri {
-            if no_break { ri_run + 1 } else { 1 }
+            if no_break {
+                ri_run + 1
+            } else {
+                1
+            }
         } else {
             0
         };

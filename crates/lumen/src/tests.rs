@@ -332,10 +332,7 @@ fn function_apply_dense_and_observable_fallbacks() {
         run("var hits=0,a=[1,2];Object.defineProperty(a,'1',{get(){hits++;return 9}});Math.max.apply(null,a)+','+hits"),
         "9,1"
     );
-    assert_eq!(
-        run("Array.prototype[1]=8;Math.max.apply(null,[3,,4])"),
-        "8"
-    );
+    assert_eq!(run("Array.prototype[1]=8;Math.max.apply(null,[3,,4])"), "8");
     assert_eq!(
         run("function f(a){arguments[0]=9;return Math.max.apply(null,arguments)+','+a}f(1)"),
         "9,9"
@@ -1337,10 +1334,7 @@ fn label_validation() {
 fn labelled_continue_while() {
     // Regression: a labelled `continue` targeting a while/do-while used to escape the loop as an
     // uncaught completion and silently terminate the script (issue #4). It must restart the loop.
-    assert_eq!(
-        run("var i=0; a: while(i<3){ i++; continue a; } i"),
-        "3"
-    );
+    assert_eq!(run("var i=0; a: while(i<3){ i++; continue a; } i"), "3");
     assert_eq!(
         run("var i=0; a: do { i++; continue a; } while(i<3); i"),
         "3"
@@ -2641,7 +2635,9 @@ fn jit_scheduler_graph_active_packet_role_router_enabled_disabled_parity() {
         if router_disabled {
             command.env("LUMEN_JIT_NO_SCHED_ACTIVE_PACKET_ROLE_DISPATCH", "1");
         }
-        let output = command.output().expect("run graph Active packet router parity child test");
+        let output = command
+            .output()
+            .expect("run graph Active packet router parity child test");
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
@@ -3726,7 +3722,9 @@ fn jit_scheduler_graph_core_incoming_suspend_enabled_disabled_parity() {
             command.env("LUMEN_JIT_NO_SCHED_GRAPH_CORE_INCOMING", "1");
         }
 
-        let output = command.output().expect("run graph CORE incoming parity child");
+        let output = command
+            .output()
+            .expect("run graph CORE incoming parity child");
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
@@ -5007,10 +5005,7 @@ fn jit_scheduler_device_suspend_guards_methods_globals_and_descriptors() {
         "#,
     ]
     .join("\n");
-    assert_eq!(
-        run_jit(&src),
-        "2777|2324|2324|8|1|0|2|true|true|true|6|1|2"
-    );
+    assert_eq!(run_jit(&src), "2777|2324|2324|8|1|0|2|true|true|true|6|1|2");
 }
 
 #[test]
@@ -8169,10 +8164,14 @@ fn bytecode_compiles_labelled_loops() {
             .expect("a function declaration");
         crate::bytecode::compile(&func).is_some()
     }
-    assert!(compiles("function f(){ var i=0; a: while(i<3){ i++; continue a; } }"));
+    assert!(compiles(
+        "function f(){ var i=0; a: while(i<3){ i++; continue a; } }"
+    ));
     assert!(compiles("function f(){ a: do { break a; } while(false); }"));
     assert!(compiles("function f(){ a: for(;;){ continue a; } }"));
-    assert!(compiles("function f(){ var r=0; a: b: for(var i=0;i<2;i++){ continue a; } }"));
+    assert!(compiles(
+        "function f(){ var r=0; a: b: for(var i=0;i<2;i++){ continue a; } }"
+    ));
     assert!(compiles(
         "function f(){ outer: for(var i=0;i<2;i++){ for(var j=0;j<2;j++){ continue outer; } } }"
     ));
@@ -15679,15 +15678,20 @@ fn import_text_modules() {
     );
     let f = files.clone();
     let mut e = Engine::new();
-    e.eval_module_attrs(&f["/main.js"].clone(), "/main.js", move |spec, _r, _attr| {
-        f.get(spec).map(|s| (spec.to_string(), s.clone()))
-    })
+    e.eval_module_attrs(
+        &f["/main.js"].clone(),
+        "/main.js",
+        move |spec, _r, _attr| f.get(spec).map(|s| (spec.to_string(), s.clone())),
+    )
     .unwrap();
     let read = |e: &mut Engine, src: &str| match e.eval(src, false).unwrap() {
         Completion::Value(v) => v,
         Completion::Throw { name, message } => panic!("{src} threw {name}: {message}"),
     };
-    assert_eq!(read(&mut e, "globalThis.__note"), "hello text\nline 2 \u{e9}");
+    assert_eq!(
+        read(&mut e, "globalThis.__note"),
+        "hello text\nline 2 \u{e9}"
+    );
     assert_eq!(read(&mut e, "globalThis.__js_is_source"), "true");
     assert_eq!(read(&mut e, "globalThis.__not_executed"), "true");
     assert_eq!(read(&mut e, "globalThis.__ns"), "default:true");
@@ -15728,7 +15732,10 @@ fn import_bytes_modules() {
     // arbitrary binary content. The loader hands binary over latin-1-decoded (one char per
     // byte); the engine re-extracts the original bytes. Writes through the view fail like a
     // non-writable property: TypeError in strict (module) code; resize/transfer throw.
-    let blob: String = [0u8, 1, 0xfe, 0xff, 0x80, 65].iter().map(|&b| b as char).collect();
+    let blob: String = [0u8, 1, 0xfe, 0xff, 0x80, 65]
+        .iter()
+        .map(|&b| b as char)
+        .collect();
     let mut files: std::collections::HashMap<String, String> = Default::default();
     files.insert("/blob.bin".into(), blob);
     files.insert(
@@ -15753,15 +15760,20 @@ fn import_bytes_modules() {
     );
     let f = files.clone();
     let mut e = Engine::new();
-    e.eval_module_attrs(&f["/main.js"].clone(), "/main.js", move |spec, _r, _attr| {
-        f.get(spec).map(|s| (spec.to_string(), s.clone()))
-    })
+    e.eval_module_attrs(
+        &f["/main.js"].clone(),
+        "/main.js",
+        move |spec, _r, _attr| f.get(spec).map(|s| (spec.to_string(), s.clone())),
+    )
     .unwrap();
     let read = |e: &mut Engine, src: &str| match e.eval(src, false).unwrap() {
         Completion::Value(v) => v,
         Completion::Throw { name, message } => panic!("{src} threw {name}: {message}"),
     };
-    assert_eq!(read(&mut e, "globalThis.__shape"), "true|true|0,1,254,255,128,65|true");
+    assert_eq!(
+        read(&mut e, "globalThis.__shape"),
+        "true|true|0,1,254,255,128,65|true"
+    );
     assert_eq!(read(&mut e, "globalThis.__strict_write"), "TypeError:0");
     assert_eq!(read(&mut e, "globalThis.__resize"), "TypeError");
     // Sloppy-mode writes over an immutable buffer are a SILENT no-op (spec: the [[Set]] just
@@ -15817,9 +15829,11 @@ fn import_json_modules() {
     );
     let f = files.clone();
     let mut e = Engine::new();
-    e.eval_module_attrs(&f["/main.js"].clone(), "/main.js", move |spec, _r, _attr| {
-        f.get(spec).map(|s| (spec.to_string(), s.clone()))
-    })
+    e.eval_module_attrs(
+        &f["/main.js"].clone(),
+        "/main.js",
+        move |spec, _r, _attr| f.get(spec).map(|s| (spec.to_string(), s.clone())),
+    )
     .unwrap();
     let read = |e: &mut Engine, src: &str| match e.eval(src, false).unwrap() {
         Completion::Value(v) => v,
@@ -15847,9 +15861,10 @@ fn import_json_attr_distinct_from_plain_import() {
         let mut e = Engine::new();
         e.eval_module_attrs(&src, "/main.js", |spec, _r, attr| match (spec, attr) {
             ("/d.json", Some("json")) => Some((spec.to_string(), r#"{"k":"raw"}"#.to_string())),
-            ("/d.json", None) => {
-                Some((spec.to_string(), "export default { k: 'module' };".to_string()))
-            }
+            ("/d.json", None) => Some((
+                spec.to_string(),
+                "export default { k: 'module' };".to_string(),
+            )),
             _ => None,
         })
         .unwrap();
@@ -16694,7 +16709,10 @@ fn interp_layout_probes() {
     let mut e = crate::Engine::new();
     e.set_tier(crate::bytecode::Tier::Jit);
     // Force a JIT compile so the layout initializes through the production path.
-    let _ = e.eval("function f(a){ return a + 1; } for (var i = 0; i < 64; i++) f(i);", false);
+    let _ = e.eval(
+        "function f(a){ return a + 1; } for (var i = 0; i < 64; i++) f(i);",
+        false,
+    );
     let l = e.interp.interp_layout.get();
     assert!(l.valid, "interp layout probe failed on this platform");
     let mut offs = [

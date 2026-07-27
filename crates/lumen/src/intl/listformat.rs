@@ -9,7 +9,7 @@ use super::{
     make_service,
 };
 use crate::interpreter::Interp;
-use crate::value::{Value, set_builtin, set_data};
+use crate::value::{set_builtin, set_data, Value};
 
 pub fn install(it: &mut Interp, ns: &crate::value::Gc) {
     let (ctor, proto) = make_service(it, ns, "ListFormat", 0, construct);

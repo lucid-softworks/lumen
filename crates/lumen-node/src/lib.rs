@@ -294,7 +294,12 @@ fn stat_object(ctx: &mut Ctx, meta: &std::fs::Metadata) -> Value {
         use std::os::unix::fs::MetadataExt;
         set(&o, "mode", meta.mode() as f64, ctx);
         // Unix has no true creation time everywhere; `ctime` is the inode change time.
-        set(&o, "ctimeMs", meta.ctime() as f64 * 1000.0 + meta.ctime_nsec() as f64 / 1e6, ctx);
+        set(
+            &o,
+            "ctimeMs",
+            meta.ctime() as f64 * 1000.0 + meta.ctime_nsec() as f64 / 1e6,
+            ctx,
+        );
         set(&o, "ino", meta.ino() as f64, ctx);
         set(&o, "dev", meta.dev() as f64, ctx);
         set(&o, "nlink", meta.nlink() as f64, ctx);
@@ -415,7 +420,9 @@ fn op_mkdir(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value>
     };
     match result {
         Ok(()) => Ok(Value::from_string(p)),
-        Err(e) if recursive && e.kind() == std::io::ErrorKind::AlreadyExists => Ok(Value::Undefined),
+        Err(e) if recursive && e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Ok(Value::Undefined)
+        }
         Err(e) => Err(fs_error(ctx, "mkdir", &p, &e)),
     }
 }
@@ -423,7 +430,9 @@ fn op_mkdir(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value>
 /// `rename(from, to)`.
 fn op_rename(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
     let from = arg_path(ctx, args)?;
-    let to = ctx.coerce_string(args.get(1).unwrap_or(&Value::Undefined))?.to_string();
+    let to = ctx
+        .coerce_string(args.get(1).unwrap_or(&Value::Undefined))?
+        .to_string();
     match std::fs::rename(&from, &to) {
         Ok(()) => Ok(Value::Undefined),
         Err(e) => Err(fs_error(ctx, "rename", &from, &e)),
@@ -433,7 +442,9 @@ fn op_rename(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value
 /// `copyFile(from, to)`.
 fn op_copy_file(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
     let from = arg_path(ctx, args)?;
-    let to = ctx.coerce_string(args.get(1).unwrap_or(&Value::Undefined))?.to_string();
+    let to = ctx
+        .coerce_string(args.get(1).unwrap_or(&Value::Undefined))?
+        .to_string();
     match std::fs::copy(&from, &to) {
         Ok(_) => Ok(Value::Undefined),
         Err(e) => Err(fs_error(ctx, "copyfile", &from, &e)),
@@ -471,14 +482,19 @@ fn op_readlink(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Val
 /// `symlink(target, path)`.
 fn op_symlink(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
     let target = arg_path(ctx, args)?;
-    let link = ctx.coerce_string(args.get(1).unwrap_or(&Value::Undefined))?.to_string();
+    let link = ctx
+        .coerce_string(args.get(1).unwrap_or(&Value::Undefined))?
+        .to_string();
     // Unix has one symlink call; Windows distinguishes file vs directory links (and needs the
     // privilege / developer mode to create them), so pick by what the target currently is — the
     // same heuristic Node uses when its `type` argument is omitted.
     #[cfg(unix)]
     let r = std::os::unix::fs::symlink(&target, &link);
     #[cfg(windows)]
-    let r = if std::fs::metadata(&target).map(|m| m.is_dir()).unwrap_or(false) {
+    let r = if std::fs::metadata(&target)
+        .map(|m| m.is_dir())
+        .unwrap_or(false)
+    {
         std::os::windows::fs::symlink_dir(&target, &link)
     } else {
         std::os::windows::fs::symlink_file(&target, &link)
@@ -535,17 +551,33 @@ fn ownership_path(ctx: &mut Ctx, args: &[Value], op: &str, follow: bool) -> Resu
     } else {
         std::os::unix::fs::lchown(&path, Some(uid), Some(gid))
     };
-    result.map(|()| Value::Undefined).map_err(|error| fs_error(ctx, op, &path, &error))
+    result
+        .map(|()| Value::Undefined)
+        .map_err(|error| fs_error(ctx, op, &path, &error))
 }
 
 fn op_chown(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
-    #[cfg(unix)] { ownership_path(ctx, args, "chown", true) }
-    #[cfg(not(unix))] { let _ = args; Err(ctx.make_error("Error", "ENOSYS: chown is not supported on this platform")) }
+    #[cfg(unix)]
+    {
+        ownership_path(ctx, args, "chown", true)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = args;
+        Err(ctx.make_error("Error", "ENOSYS: chown is not supported on this platform"))
+    }
 }
 
 fn op_lchown(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
-    #[cfg(unix)] { ownership_path(ctx, args, "lchown", false) }
-    #[cfg(not(unix))] { let _ = args; Err(ctx.make_error("Error", "ENOSYS: lchown is not supported on this platform")) }
+    #[cfg(unix)]
+    {
+        ownership_path(ctx, args, "lchown", false)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = args;
+        Err(ctx.make_error("Error", "ENOSYS: lchown is not supported on this platform"))
+    }
 }
 
 fn op_lchmod(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
@@ -556,15 +588,31 @@ fn op_lchmod(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value
         use std::os::unix::ffi::OsStrExt;
         let c_path = std::ffi::CString::new(std::ffi::OsStr::new(&path).as_bytes())
             .map_err(|_| ctx.make_error("TypeError", "path must not contain NUL bytes"))?;
-        if unsafe { lchmod(c_path.as_ptr(), mode) } == 0 { Ok(Value::Undefined) }
-        else { Err(fs_error(ctx, "lchmod", &path, &std::io::Error::last_os_error())) }
+        if unsafe { lchmod(c_path.as_ptr(), mode) } == 0 {
+            Ok(Value::Undefined)
+        } else {
+            Err(fs_error(
+                ctx,
+                "lchmod",
+                &path,
+                &std::io::Error::last_os_error(),
+            ))
+        }
     }
     #[cfg(not(target_os = "macos"))]
-    { let _ = mode; Err(ctx.make_error("Error", format!("ENOSYS: lchmod is not supported on this platform, lchmod '{path}'"))) }
+    {
+        let _ = mode;
+        Err(ctx.make_error(
+            "Error",
+            format!("ENOSYS: lchmod is not supported on this platform, lchmod '{path}'"),
+        ))
+    }
 }
 
 #[cfg(target_os = "macos")]
-extern "C" { fn lchmod(path: *const std::os::raw::c_char, mode: u32) -> i32; }
+extern "C" {
+    fn lchmod(path: *const std::os::raw::c_char, mode: u32) -> i32;
+}
 
 /// `mkdtemp(prefix)` — create a uniquely-named temp directory and return its path. Uniqueness
 /// comes from the OS-assigned pid plus a monotonically bumped counter (no RNG dependency).
@@ -651,7 +699,10 @@ fn set_times(ctx: &mut Ctx, args: &[Value], follow: bool, op: &str) -> Result<Va
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (atime, mtime, follow, op);
-        let err = ctx.make_error("Error", format!("ENOSYS: {op} is not supported on this platform, {op} '{p}'"));
+        let err = ctx.make_error(
+            "Error",
+            format!("ENOSYS: {op} is not supported on this platform, {op} '{p}'"),
+        );
         let _ = ctx.set_member(&err, "code", Value::str("ENOSYS"));
         Err(err)
     }
@@ -720,7 +771,12 @@ fn op_statfs(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value
         // platform's `struct statvfs` (extra trailing padding), so the write stays in bounds.
         let rc = unsafe { statvfs(c_path.as_ptr(), buf.as_mut_ptr()) };
         if rc != 0 {
-            return Err(fs_error(ctx, "statfs", &p, &std::io::Error::last_os_error()));
+            return Err(fs_error(
+                ctx,
+                "statfs",
+                &p,
+                &std::io::Error::last_os_error(),
+            ));
         }
         let s = unsafe { buf.assume_init() };
         let o = Value::Obj(ctx.new_object());
@@ -738,7 +794,10 @@ fn op_statfs(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let err = ctx.make_error("Error", format!("ENOSYS: statfs is not supported on this platform, statfs '{p}'"));
+        let err = ctx.make_error(
+            "Error",
+            format!("ENOSYS: statfs is not supported on this platform, statfs '{p}'"),
+        );
         let _ = ctx.set_member(&err, "code", Value::str("ENOSYS"));
         Err(err)
     }
@@ -978,5 +1037,7 @@ fn op_zlib_crc32(ctx: &mut Ctx, _t: Value, a: &[Value]) -> Result<Value, Value> 
         return Err(ctx.make_error("TypeError", "zlib.crc32 expects a Buffer/TypedArray"));
     };
     let seed = a.get(1).and_then(|v| v.as_num_opt()).unwrap_or(0.0) as u32;
-    Ok(Value::Num(lumen_host::deflate::crc32_from(seed, &bytes) as f64))
+    Ok(Value::Num(
+        lumen_host::deflate::crc32_from(seed, &bytes) as f64
+    ))
 }

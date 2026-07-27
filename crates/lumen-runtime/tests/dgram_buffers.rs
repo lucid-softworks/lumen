@@ -11,7 +11,9 @@ impl Write for Captured {
         self.0.borrow_mut().extend_from_slice(buf);
         Ok(buf.len())
     }
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]
@@ -39,9 +41,19 @@ fn udp_socket_buffer_sizes_are_native_and_validated() {
         Completion::Value(_) => {}
         Completion::Throw { name, message } => panic!("uncaught {name}: {message}"),
     }
-    let lines: Vec<_> = String::from_utf8(out.0.borrow().clone()).unwrap().lines().map(str::to_string).collect();
+    let lines: Vec<_> = String::from_utf8(out.0.borrow().clone())
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
     assert_eq!(
         lines,
-        ["initial true true", "returns undefined undefined", "updated true true", "interface4 true", "invalid ERR_OUT_OF_RANGE"]
+        [
+            "initial true true",
+            "returns undefined undefined",
+            "updated true true",
+            "interface4 true",
+            "invalid ERR_OUT_OF_RANGE"
+        ]
     );
 }

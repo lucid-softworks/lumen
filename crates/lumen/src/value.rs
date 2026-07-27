@@ -242,11 +242,26 @@ mod packed_value_tests {
     #[test]
     fn packed_value_is_one_word_and_round_trips_scalars() {
         assert_eq!(std::mem::size_of::<PackedValue>(), 8);
-        assert!(matches!(PackedValue::pack(Value::Undefined).into_value(), Value::Undefined));
-        assert!(matches!(PackedValue::pack(Value::Empty).into_value(), Value::Empty));
-        assert!(matches!(PackedValue::pack(Value::Null).into_value(), Value::Null));
-        assert!(matches!(PackedValue::pack(Value::Bool(false)).into_value(), Value::Bool(false)));
-        assert!(matches!(PackedValue::pack(Value::Bool(true)).into_value(), Value::Bool(true)));
+        assert!(matches!(
+            PackedValue::pack(Value::Undefined).into_value(),
+            Value::Undefined
+        ));
+        assert!(matches!(
+            PackedValue::pack(Value::Empty).into_value(),
+            Value::Empty
+        ));
+        assert!(matches!(
+            PackedValue::pack(Value::Null).into_value(),
+            Value::Null
+        ));
+        assert!(matches!(
+            PackedValue::pack(Value::Bool(false)).into_value(),
+            Value::Bool(false)
+        ));
+        assert!(matches!(
+            PackedValue::pack(Value::Bool(true)).into_value(),
+            Value::Bool(true)
+        ));
         for n in [0.0f64, -0.0, 42.5, f64::INFINITY, f64::NAN] {
             let Value::Num(out) = PackedValue::pack(Value::Num(n)).into_value() else {
                 panic!("number changed kind")
@@ -433,7 +448,7 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
     let rcbox_data = as_ptr - stored; // RcBox header (strong+weak) before the value
     let obj_from_rc = rcbox_data + refcell_value; // stored ptr → Object
     let rc_strong_off = 0usize; // strong count is the RcBox's first field
-    // Verify: the strong count sits at `stored + rc_strong_off` and reads the live count.
+                                // Verify: the strong count sits at `stored + rc_strong_off` and reads the live count.
     let strong_ok =
         unsafe { *((stored + rc_strong_off) as *const usize) } == Rc::strong_count(sample);
 
@@ -492,20 +507,16 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
         && vec_len_off.is_some_and(|o| pv_words[o / 8] == 1)
         && vec_cap_off.is_some_and(|o| pv_words[o / 8] == 3);
     let packed_some: Option<Box<Vec<Property>>> = Some(Box::new(pv));
-    let packed_word = unsafe {
-        *(&packed_some as *const Option<Box<Vec<Property>>> as *const usize)
-    };
+    let packed_word =
+        unsafe { *(&packed_some as *const Option<Box<Vec<Property>>> as *const usize) };
     let packed_expected = packed_some
         .as_deref()
         .map_or(0, |v| v as *const Vec<Property> as usize);
     let packed_none: Option<Box<Vec<Property>>> = None;
-    let packed_none_word = unsafe {
-        *(&packed_none as *const Option<Box<Vec<Property>>> as *const usize)
-    };
-    let packed_elems_valid = pv_header_ok
-        && packed_word == packed_expected
-        && packed_word != 0
-        && packed_none_word == 0;
+    let packed_none_word =
+        unsafe { *(&packed_none as *const Option<Box<Vec<Property>>> as *const usize) };
+    let packed_elems_valid =
+        pv_header_ok && packed_word == packed_expected && packed_word != 0 && packed_none_word == 0;
 
     // Exotic::None / Exotic::Array discriminants (Exotic is repr(Rust); probe to be certain).
     let none = Exotic::None;
@@ -1776,8 +1787,7 @@ impl Props {
     /// footprint at 128 bytes while becoming smaller than the classic representation once filled.
     pub(crate) fn reserve_small_holes(&mut self, len: usize) {
         static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if !*ENABLED
-            .get_or_init(|| std::env::var_os("LUMEN_JIT_NO_PACKED_HOLES").is_none())
+        if !*ENABLED.get_or_init(|| std::env::var_os("LUMEN_JIT_NO_PACKED_HOLES").is_none())
             || len == 0
             || len > 8
             || self.elems.packed.is_some()
@@ -1802,9 +1812,7 @@ impl Props {
         let packed = self.elems.packed_mut()?;
         if packed.len() < len
             || packed[..len].iter().any(|p| {
-                p.accessor()
-                    || !p.writable()
-                    || !matches!(p.value(), Value::Empty | Value::Num(_))
+                p.accessor() || !p.writable() || !matches!(p.value(), Value::Empty | Value::Num(_))
             })
         {
             return None;
@@ -2083,11 +2091,7 @@ impl Props {
     /// whole existence scan and key-string hashing of [`Props::insert`] can be skipped. Array
     /// (`elem_mode`) maps only: the shape is untouched. Returns `false` (nothing changed) when
     /// the gates don't hold; the caller runs the generic path.
-    pub(crate) fn try_append_element(
-        &mut self,
-        n: u32,
-        prop: Property,
-    ) -> Result<(), Property> {
+    pub(crate) fn try_append_element(&mut self, n: u32, prop: Property) -> Result<(), Property> {
         if let Some(packed) = &self.elems.packed {
             if self.has_far.get() || !self.elem_mode.get() || n as usize != packed.len() {
                 return Err(prop);

@@ -7,8 +7,13 @@ use lumen_runtime::{Completion, ConsoleOut, Runtime};
 #[derive(Clone, Default)]
 struct Captured(Rc<RefCell<Vec<u8>>>);
 impl Write for Captured {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> { self.0.borrow_mut().extend_from_slice(bytes); Ok(bytes.len()) }
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]
@@ -16,7 +21,8 @@ fn tty_streams_wrap_process_io_without_claiming_terminal_support() {
     let mut runtime = Runtime::new();
     let out = Captured::default();
     runtime.engine().ctx().op_state().put(ConsoleOut {
-        out: Box::new(out.clone()), err: Box::new(Captured::default()),
+        out: Box::new(out.clone()),
+        err: Box::new(Captured::default()),
     });
     let source = r#"
       const tty = require("node:tty"), stream = require("node:stream");
@@ -32,7 +38,16 @@ fn tty_streams_wrap_process_io_without_claiming_terminal_support() {
         Completion::Throw { name, message } => panic!("uncaught {name}: {message}"),
     }
     assert_eq!(
-        String::from_utf8(out.0.borrow().clone()).unwrap().lines().collect::<Vec<_>>(),
-        ["shape true true false", "input 0 false true true", "output 1 false 1 false 80x24", "cursor true true true true", "tty-write"]
+        String::from_utf8(out.0.borrow().clone())
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        [
+            "shape true true false",
+            "input 0 false true true",
+            "output 1 false 1 false 80x24",
+            "cursor true true true true",
+            "tty-write"
+        ]
     );
 }

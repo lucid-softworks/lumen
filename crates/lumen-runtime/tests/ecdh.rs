@@ -12,7 +12,9 @@ impl Write for Captured {
         self.0.borrow_mut().extend_from_slice(buf);
         Ok(buf.len())
     }
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]
@@ -57,7 +59,15 @@ fn p256_ecdh_matches_node_vector() {
     }
 
     let text = String::from_utf8(out.0.borrow().clone()).unwrap();
-    assert_eq!(text.lines().collect::<Vec<_>>(), ["curves [\"P-256\",\"prime256v1\",\"secp256r1\"]", "secret true true", "convert true true", "keyobjects true"]);
+    assert_eq!(
+        text.lines().collect::<Vec<_>>(),
+        [
+            "curves [\"P-256\",\"prime256v1\",\"secp256r1\"]",
+            "secret true true",
+            "convert true true",
+            "keyobjects true"
+        ]
+    );
 }
 
 #[test]
@@ -93,8 +103,8 @@ fn generated_x25519_keys_exchange_secrets_and_export() {
         Completion::Throw { name, message } => panic!("uncaught {name}: {message}"),
     }
     let text = String::from_utf8(out.0.borrow().clone()).unwrap();
-    assert_eq!(text.lines().collect::<Vec<_>>(), [
-        "sync 32 true X25519 true",
-        "async true 32",
-    ]);
+    assert_eq!(
+        text.lines().collect::<Vec<_>>(),
+        ["sync 32 true X25519 true", "async true 32",]
+    );
 }
