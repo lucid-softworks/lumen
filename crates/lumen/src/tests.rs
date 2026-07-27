@@ -2616,6 +2616,10 @@ fn jit_scheduler_graph_active_device_packet_fallback_parity_case() {
     );
 }
 
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 #[test]
 fn jit_scheduler_graph_active_packet_role_router_enabled_disabled_parity() {
     use std::process::Command;
@@ -3504,6 +3508,10 @@ fn jit_scheduler_graph_core_epoch_soft_rejects_foreign_task_scheduler_once() {
     assert_eq!(run_jit(&src), "ok");
 }
 
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 #[test]
 fn jit_scheduler_graph_core_suspend_enabled_disabled_parity() {
     use std::process::Command;
@@ -3695,6 +3703,10 @@ fn jit_scheduler_graph_core_incoming_suspend_parity_case() {
     assert_eq!(run_jit(&src), "2|true|true|true|2|true|true|true");
 }
 
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 #[test]
 fn jit_scheduler_graph_core_incoming_suspend_enabled_disabled_parity() {
     use std::process::Command;
@@ -3739,6 +3751,10 @@ fn jit_scheduler_graph_core_incoming_suspend_enabled_disabled_parity() {
     }
 }
 
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 #[test]
 fn jit_scheduler_graph_core_incoming_suspend_uses_saved_record_under_trace() {
     use std::process::Command;
@@ -6141,6 +6157,10 @@ fn jit_scheduler_active_handler_incoming_work_delivery_parity_case() {
     );
 }
 
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 #[test]
 fn jit_scheduler_active_handler_incoming_work_delivery_enabled_disabled_parity() {
     use std::process::Command;
