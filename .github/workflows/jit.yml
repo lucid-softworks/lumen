@@ -30,4 +30,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Download V8 benchmark test fixtures
+        shell: bash
+        env:
+          V8_BENCHMARK_REV: 0e2160885d0ca693577d54f1bbbe572f052282c6
+        run: |
+          mkdir -p v8-v7
+          for fixture in base.js richards.js; do
+            curl --fail --silent --show-error --location \
+              "https://raw.githubusercontent.com/mozilla/arewefastyet/${V8_BENCHMARK_REV}/benchmarks/v8-v7/${fixture}" \
+              --output "v8-v7/${fixture}"
+          done
       - run: cargo test -p lumen
