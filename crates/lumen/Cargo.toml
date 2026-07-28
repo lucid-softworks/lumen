@@ -10,6 +10,8 @@ license.workspace = true
 # `js` crate's `backend-lumen` feature for how it slots in.
 
 [dependencies]
+regex = { version = "1.11", default-features = false, features = ["std", "perf"] }
+fancy-regex = { version = "0.18", default-features = false, features = ["std", "perf", "unicode"] }
 
 [features]
 default = ["intl"]

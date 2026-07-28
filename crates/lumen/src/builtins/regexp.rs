@@ -87,6 +87,133 @@ fn re_source_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Val
     ))
 }
 
+fn re_flags_get(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    if !matches!(this, Value::Obj(_)) {
+        return Err(i.make_error(
+            "TypeError",
+            "RegExp.prototype.flags getter called on non-object",
+        ));
+    }
+    let mut out = String::new();
+    for (prop, ch) in [
+        ("hasIndices", 'd'),
+        ("global", 'g'),
+        ("ignoreCase", 'i'),
+        ("multiline", 'm'),
+        ("dotAll", 's'),
+        ("unicode", 'u'),
+        ("unicodeSets", 'v'),
+        ("sticky", 'y'),
+    ] {
+        let v = ab(i.get_member(&this, prop))?;
+        if i.to_boolean(&v) {
+            out.push(ch);
+        }
+    }
+    Ok(Value::from_string(out))
+}
+
+macro_rules! regexp_flag_getter {
+    ($name:ident, $flag:literal) => {
+        fn $name(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+            re_flag_get(i, &this, Some($flag))
+        }
+    };
+}
+regexp_flag_getter!(re_has_indices_get, 'd');
+regexp_flag_getter!(re_global_get, 'g');
+regexp_flag_getter!(re_ignore_case_get, 'i');
+regexp_flag_getter!(re_multiline_get, 'm');
+regexp_flag_getter!(re_dot_all_get, 's');
+regexp_flag_getter!(re_unicode_get, 'u');
+regexp_flag_getter!(re_unicode_sets_get, 'v');
+regexp_flag_getter!(re_sticky_get, 'y');
+
+/// The native symbol methods may read `flags`, every component flag getter, and `exec`.
+/// A wrapper-eliding specialization must prove those live inherited dependencies, not merely
+/// the outer symbol-method identity.
+pub(super) fn literal_match_dependencies_canonical(i: &Interp) -> bool {
+    let Some(proto) = i.extra_protos.get("RegExp") else {
+        return false;
+    };
+    let p = proto.borrow();
+    let names = [
+        "flags",
+        "hasIndices",
+        "global",
+        "ignoreCase",
+        "multiline",
+        "dotAll",
+        "unicode",
+        "unicodeSets",
+        "sticky",
+        "exec",
+    ];
+    let proto_ptr = Rc::as_ptr(proto) as usize;
+    let shape = p.props.shape();
+    let cached = i.regexp_dependency_cache.get();
+    let slots = if cached.proto == proto_ptr && cached.shape == shape {
+        cached.slots
+    } else {
+        let mut slots = [u32::MAX; 10];
+        for (index, name) in names.iter().enumerate() {
+            let Some(slot) = p.props.slot_of(name) else {
+                return false;
+            };
+            slots[index] = slot as u32;
+        }
+        i.regexp_dependency_cache
+            .set(crate::interpreter::RegexpDependencyCache {
+                proto: proto_ptr,
+                shape,
+                slots,
+            });
+        slots
+    };
+    let property_at = |index: usize| {
+        p.props
+            .entry_at(slots[index] as usize)
+            .filter(|(key, _)| &**key == names[index])
+            .map(|(_, property)| property)
+    };
+    let getter_is = |index: usize, native: NativeFn| {
+        property_at(index).is_some_and(|property| {
+            matches!(
+                property.getter(),
+                Some(Value::Obj(function))
+                    if matches!(
+                        function.borrow().call,
+                        Callable::Native(found)
+                            if found as usize == native as *const () as usize
+                    )
+            )
+        })
+    };
+    getter_is(0, re_flags_get)
+        && getter_is(1, re_has_indices_get)
+        && getter_is(2, re_global_get)
+        && getter_is(3, re_ignore_case_get)
+        && getter_is(4, re_multiline_get)
+        && getter_is(5, re_dot_all_get)
+        && getter_is(6, re_unicode_get)
+        && getter_is(7, re_unicode_sets_get)
+        && getter_is(8, re_sticky_get)
+        && property_at(9)
+            .filter(|property| !property.accessor())
+            .map(Property::value)
+            .is_some_and(|value| {
+                matches!(
+                    value,
+                    Value::Obj(ref function)
+                        if matches!(
+                            function.borrow().call,
+                            Callable::Native(native)
+                                if native as usize == regexp_exec as *const () as usize
+                        )
+                )
+            })
+}
+
 /// The second (flags) argument to RegExp / RegExp.prototype.compile: undefined → "", else ToString.
 fn regexp_flags_arg(i: &mut Interp, a: &[Value]) -> Result<String, Value> {
     match arg(a, 1) {
@@ -108,55 +235,15 @@ pub(super) fn install_regexp(it: &mut Interp) {
     };
     add_getter(it, &proto, "source", re_source_get);
     // `get flags` is generic: it reads each component flag accessor via [[Get]] on the receiver.
-    add_getter(it, &proto, "flags", |i, t, _| {
-        if !matches!(t, Value::Obj(_)) {
-            return Err(i.make_error(
-                "TypeError",
-                "RegExp.prototype.flags getter called on non-object",
-            ));
-        }
-        let mut out = String::new();
-        for (prop, ch) in [
-            ("hasIndices", 'd'),
-            ("global", 'g'),
-            ("ignoreCase", 'i'),
-            ("multiline", 'm'),
-            ("dotAll", 's'),
-            ("unicode", 'u'),
-            ("unicodeSets", 'v'),
-            ("sticky", 'y'),
-        ] {
-            let v = ab(i.get_member(&t, prop))?;
-            if i.to_boolean(&v) {
-                out.push(ch);
-            }
-        }
-        Ok(Value::from_string(out))
-    });
-    add_getter(it, &proto, "global", |i, t, _| {
-        re_flag_get(i, &t, Some('g'))
-    });
-    add_getter(it, &proto, "ignoreCase", |i, t, _| {
-        re_flag_get(i, &t, Some('i'))
-    });
-    add_getter(it, &proto, "multiline", |i, t, _| {
-        re_flag_get(i, &t, Some('m'))
-    });
-    add_getter(it, &proto, "dotAll", |i, t, _| {
-        re_flag_get(i, &t, Some('s'))
-    });
-    add_getter(it, &proto, "sticky", |i, t, _| {
-        re_flag_get(i, &t, Some('y'))
-    });
-    add_getter(it, &proto, "unicode", |i, t, _| {
-        re_flag_get(i, &t, Some('u'))
-    });
-    add_getter(it, &proto, "hasIndices", |i, t, _| {
-        re_flag_get(i, &t, Some('d'))
-    });
-    add_getter(it, &proto, "unicodeSets", |i, t, _| {
-        re_flag_get(i, &t, Some('v'))
-    });
+    add_getter(it, &proto, "flags", re_flags_get);
+    add_getter(it, &proto, "global", re_global_get);
+    add_getter(it, &proto, "ignoreCase", re_ignore_case_get);
+    add_getter(it, &proto, "multiline", re_multiline_get);
+    add_getter(it, &proto, "dotAll", re_dot_all_get);
+    add_getter(it, &proto, "sticky", re_sticky_get);
+    add_getter(it, &proto, "unicode", re_unicode_get);
+    add_getter(it, &proto, "hasIndices", re_has_indices_get);
+    add_getter(it, &proto, "unicodeSets", re_unicode_sets_get);
     // Annex B B.2.5 RegExp.prototype.compile(pattern, flags): recompile this regex in place.
     it.def_method(&proto, "compile", 2, |i, this, a| {
         let ptr = map_ptr(&this).filter(|p| i.regexps.contains_key(p));
@@ -472,7 +559,7 @@ fn require_regexp_this(i: &mut Interp, this: &Value, name: &str) -> Result<(), V
     }
 }
 
-fn re_sym_match(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+pub(super) fn re_sym_match(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
     require_regexp_this(i, &this, "[Symbol.match]")?;
     let s = ab(i.to_string(&arg(a, 0)))?;
     let flags = ab(i.get_member(&this, "flags"))?;
@@ -521,7 +608,61 @@ fn re_sym_search(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Valu
         _ => ab(i.get_member(&result, "index")),
     }
 }
-fn re_sym_replace(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+pub(super) fn re_sym_replace(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    re_sym_replace_impl(i, this, a, false)
+}
+
+/// Committed dead-result `@@replace` for a direct RegExp whose symbol method, flag accessors, and
+/// exec method have all been proven canonical by the caller. The skipped wrapper operations are
+/// therefore side-effect-free; matcher state, legacy statics, `lastIndex`, and empty-match
+/// advancement remain identical to the builtin algorithm.
+pub(super) fn re_sym_replace_discard_direct(
+    i: &mut Interp,
+    obj: &Gc,
+    re: &Rc<crate::regex::Regex>,
+    input: &crate::lstr::LStr,
+) -> Result<Value, Value> {
+    let global = re.global;
+    let unicode = re.unicode;
+    if global {
+        obj.borrow_mut()
+            .props
+            .get_mut("lastIndex")
+            .expect("direct replace lastIndex guard")
+            .set_value(Value::Num(0.0));
+    }
+    loop {
+        let matched = regexp_exec_discard_direct(i, obj, re, input)?;
+        if !matched || !global {
+            break;
+        }
+        let empty = i
+            .regexp_last
+            .as_ref()
+            .and_then(|last| last.caps.first().copied().flatten())
+            .is_some_and(|(start, end)| start == end);
+        if empty {
+            let li = match obj.borrow().props.get("lastIndex").map(Property::value) {
+                Some(Value::Num(n)) => n as usize,
+                _ => unreachable!("direct replace lastIndex guard"),
+            };
+            let next = advance_string_index(li, input, unicode);
+            obj.borrow_mut()
+                .props
+                .get_mut("lastIndex")
+                .expect("direct replace lastIndex guard")
+                .set_value(Value::Num(next as f64));
+        }
+    }
+    Ok(Value::Undefined)
+}
+
+fn re_sym_replace_impl(
+    i: &mut Interp,
+    this: Value,
+    a: &[Value],
+    discard_result: bool,
+) -> Result<Value, Value> {
     require_regexp_this(i, &this, "[Symbol.replace]")?;
     let s = ab(i.to_string(&arg(a, 0)))?;
     // All positions are UTF-16 unit offsets.
@@ -541,6 +682,80 @@ fn re_sym_replace(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Val
     let unicode = flags.contains('u') || flags.contains('v');
     if global {
         set_throw(i, &this, "lastIndex", Value::Num(0.0))?;
+    }
+    // When String#replace's result is dead, a direct ordinary RegExp can execute without
+    // materializing match arrays or the replacement string. All observable flag Gets and
+    // replacement coercion above have already happened. The live exec identity/prototype and
+    // internal flags are checked before entering the allocation-free matcher.
+    if discard_result && !functional {
+        if let Value::Obj(obj) = &this {
+            let ptr = Rc::as_ptr(obj) as usize;
+            let re = i.regexps.get(&ptr).cloned();
+            let direct_exec = re.as_ref().is_some_and(|re| {
+                let b = obj.borrow();
+                let direct_proto = b
+                    .proto
+                    .as_ref()
+                    .zip(i.extra_protos.get("RegExp"))
+                    .is_some_and(|(a, b)| Rc::ptr_eq(a, b));
+                if !matches!(b.exotic, Exotic::None)
+                    || b.props.contains("exec")
+                    || !direct_proto
+                    || re.flags != flags.as_ref()
+                {
+                    return false;
+                }
+                drop(b);
+                i.extra_protos
+                    .get("RegExp")
+                    .and_then(|proto| {
+                        let p = proto.borrow();
+                        p.props
+                            .get("exec")
+                            .filter(|prop| !prop.accessor())
+                            .map(Property::value)
+                    })
+                    .is_some_and(|value| {
+                        let Value::Obj(exec) = value else {
+                            return false;
+                        };
+                        let canonical = matches!(
+                            exec.borrow().call,
+                            Callable::Native(nf)
+                                if nf as usize == regexp_exec as *const () as usize
+                        );
+                        canonical
+                    })
+            });
+            if direct_exec {
+                loop {
+                    let matched = regexp_exec_discard_fast(i, &this, &s)
+                        .expect("direct regexp discard guards")
+                        .map_err(|v| v)?;
+                    if !matched || !global {
+                        break;
+                    }
+                    let empty = i
+                        .regexp_last
+                        .as_ref()
+                        .and_then(|last| last.caps.first().copied().flatten())
+                        .is_some_and(|(start, end)| start == end);
+                    if empty {
+                        let li = match obj.borrow().props.get("lastIndex").map(Property::value) {
+                            Some(Value::Num(n)) => n as usize,
+                            _ => unreachable!("discard matcher guarded lastIndex"),
+                        };
+                        let next = advance_string_index(li, &s, unicode);
+                        obj.borrow_mut()
+                            .props
+                            .get_mut("lastIndex")
+                            .expect("discard matcher guarded lastIndex")
+                            .set_value(Value::Num(next as f64));
+                    }
+                }
+                return Ok(Value::Undefined);
+            }
+        }
     }
     // Collect every match (RegExpExec advances lastIndex; empty matches step forward manually).
     let mut results: Vec<Value> = Vec::new();
@@ -743,7 +958,170 @@ fn re_sym_matchall(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Va
         unicode,
     ))
 }
-fn re_sym_split(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+/// Execute a dead-result split for the fully canonical direct-RegExp case.
+///
+/// Every potentially observable lookup performed by String#split/RegExp@@split is first proven
+/// to resolve to the realm intrinsics. The matcher still runs and updates the legacy RegExp
+/// statics; only the unobservable sticky clone, match arrays, substrings, and final result array
+/// are omitted. Returning `None` means no state was touched and the caller must use the builtin.
+pub(super) fn re_sym_split_discard_fast(
+    i: &mut Interp,
+    input: &Value,
+    separator: &Value,
+    limit: &Value,
+) -> Option<Result<Value, Value>> {
+    let (Value::Str(input), Value::Obj(obj), Value::Undefined) = (input, separator, limit) else {
+        return None;
+    };
+    let ptr = Rc::as_ptr(obj) as usize;
+    let re = i.regexps.get(&ptr)?.clone();
+    let proto = i.extra_protos.get("RegExp")?.clone();
+    let ctor = i.extra_protos.get("%RegExpCtor%")?.clone();
+    let split_key = well_known_key(i, "split")?;
+    let species_key = well_known_key(i, "species")?;
+
+    {
+        let b = obj.borrow();
+        if !matches!(b.exotic, Exotic::None)
+            || b.proto.as_ref().is_none_or(|p| !Rc::ptr_eq(p, &proto))
+            || b.props.contains(&split_key)
+            || [
+                "constructor",
+                "flags",
+                "hasIndices",
+                "global",
+                "ignoreCase",
+                "multiline",
+                "dotAll",
+                "unicode",
+                "unicodeSets",
+                "sticky",
+            ]
+            .iter()
+            .any(|name| b.props.contains(name))
+        {
+            return None;
+        }
+    }
+    if !literal_match_dependencies_canonical(i) {
+        return None;
+    }
+    {
+        let p = proto.borrow();
+        let split_ok = p
+            .props
+            .get(&split_key)
+            .filter(|property| !property.accessor())
+            .map(Property::value)
+            .is_some_and(|value| {
+                matches!(
+                    value,
+                    Value::Obj(ref function)
+                        if matches!(
+                            function.borrow().call,
+                            Callable::Native(native)
+                                if native as usize == re_sym_split as *const () as usize
+                        )
+                )
+            });
+        let constructor_ok = p
+            .props
+            .get("constructor")
+            .filter(|property| !property.accessor())
+            .map(Property::value)
+            .is_some_and(
+                |value| matches!(value, Value::Obj(ref found) if Rc::ptr_eq(found, &ctor)),
+            );
+        if !split_ok || !constructor_ok {
+            return None;
+        }
+    }
+    {
+        let c = ctor.borrow();
+        let species_ok = c.props.get(&species_key).is_some_and(|property| {
+            matches!(
+                property.getter(),
+                Some(Value::Obj(function))
+                    if matches!(
+                        function.borrow().call,
+                        Callable::Native(native)
+                            if native as usize == super::nf_species_getter as *const () as usize
+                    )
+            ) && property.setter().is_none()
+        });
+        let prototype_ok = c
+            .props
+            .get("prototype")
+            .filter(|property| !property.accessor())
+            .map(Property::value)
+            .is_some_and(
+                |value| matches!(value, Value::Obj(ref found) if Rc::ptr_eq(found, &proto)),
+            );
+        if !species_ok || !prototype_ok {
+            return None;
+        }
+    }
+    // The default constructor Get is observable, but the exact value is irrelevant here because
+    // the guarded intrinsic @@species resolves to `ctor`. A plain own data property therefore
+    // proves the Get cannot run user code even if application code replaced globalThis.RegExp.
+    let global_ctor_ok = i
+        .global
+        .borrow()
+        .props
+        .get("RegExp")
+        .is_some_and(|property| !property.accessor());
+    if !global_ctor_ok {
+        return None;
+    }
+
+    // A sticky split loop that advances one unit after every miss is equivalent to one ordinary
+    // forward search for its next success. Removing `y` performs that search in the matcher while
+    // preserving the successful captures and their legacy-static side effects.
+    let search_re = if re.sticky {
+        let flags: String = re.flags.chars().filter(|&flag| flag != 'y').collect();
+        match i.compiled_regexp(&re.source, &flags) {
+            Ok(search) => search,
+            Err(Abrupt::Throw(value)) => return Some(Err(value)),
+            Err(_) => unreachable!("regexp compilation only throws"),
+        }
+    } else {
+        re
+    };
+    let text = i.re_text(search_re.unicode, input);
+    let size = text.unit_index(text.len());
+    if size == 0 {
+        if let Some(whole) = search_re.find_text_shared(&text, 0) {
+            update_regexp_legacy_statics_lazy(i, &search_re, whole, 0, &text, input);
+        }
+        return Some(Ok(Value::Undefined));
+    }
+
+    let unicode = search_re.unicode;
+    let mut p = 0usize;
+    let mut q = 0usize;
+    while q < size {
+        let search_start = text.elem_at_unit(q);
+        let Some(whole @ (a, e)) = search_re.find_text_shared(&text, search_start) else {
+            break;
+        };
+        let a = text.unit_index(a);
+        let e = text.unit_index(e);
+        // RegExp@@split's sticky loop stops before attempting a match at the final position.
+        if a >= size {
+            break;
+        }
+        update_regexp_legacy_statics_lazy(i, &search_re, whole, search_start, &text, input);
+        if e == p {
+            q = advance_string_index(a, input, unicode);
+        } else {
+            p = e;
+            q = p;
+        }
+    }
+    Some(Ok(Value::Undefined))
+}
+
+pub(super) fn re_sym_split(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
     require_regexp_this(i, &this, "[Symbol.split]")?;
     let s = ab(i.to_string(&arg(a, 0)))?;
     // All positions are UTF-16 unit offsets.

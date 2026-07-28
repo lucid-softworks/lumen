@@ -240,12 +240,33 @@ pub(crate) enum StrUnits {
 
 /// Raw state of the last successful regex match, deferred for the legacy `RegExp.$1` statics.
 /// `ctor` is the %RegExp% constructor the statics belong to (the realm active at match time).
+#[derive(Clone)]
 pub(crate) struct RegexpLastMatch {
     pub ctor: Gc,
     pub input: crate::lstr::LStr,
     pub text: Rc<crate::regex::ReText>,
     pub caps: Vec<Option<(usize, usize)>>,
     pub ngroups: usize,
+    /// Dead-result regexp operations record only the whole match and defer capture extraction
+    /// until a legacy `RegExp.$1`-style accessor actually observes it.
+    pub lazy_captures: Option<(Rc<crate::regex::Regex>, usize)>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct RegexpDependencyCache {
+    pub proto: usize,
+    pub shape: u32,
+    pub slots: [u32; 10],
+}
+
+impl Default for RegexpDependencyCache {
+    fn default() -> Self {
+        RegexpDependencyCache {
+            proto: 0,
+            shape: u32::MAX,
+            slots: [u32::MAX; 10],
+        }
+    }
 }
 
 /// One scope's binding map, wrapping the raw hash map so every *structural* mutation — anything
@@ -257,20 +278,87 @@ pub(crate) struct RegexpLastMatch {
 /// move entries, and a cache read-through observes the new value, which is exactly correct.
 /// Reads pass through via `Deref`; mutations only exist as the inherent methods below, so a new
 /// mutation site can't forget the bump (it won't compile).
-#[derive(Default)]
 pub struct VarMap {
-    map: crate::fasthash::FastMap<std::rc::Rc<str>, Binding>,
+    map: VarStorage,
     generation: std::cell::Cell<u32>,
 }
 
-impl std::ops::Deref for VarMap {
-    type Target = crate::fasthash::FastMap<std::rc::Rc<str>, Binding>;
-    fn deref(&self) -> &Self::Target {
-        &self.map
+const SMALL_VAR_MAP_CAPACITY: usize = 8;
+
+enum VarStorage {
+    Small(Vec<(std::rc::Rc<str>, Binding)>),
+    Large(crate::fasthash::FastMap<std::rc::Rc<str>, Binding>),
+}
+
+impl Default for VarMap {
+    fn default() -> Self {
+        Self {
+            map: VarStorage::Small(Vec::new()),
+            generation: std::cell::Cell::new(0),
+        }
+    }
+}
+
+pub enum VarIter<'a> {
+    Small(std::slice::Iter<'a, (std::rc::Rc<str>, Binding)>),
+    Large(std::collections::hash_map::Iter<'a, std::rc::Rc<str>, Binding>),
+}
+
+impl<'a> Iterator for VarIter<'a> {
+    type Item = (&'a std::rc::Rc<str>, &'a Binding);
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            VarIter::Small(iter) => iter.next().map(|(name, binding)| (name, binding)),
+            VarIter::Large(iter) => iter.next(),
+        }
+    }
+}
+
+pub enum VarKeys<'a> {
+    Small(std::slice::Iter<'a, (std::rc::Rc<str>, Binding)>),
+    Large(std::collections::hash_map::Keys<'a, std::rc::Rc<str>, Binding>),
+}
+
+impl<'a> Iterator for VarKeys<'a> {
+    type Item = &'a std::rc::Rc<str>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            VarKeys::Small(iter) => iter.next().map(|(name, _)| name),
+            VarKeys::Large(iter) => iter.next(),
+        }
+    }
+}
+
+pub enum VarValues<'a> {
+    Small(std::slice::Iter<'a, (std::rc::Rc<str>, Binding)>),
+    Large(std::collections::hash_map::Values<'a, std::rc::Rc<str>, Binding>),
+}
+
+impl<'a> Iterator for VarValues<'a> {
+    type Item = &'a Binding;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            VarValues::Small(iter) => iter.next().map(|(_, binding)| binding),
+            VarValues::Large(iter) => iter.next(),
+        }
     }
 }
 
 impl VarMap {
+    pub(crate) fn with_capacity(capacity: usize) -> VarMap {
+        VarMap {
+            map: if capacity <= SMALL_VAR_MAP_CAPACITY {
+                VarStorage::Small(Vec::with_capacity(capacity))
+            } else {
+                VarStorage::Large(crate::fasthash::FastMap::with_capacity_and_hasher(
+                    capacity,
+                    Default::default(),
+                ))
+            },
+            generation: std::cell::Cell::new(0),
+        }
+    }
+
     /// The structural generation (name-cache validation token).
     #[inline]
     pub(crate) fn generation(&self) -> u32 {
@@ -282,19 +370,86 @@ impl VarMap {
     }
     pub fn insert(&mut self, k: impl Into<std::rc::Rc<str>>, v: Binding) -> Option<Binding> {
         self.bump();
-        self.map.insert(k.into(), v)
+        let k = k.into();
+        match &mut self.map {
+            VarStorage::Small(entries) => {
+                if let Some((_, old)) = entries.iter_mut().find(|(name, _)| **name == *k) {
+                    return Some(std::mem::replace(old, v));
+                }
+                if entries.len() < SMALL_VAR_MAP_CAPACITY {
+                    entries.push((k, v));
+                    return None;
+                }
+                let mut large = crate::fasthash::FastMap::with_capacity_and_hasher(
+                    entries.len() + 1,
+                    Default::default(),
+                );
+                for (name, binding) in std::mem::take(entries) {
+                    large.insert(name, binding);
+                }
+                let old = large.insert(k, v);
+                self.map = VarStorage::Large(large);
+                old
+            }
+            VarStorage::Large(entries) => entries.insert(k, v),
+        }
     }
     pub fn remove(&mut self, k: &str) -> Option<Binding> {
         self.bump();
-        self.map.remove(k)
+        match &mut self.map {
+            VarStorage::Small(entries) => entries
+                .iter()
+                .position(|(name, _)| &**name == k)
+                .map(|index| entries.swap_remove(index).1),
+            VarStorage::Large(entries) => entries.remove(k),
+        }
     }
     pub fn clear(&mut self) {
         self.bump();
-        self.map.clear();
+        match &mut self.map {
+            VarStorage::Small(entries) => entries.clear(),
+            VarStorage::Large(entries) => entries.clear(),
+        }
     }
     /// In-place binding write: entries don't move, so the generation stays (see the type docs).
     pub fn get_mut(&mut self, k: &str) -> Option<&mut Binding> {
-        self.map.get_mut(k)
+        match &mut self.map {
+            VarStorage::Small(entries) => entries
+                .iter_mut()
+                .find(|(name, _)| &**name == k)
+                .map(|(_, binding)| binding),
+            VarStorage::Large(entries) => entries.get_mut(k),
+        }
+    }
+    pub fn get(&self, k: &str) -> Option<&Binding> {
+        match &self.map {
+            VarStorage::Small(entries) => entries
+                .iter()
+                .find(|(name, _)| &**name == k)
+                .map(|(_, binding)| binding),
+            VarStorage::Large(entries) => entries.get(k),
+        }
+    }
+    pub fn contains_key(&self, k: &str) -> bool {
+        self.get(k).is_some()
+    }
+    pub fn iter(&self) -> VarIter<'_> {
+        match &self.map {
+            VarStorage::Small(entries) => VarIter::Small(entries.iter()),
+            VarStorage::Large(entries) => VarIter::Large(entries.iter()),
+        }
+    }
+    pub fn keys(&self) -> VarKeys<'_> {
+        match &self.map {
+            VarStorage::Small(entries) => VarKeys::Small(entries.iter()),
+            VarStorage::Large(entries) => VarKeys::Large(entries.keys()),
+        }
+    }
+    pub fn values(&self) -> VarValues<'_> {
+        match &self.map {
+            VarStorage::Small(entries) => VarValues::Small(entries.iter()),
+            VarStorage::Large(entries) => VarValues::Large(entries.values()),
+        }
     }
     /// Byte offset of the generation counter within a `VarMap` (for the JIT's inline template).
     pub(crate) fn generation_offset() -> usize {
@@ -437,9 +592,13 @@ pub fn new_scope(parent: Option<Env>) -> Env {
 /// A *variable* environment: the hoisting target for `var`/function declarations (function body,
 /// global, or `eval` scope). See [`Scope::var_boundary`].
 pub fn new_var_scope(parent: Option<Env>) -> Env {
+    new_var_scope_with_capacity(parent, 0)
+}
+
+pub(crate) fn new_var_scope_with_capacity(parent: Option<Env>, capacity: usize) -> Env {
     let under_with = parent.as_ref().is_some_and(|p| p.borrow().under_with);
     let e = Rc::new(RefCell::new(Scope {
-        vars: Default::default(),
+        vars: VarMap::with_capacity(capacity),
         parent,
         with_obj: None,
         under_with,
@@ -911,19 +1070,22 @@ pub struct Interp {
     /// Runtime-probed `Interp` field offsets for the asm call thunk (see [`InterpLayout`]).
     /// Filled by [`Interp::interp_layout_init`] on first JIT compile, like `jit_layout`.
     pub(crate) interp_layout: std::cell::Cell<InterpLayout>,
-    /// Whether the JIT's inline property caches are safe to run: they can't cheaply check the
-    /// exotic side tables (proxy / typed-array / module namespace / deferred namespace) from
-    /// machine code, so this flag latches *false* the first time any object is registered in one,
-    /// and the inline templates then fall through to the checked helper forever after. Monotonic
-    /// (never re-enabled), so it can only cost the inline speedup, never correctness.
+    /// Realm-wide proof that no Proxy has been created. Raw prototype-chain walks read it live;
+    /// side-table exotics are guarded per receiver by `Object::ic_plain`.
     pub(crate) inline_ic_safe: std::cell::Cell<bool>,
     /// Recently indexed strings' UTF-16 views, keyed by string identity (the held `Rc` pins the
     /// pointer) — see [`StrUnits`]. Small LRU: the hot case is one big source string being
     /// scanned a unit at a time.
     pub(crate) str_units: Vec<(crate::lstr::LStr, StrUnits)>,
-    /// Recently prepared regex subjects keyed by string identity (the held `Rc` pins the
-    /// pointer), so repeated exec/replace/split over one subject reuses its element vector.
-    pub(crate) re_texts: Vec<(crate::lstr::LStr, bool, Rc<crate::regex::ReText>)>,
+    /// Prepared regex subjects keyed by string identity and Unicode mode. The retained `LStr`
+    /// pins each pointer, making the integer key ABA-safe. This cache is deliberately larger
+    /// than the tiny UTF-16 indexing LRU: web workloads commonly prepare thousands of immutable
+    /// strings once and run several regexp passes over the same working set.
+    pub(crate) re_texts:
+        crate::fasthash::FastMap<(usize, bool), (crate::lstr::LStr, Rc<crate::regex::ReText>)>,
+    /// Shape-validated entry slots for the ten RegExp prototype dependencies checked by
+    /// dead-result specializations. Values/accessors remain live-checked on every operation.
+    pub(crate) regexp_dependency_cache: std::cell::Cell<RegexpDependencyCache>,
     /// The last successful `exec` match, kept raw for the legacy `RegExp.$1`-style statics:
     /// the 14 strings materialize into the constructor's hidden props only when an accessor
     /// actually reads them (see `builtins::flush_regexp_legacy`), not on every match.
@@ -1532,7 +1694,8 @@ impl Interp {
             interp_layout: std::cell::Cell::new(InterpLayout::default()),
             inline_ic_safe: std::cell::Cell::new(true),
             str_units: Vec::new(),
-            re_texts: Vec::new(),
+            re_texts: Default::default(),
+            regexp_dependency_cache: std::cell::Cell::new(RegexpDependencyCache::default()),
             regexp_last: None,
             map_data: Default::default(),
             extra_protos: Default::default(),
@@ -2098,6 +2261,39 @@ impl Interp {
         Value::Obj(obj)
     }
 
+    /// Build an array by moving `len` initialized values directly from a JIT operand stack.
+    ///
+    /// # Safety
+    /// `items` must point to `len` live, non-overlapping `Value`s. This method consumes every
+    /// value exactly once; the caller must reset its stack pointer to `items` before returning.
+    pub(crate) unsafe fn make_array_from_raw(&self, items: *mut Value, len: usize) -> Value {
+        if len <= 32 {
+            let obj = Object::new_with_parts(
+                Some(self.array_proto.clone()),
+                unsafe { Props::packed_array_from_raw(items, len) },
+                Exotic::Array,
+            );
+            return Value::Obj(obj);
+        }
+        let obj = Object::new(Some(self.array_proto.clone()));
+        let numeric = (0..len).all(|k| matches!(unsafe { &*items.add(k) }, Value::Num(_)));
+        {
+            let mut b = obj.borrow_mut();
+            b.props.mark_array();
+            b.props.reserve_dense_exact(len, numeric);
+            b.exotic = Exotic::Array;
+            for k in 0..len {
+                b.props
+                    .push_dense(Property::plain(unsafe { items.add(k).read() }));
+            }
+            b.props.insert(
+                "length",
+                Property::data(Value::Num(len as f64), true, false, false),
+            );
+        }
+        Value::Obj(obj)
+    }
+
     /// Build the generator/iterator object whose `next`/`return`/`throw` drive its coroutine (stored
     /// separately in `self.generators`).
     fn make_generator(&mut self, is_async: bool, gen_proto: Option<Value>) -> Value {
@@ -2403,6 +2599,14 @@ impl Interp {
                 _ => return false,
             }
         }
+        self.array_prototypes_unshadowed()
+    }
+
+    /// Realm-wide half of [`Self::array_append_unshadowed`]. Callers that already hold and have
+    /// validated an array receiver can use this without releasing and re-borrowing it merely to
+    /// repeat the prototype identity check.
+    #[inline]
+    fn array_prototypes_unshadowed(&self) -> bool {
         let epoch = crate::value::proto_epoch();
         if epoch == u32::MAX {
             return false; // permanently invalidated — never trust the cache
@@ -2477,16 +2681,70 @@ impl Interp {
     /// Correct regardless of the prototype chain — an own writable data property always wins
     /// OrdinarySet. Returns the value back on miss so the caller runs the generic path.
     #[inline]
-    pub(crate) fn fast_set_elem(&mut self, o: &Gc, n: f64, v: Value) -> Result<(), Value> {
+    pub(crate) fn fast_set_elem(&mut self, o: &Gc, n: f64, mut v: Value) -> Result<(), Value> {
         if n.trunc() != n || !(0.0..u32::MAX as f64).contains(&n) {
             return Err(v);
         }
-        if !self.plain_for_elems(o) {
+        if (!self.module_ns.is_empty() || !self.deferred_ns.is_empty()) && {
+            let ptr = Rc::as_ptr(o) as usize;
+            self.module_ns.contains_key(&ptr) || self.deferred_ns.contains_key(&ptr)
+        } {
             return Err(v);
         }
+        let n = n as u32;
         let mut b = o.borrow_mut();
+        if !matches!(b.exotic, Exotic::Array | Exotic::None) {
+            return Err(v);
+        }
         // Mirror-coherent overwrite (does NOT invalidate the mirror like a raw get_index_mut).
-        b.props.set_index_value(n as u32, v)
+        match b.props.set_index_value(n, v) {
+            Ok(()) => return Ok(()),
+            Err(back) => v = back,
+        }
+        // A fresh dense element is the other overwhelmingly common array write. The protector
+        // proof executes no JS, so all receiver validation and the eventual commit can safely
+        // remain under this single borrow.
+        if !matches!(b.exotic, Exotic::Array)
+            || !b.extensible
+            || !matches!(b.proto.as_ref(), Some(p) if Rc::ptr_eq(p, &self.array_proto))
+            || !self.array_prototypes_unshadowed()
+        {
+            return Err(v);
+        }
+        let Some((old_len, length_writable)) =
+            b.props.length_property().and_then(|p| match p.value() {
+                Value::Num(len) => Some((len, p.writable())),
+                _ => None,
+            })
+        else {
+            return Err(v);
+        };
+        if n as f64 >= old_len && !length_writable {
+            return Err(v);
+        }
+        // Sequential growth is the common case and `try_append_element` only needs to
+        // validate the dense frontier. Keep the more general hole/padding machinery as
+        // the fallback for out-of-order writes.
+        let prop = match b.props.try_append_element(n, Property::plain(v)) {
+            Ok(()) => None,
+            Err(prop) => Some(prop),
+        };
+        let result = match prop {
+            None => Ok(()),
+            Some(prop) => b.props.try_define_dense_element(n, prop),
+        };
+        match result {
+            Ok(()) => {
+                if n as f64 >= old_len {
+                    b.props
+                        .get_mut("length")
+                        .expect("array has own length")
+                        .set_value(Value::Num(n as f64 + 1.0));
+                }
+                Ok(())
+            }
+            Err(prop) => Err(prop.into_value()),
+        }
     }
 
     /// `obj.name` read with a per-site inline cache (bytecode `GetProp`/`GetMethod`). The cache
@@ -2560,13 +2818,12 @@ impl Interp {
     /// property); everything else exotic (string wrappers, arguments, …) and anything in a side
     /// table (proxy, namespace, typed array) is not.
     #[inline]
-    fn ic_plain_ptr(&self, ptr: usize, b: &Object) -> bool {
+    fn ic_plain_ptr(&self, _ptr: usize, b: &Object) -> bool {
         // StrWrap (String.prototype, string wrapper objects): index and `length` reads are
         // exotic-provided and never live in `entries`, and StrWrap maps are NOT `elem_mode`,
         // so named entries stay shape-pinned — a named non-index IC over one is as sound as
         // over an ordinary object.
-        matches!(b.exotic, Exotic::None | Exotic::Array | Exotic::StrWrap(_))
-            && self.ordinary_get_ptr(ptr)
+        matches!(b.exotic, Exotic::None | Exotic::Array | Exotic::StrWrap(_)) && b.ic_plain.get()
     }
 
     /// The `GetProp`/`GetMethod` inline-cache fast path; `None` means "take the slow path".
@@ -2575,6 +2832,7 @@ impl Interp {
     /// transitively kept alive by `o` (which the caller holds) for the duration of this call, and
     /// nothing mutates the chain here, so the pointers stay valid — this removes a refcount
     /// bump+drop per hop on every property access.
+    #[inline(always)]
     fn try_ic_get(
         &self,
         o: &Gc,
@@ -2663,7 +2921,7 @@ impl Interp {
             for (k, &shape) in shapes.iter().take(levels).enumerate() {
                 let b = unsafe { (*cur).borrow() };
                 if !(matches!(b.exotic, Exotic::None)
-                    && self.ordinary_get_ptr(cur as usize)
+                    && b.ic_plain.get()
                     && b.props.shape() == shape)
                 {
                     return None;
@@ -2706,10 +2964,7 @@ impl Interp {
                 // StrWrap named entries are shape-pinned (not elem_mode); index/length reads
                 // are exotic-provided and never fill states at this site's name.
                 || (matches!(rb.exotic, Exotic::StrWrap(_)) && non_digit);
-            if recv_shape_ok
-                && self.ordinary_get_ptr(head as usize)
-                && rb.props.shape() == st.recv_shape
-            {
+            if recv_shape_ok && rb.ic_plain.get() && rb.props.shape() == st.recv_shape {
                 if depth == 0 {
                     if let Some((k, p)) = rb.props.entry_at(st.slot as usize) {
                         if (!keychk || &**k == name) && !p.accessor() {
@@ -2727,7 +2982,7 @@ impl Interp {
                     {
                         let mb = (*hp).borrow();
                         if !(matches!(mb.exotic, Exotic::None | Exotic::StrWrap(_))
-                            && self.ordinary_get_ptr(hp as usize)
+                            && mb.ic_plain.get()
                             && mb.props.shape() == mid_shape)
                         {
                             return None;
@@ -2740,9 +2995,7 @@ impl Interp {
                     let hb = (*hp).borrow();
                     let holder_exotic_ok = matches!(hb.exotic, Exotic::None | Exotic::StrWrap(_))
                         || (keychk && matches!(hb.exotic, Exotic::Array));
-                    if holder_exotic_ok
-                        && self.ordinary_get_ptr(hp as usize)
-                        && hb.props.shape() == st.holder_shape
+                    if holder_exotic_ok && hb.ic_plain.get() && hb.props.shape() == st.holder_shape
                     {
                         if let Some((k, p)) = hb.props.entry_at(st.slot as usize) {
                             if (!keychk || &**k == name) && !p.accessor() {
@@ -2924,11 +3177,8 @@ impl Interp {
         if lv.len() + x.len() > MAX_STR_LEN {
             return Err(lval); // the generic path raises the RangeError
         }
-        if !self.ordinary_get_ptr(Rc::as_ptr(o) as usize) {
-            return Err(lval);
-        }
         let mut b = o.borrow_mut();
-        if !matches!(b.exotic, Exotic::None) {
+        if !b.ic_plain.get() || !matches!(b.exotic, Exotic::None) {
             return Err(lval);
         }
         let Some(p) = b.props.get_mut(name) else {
@@ -2966,7 +3216,7 @@ impl Interp {
         if !matches!(b.exotic, Exotic::None) {
             return false;
         }
-        if !self.ordinary_get_ptr(Rc::as_ptr(o) as usize) {
+        if !b.ic_plain.get() {
             return false;
         }
         // Shape fast path (own writable data property), every way: a shape match means `slot`
@@ -3112,9 +3362,7 @@ impl Interp {
                     return false;
                 }
                 let hb = h.borrow();
-                if !(matches!(hb.exotic, Exotic::None)
-                    && self.ordinary_get_ptr(Rc::as_ptr(&h) as usize))
-                {
+                if !(matches!(hb.exotic, Exotic::None) && hb.ic_plain.get()) {
                     return false;
                 }
                 if let Some(slot) = hb.props.slot_of(name) {
@@ -3150,9 +3398,10 @@ impl Interp {
         true
     }
 
-    /// Whether object `ptr` reads/writes like an ordinary object — i.e. it is not registered in any
-    /// of the exotic side tables (proxy, module namespace, typed array, deferred namespace). Cheap:
-    /// each empty table is skipped without hashing, which is the common case in a hot loop.
+    /// Whether object pointer `ptr` reads/writes like an ordinary object — i.e. it is not
+    /// registered in any of the exotic side tables (proxy, module namespace, typed array,
+    /// deferred namespace). Cheap: each empty table is skipped without hashing, which is the
+    /// common case in a hot loop.
     #[inline]
     pub(crate) fn ordinary_get_ptr(&self, ptr: usize) -> bool {
         (self.proxies.is_empty() || !self.proxies.contains_key(&ptr))
@@ -3222,7 +3471,7 @@ impl Interp {
                 if let Ok(i) = key.parse::<usize>() {
                     let s = s.clone();
                     return Ok(match self.unit_at(&s, i) {
-                        Some(u) => Value::from_string(crate::jstr::unit_str(u)),
+                        Some(u) => Value::Str(crate::jstr::unit_lstr(u)),
                         None => Value::Undefined,
                     });
                 }
@@ -3277,7 +3526,7 @@ impl Interp {
                     }
                     if let Ok(i) = key.parse::<usize>() {
                         if let Some(u) = self.unit_at(&s, i) {
-                            return Ok(Value::from_string(crate::jstr::unit_str(u)));
+                            return Ok(Value::Str(crate::jstr::unit_lstr(u)));
                         }
                     }
                 }
@@ -4279,28 +4528,28 @@ impl Interp {
         unicode: bool,
         s: &crate::lstr::LStr,
     ) -> Rc<crate::regex::ReText> {
-        let key = s.as_ptr();
-        if let Some((_, _, t)) = self
-            .re_texts
-            .iter()
-            .find(|(k, u, _)| k.as_ptr() == key && *u == unicode)
-        {
+        const RE_TEXT_CACHE_CAPACITY: usize = 32_768;
+        let key = (s.as_ptr() as usize, unicode);
+        if let Some((_, t)) = self.re_texts.get(&key) {
             return t.clone();
         }
         let t = Rc::new(crate::regex::ReText::new_rc(unicode, s));
-        if self.re_texts.len() >= 4 {
-            self.re_texts.remove(0);
+        if self.re_texts.len() >= RE_TEXT_CACHE_CAPACITY {
+            // A bulk reset keeps the hot lookup one hash probe and strictly bounds retained
+            // subject memory. Long-lived streaming workloads rebuild at most once per epoch.
+            self.re_texts.clear();
         }
-        self.re_texts.push((s.clone(), unicode, t.clone()));
+        self.re_texts.insert(key, (s.clone(), t.clone()));
         t
     }
 
-    /// The object references *to other heap objects* held directly by `o` (proto, property
-    /// values/getters/setters, and bound-function target/this/args). Collected into a Vec so `o`'s
-    /// borrow is released before callers re-borrow — important for self-referential objects.
-    fn obj_refs(o: &Gc) -> Vec<Gc> {
+    /// Append object references held directly by `o` into a reusable scratch vector. The source
+    /// borrow is released before callers follow the collected edges, which remains essential for
+    /// self-referential objects; reusing the allocation avoids one fresh Vec per object per GC
+    /// pass.
+    fn obj_refs_into(o: &Gc, refs: &mut Vec<Gc>) {
+        refs.clear();
         let b = o.borrow();
-        let mut refs = Vec::new();
         if let Some(p) = &b.proto {
             refs.push(p.clone());
         }
@@ -4326,7 +4575,6 @@ impl Interp {
                 }
             }
         }
-        refs
     }
 
     /// Refcount-based cycle collector. An object whose `Rc::strong_count` exceeds the references it
@@ -4336,8 +4584,8 @@ impl Interp {
     /// This needs no root enumeration, so it is safe to run in the middle of evaluation.
     /// The scopes `o` refers to: a user function's closure environment, a mapped `arguments`
     /// object's aliased parameter scope, and a class constructor's field-initializer environment.
-    fn obj_scope_refs(&self, o: &Gc) -> Vec<Env> {
-        let mut out = Vec::new();
+    fn obj_scope_refs_into(&self, o: &Gc, out: &mut Vec<Env>) {
+        out.clear();
         if let Callable::User(user) = &o.borrow().call {
             out.push(user.env.clone());
         }
@@ -4348,7 +4596,6 @@ impl Interp {
         if let Some(ci) = self.class_info.get(&ptr) {
             out.push(ci.field_env.clone());
         }
-        out
     }
 
     pub(crate) fn gc_collect(&mut self) {
@@ -4370,12 +4617,16 @@ impl Interp {
             b.gc_mark.set(false);
             b.gc_internal.set(0);
         }
+        let mut object_refs = Vec::new();
+        let mut scope_refs = Vec::new();
         for o in &live {
-            for p in Self::obj_refs(o) {
+            Self::obj_refs_into(o, &mut object_refs);
+            for p in object_refs.drain(..) {
                 let pb = p.borrow();
                 pb.gc_internal.set(pb.gc_internal.get() + 1);
             }
-            for e in self.obj_scope_refs(o) {
+            self.obj_scope_refs_into(o, &mut scope_refs);
+            for e in scope_refs.drain(..) {
                 if let Some(&k) = sidx.get(&(Rc::as_ptr(&e) as usize)) {
                     s_internal[k] += 1;
                 }
@@ -4466,13 +4717,15 @@ impl Interp {
         // Mark everything reachable from the roots, across both node types.
         loop {
             if let Some(o) = stack.pop() {
-                for p in Self::obj_refs(&o) {
+                Self::obj_refs_into(&o, &mut object_refs);
+                for p in object_refs.drain(..) {
                     if !p.borrow().gc_mark.get() {
                         p.borrow().gc_mark.set(true);
                         stack.push(p);
                     }
                 }
-                for e in self.obj_scope_refs(&o) {
+                self.obj_scope_refs_into(&o, &mut scope_refs);
+                for e in scope_refs.drain(..) {
                     if let Some(&k) = sidx.get(&(Rc::as_ptr(&e) as usize)) {
                         if !s_mark[k] {
                             s_mark[k] = true;
@@ -5425,7 +5678,7 @@ impl Interp {
             let runs = chunk_ref.jit_runs.get().wrapping_add(1);
             chunk_ref.jit_runs.set(runs);
             if runs == crate::bytecode::inline_recompile_at() {
-                self.try_inline_recompile(ic.func, chunk_ref);
+                self.try_inline_recompile(ic.func, chunk_ref, ic.env);
             }
         }
         Some(unsafe { self.call_jit_committed(ic, this_slot, args, argc) })
@@ -5692,6 +5945,7 @@ impl Interp {
         &mut self,
         func: *const crate::ast::Function,
         chunk: &crate::bytecode::Chunk,
+        caller_env: *const RefCell<Scope>,
     ) {
         if func.is_null() || chunk.inline_attempted.replace(true) {
             return;
@@ -5703,7 +5957,7 @@ impl Interp {
             return;
         }
         let global_env = self.global_env.clone();
-        let plan = crate::bytecode::plan_inlines(chunk, func, &global_env);
+        let plan = crate::bytecode::plan_inlines(chunk, func, &global_env, caller_env);
         if plan.is_empty() {
             if std::env::var_os("LUMEN_TIER_LOG").is_some() {
                 let src = func.source.as_deref().unwrap_or("<no source>");
@@ -5772,6 +6026,7 @@ impl Interp {
     /// still-owned argument frame directly. The synthetic depth/gc step represents the elided
     /// native `Function.prototype.apply` call; the initializer's own call performs its normal
     /// step as well. `None` is a guard miss and has not consumed the arguments.
+    #[inline(never)]
     unsafe fn construct_arguments_apply_forwarder(
         &mut self,
         chunk: &crate::bytecode::Chunk,
@@ -5790,26 +6045,182 @@ impl Interp {
         let Value::Obj(initializer_obj) = &initializer else {
             return None;
         };
+        // Reuse the body's own `GetMethod("apply")` feedback too. Its shape guards prove there
+        // is no own shadow, validate the live prototype link, and read the inherited slot by
+        // index; an override/prototype swap/accessor/exotic still declines before arguments move.
         let apply = self.try_ic_get(initializer_obj, "apply", apply_cache, true)?;
-        let intrinsic = match &apply {
-            Value::Obj(o) => match &o.borrow().call {
-                Callable::Native(f) => {
-                    *f as *const () as usize
-                        == crate::builtins::nf_function_apply as *const () as usize
-                }
-                _ => false,
-            },
-            _ => false,
-        };
-        if !intrinsic {
+        let Value::Obj(apply_obj) = &apply else {
             return None;
-        }
+        };
+        let initializer_ptr = Rc::as_ptr(initializer_obj) as usize;
+        let apply_ptr = Rc::as_ptr(apply_obj) as usize;
 
+        // A large family of Prototype.js-era constructors forwards directly into a tiny
+        // `initialize` body. Once that body has compiled and every property-creation site has
+        // warmed its live IC, execute its structurally proven parameter/default-to-field plan
+        // without entering a second JIT frame. This is deliberately derived from bytecode and
+        // cache state only: function/source identity and observed argument/result values never
+        // participate.
+        let initializer_plan =
+            if let Some(runtime) = chunk.jit_forwarder_runtime(initializer_obj, apply_ptr) {
+                Some(runtime)
+            } else {
+                if !matches!(
+                    apply_obj.borrow().call,
+                    Callable::Native(native)
+                        if native as usize
+                            == crate::builtins::nf_function_apply as *const () as usize
+                ) {
+                    return None;
+                }
+                let key = initializer_ptr;
+                let callable = initializer_obj.borrow();
+                let Callable::User(user) = &callable.call else {
+                    return None;
+                };
+                if user.func.is_arrow
+                    || user.env.borrow().under_with
+                    || (!self.class_info.is_empty() && self.class_info.contains_key(&key))
+                {
+                    None
+                } else {
+                    let same_realm = if self.multi_realm() {
+                        type ScopeCell = RefCell<Scope>;
+                        let mut cur: *const ScopeCell = Rc::as_ptr(&user.env);
+                        let mut active = false;
+                        for _ in 0..8 {
+                            if cur == Rc::as_ptr(&self.global_env) {
+                                active = true;
+                                break;
+                            }
+                            match unsafe { (*cur).borrow().parent.as_ref().map(Rc::as_ptr) } {
+                                Some(parent) => cur = parent,
+                                None => break,
+                            }
+                        }
+                        active
+                    } else {
+                        true
+                    };
+                    if same_realm {
+                        let runtime = user
+                            .func
+                            .code2
+                            .get()
+                            .or_else(|| user.func.code.get())
+                            .and_then(Option::as_ref)
+                            .filter(|initializer_chunk| {
+                                initializer_chunk.jit.get().is_some_and(Option::is_some)
+                                    && initializer_chunk.jit_no_activation()
+                                    && initializer_chunk.jit_initializer_plan().is_some()
+                            })
+                            .cloned();
+                        if let Some(runtime) = &runtime {
+                            chunk.cache_jit_forwarder_runtime(
+                                initializer_obj,
+                                apply_ptr,
+                                runtime.clone(),
+                            );
+                        }
+                        runtime
+                    } else {
+                        None
+                    }
+                }
+            };
+
+        let plan_shapes = initializer_plan.as_ref().and_then(|initializer_chunk| {
+            let plan = initializer_chunk
+                .jit_initializer_plan()
+                .expect("initializer plan checked above");
+            let epoch = crate::value::proto_epoch();
+            let object = this.borrow();
+            let proto_ptr = object
+                .proto
+                .as_ref()
+                .map_or(0, |proto| Rc::as_ptr(proto) as usize);
+            let start_shape = object.props.shape();
+            drop(object);
+            if epoch == u32::MAX {
+                return None;
+            }
+            if let Some(shapes) = plan.cached_shapes(epoch, proto_ptr, start_shape) {
+                return Some((epoch, proto_ptr, shapes));
+            }
+            let mut shape = start_shape;
+            let mut shapes = [0u32; 16];
+            for field in 0..plan.len() {
+                let (_, _, _, cache) = initializer_chunk.jit_initializer_field(plan, field);
+                let transition = (0..crate::bytecode::PROP_IC_WAYS).find_map(|way| {
+                    let state = self.ic_way(cache, way).get();
+                    (state.depth == crate::bytecode::IC_CREATE
+                        && state.recv_shape == shape
+                        && state.mid_shape == epoch
+                        && (((state.mid2_shape as u64) << 32) | state.slot as u64) as usize
+                            == proto_ptr)
+                        .then_some(state.holder_shape)
+                });
+                match transition {
+                    Some(next) => {
+                        shape = next;
+                        shapes[field] = next;
+                    }
+                    None => return None,
+                }
+            }
+            plan.cache_shapes(epoch, proto_ptr, start_shape, &shapes[..plan.len()]);
+            Some((epoch, proto_ptr, shapes))
+        });
         let drop_args = || unsafe {
             for k in 0..argc {
                 std::ptr::drop_in_place(args.add(k));
             }
         };
+
+        if let (Some(initializer_chunk), Some((_epoch, _proto_ptr, shapes))) =
+            (initializer_plan.as_ref(), plan_shapes)
+        {
+            // Account for both elided calls in the recursion limit. The plan contains no calls,
+            // allocation, coercion, or other user-code boundary, so it needs neither physical
+            // reflection frames nor separate GC polls.
+            if self.depth > MAX_EVAL_DEPTH - 2 {
+                drop_args();
+                return Some(Err(
+                    self.throw("RangeError", "Maximum call stack size exceeded")
+                ));
+            }
+
+            let plan = initializer_chunk
+                .jit_initializer_plan()
+                .expect("initializer plan checked above");
+            chunk.note_forwarded_capacity(plan.len());
+            let mut object = this.borrow_mut();
+            for field in 0..plan.len() {
+                let (slot, default, name, _) = initializer_chunk.jit_initializer_field(plan, field);
+                let value = if slot < argc {
+                    let arg = unsafe { args.add(slot) };
+                    if default.is_some() && !self.to_boolean(unsafe { &*arg }) {
+                        default.expect("default checked").clone()
+                    } else {
+                        let value = unsafe { arg.read() };
+                        unsafe { arg.write(Value::Undefined) };
+                        value
+                    }
+                } else {
+                    default.cloned().unwrap_or(Value::Undefined)
+                };
+                object
+                    .props
+                    .append_proven_plain(name.clone(), Property::plain(value));
+            }
+            object
+                .props
+                .finish_proven_plain_shape(shapes[plan.len() - 1]);
+            drop(object);
+            drop_args();
+            return Some(Ok(Value::Undefined));
+        }
+
         // The original body calls the native apply function here. Preserve its depth and GC
         // boundary even though the argument-list object and native dispatch are elided.
         self.depth += 1;
@@ -5862,12 +6273,26 @@ impl Interp {
             return None;
         }
         let Value::Obj(o) = callee else { return None };
+        let key = Rc::as_ptr(o) as usize;
+        let epoch = crate::bytecode::CALL_IC_EPOCH.load(std::sync::atomic::Ordering::Relaxed);
+        let genv = Rc::as_ptr(&self.global_env) as usize;
+        // A live site entry can only have been installed by `construct_ic_fill`, hence it is
+        // already known to be a same-realm ordinary user constructor. Probe it before classifying
+        // natives: hot `new C()` sites otherwise borrow C and look up `.prototype` twice per
+        // allocation (once to ask whether C is native, then again for the live instance proto).
+        let cached_site = site
+            .map(|(chunk, cache)| chunk.construct_cache(cache))
+            .filter(|entry| {
+                entry.call.callee == key
+                    && entry.call.epoch == epoch
+                    && entry.call.global_env == genv
+            });
         // Native constructors do not need an ordinary instance or a JS activation: they build
         // their result in the native body.  Keep them on the moved-argument contract too, so hot
         // `new Array()` / `new Date()` sites avoid the full IsConstructor → realm →
         // construct-dispatch stack on every iteration.  Cross-realm calls retain the layered
         // path because the callee's intrinsics must be installed before its native body runs.
-        let native = if !self.multi_realm() {
+        let native = if cached_site.is_none() && !self.multi_realm() {
             let b = o.borrow();
             if b.is_constructor || b.props.contains("prototype") {
                 match &b.call {
@@ -5909,16 +6334,6 @@ impl Interp {
             self.depth -= 1;
             return Some(r);
         }
-        let key = Rc::as_ptr(o) as usize;
-        let epoch = crate::bytecode::CALL_IC_EPOCH.load(std::sync::atomic::Ordering::Relaxed);
-        let genv = Rc::as_ptr(&self.global_env) as usize;
-        let cached_site = site
-            .map(|(chunk, cache)| chunk.construct_cache(cache))
-            .filter(|entry| {
-                entry.call.callee == key
-                    && entry.call.epoch == epoch
-                    && entry.call.global_env == genv
-            });
         let (ic, prototype_shape, prototype_slot, arguments_apply_forwarder) = match cached_site {
             Some(entry) => (
                 entry.call,
@@ -5942,15 +6357,18 @@ impl Interp {
                 _ => self.construct_ic_fill(o, key, epoch, genv)?,
             },
         };
-        let site_state = crate::bytecode::ConstructSite {
-            call: ic,
-            prototype_shape,
-            prototype_slot,
-            arguments_apply_forwarder,
-        };
         if cached_site.is_none() {
             if let Some((chunk, cache)) = site {
-                chunk.fill_construct_cache(cache, site_state, o);
+                chunk.fill_construct_cache(
+                    cache,
+                    crate::bytecode::ConstructSite {
+                        call: ic,
+                        prototype_shape,
+                        prototype_slot,
+                        arguments_apply_forwarder,
+                    },
+                    o,
+                );
             }
         }
         // OrdinaryCreateFromConstructor: the instance prototype is the constructor's LIVE
@@ -5983,6 +6401,7 @@ impl Interp {
         } else {
             self.learned_construct_capacity(o)
         };
+        let proto_ptr = Rc::as_ptr(&proto) as usize;
         let this = crate::value::Object::new_with_capacity(Some(proto), instance_capacity);
         let this_val = Value::Obj(this.clone());
         // --- committed: identical shape to call_jit_cached's committed path ---
@@ -6006,6 +6425,88 @@ impl Interp {
                 }
             }
             return Some(Err(e));
+        }
+        // Once every field site's creation IC proves the complete fresh-object shape chain, the
+        // body has no remaining observable operation: append all fields under one borrow, moving
+        // parameter ownership directly from the caller frame. No function identity or source
+        // name participates; a cold/polymorphic/accessor/prototype-mutated site simply executes
+        // the ordinary compiled constructor and refreshes its live ICs.
+        if let Some(simple) = chunk.jit_simple_constructor() {
+            let epoch = crate::value::proto_epoch();
+            // A freshly allocated ordinary object always starts at the shared empty shape, and
+            // its prototype is the live object just read above. Avoid re-borrowing the new
+            // RefCell twice merely to rediscover those construction invariants.
+            let start_shape = 0;
+            let shapes = if epoch == u32::MAX {
+                None
+            } else if let Some(cached) = simple.cached_shapes(epoch, proto_ptr, start_shape) {
+                Some(cached)
+            } else {
+                let mut shape = start_shape;
+                let mut transitions = [0u32; 16];
+                let mut valid = true;
+                for field in 0..simple.len() {
+                    let (_, _, cache) = simple.field(field);
+                    let transition = (0..crate::bytecode::PROP_IC_WAYS).find_map(|way| {
+                        let state = self.ic_way(cache, way).get();
+                        (state.depth == crate::bytecode::IC_CREATE
+                            && state.recv_shape == shape
+                            && state.mid_shape == epoch
+                            && (((state.mid2_shape as u64) << 32) | state.slot as u64) as usize
+                                == proto_ptr)
+                            .then_some(state.holder_shape)
+                    });
+                    match transition {
+                        Some(next) => {
+                            shape = next;
+                            transitions[field] = next;
+                        }
+                        None => {
+                            valid = false;
+                            break;
+                        }
+                    }
+                }
+                if valid {
+                    simple.cache_shapes(
+                        epoch,
+                        proto_ptr,
+                        start_shape,
+                        &transitions[..simple.len()],
+                    );
+                    Some(transitions)
+                } else {
+                    None
+                }
+            };
+            if let Some(shapes) = shapes {
+                let mut object = this.borrow_mut();
+                for field in 0..simple.len() {
+                    let (slot, name, _) = simple.field(field);
+                    let value = if slot < argc {
+                        let arg = unsafe { args.add(slot) };
+                        let value = unsafe { arg.read() };
+                        unsafe { arg.write(Value::Undefined) };
+                        value
+                    } else {
+                        Value::Undefined
+                    };
+                    object
+                        .props
+                        .append_proven_plain(name.clone(), Property::plain(value));
+                }
+                object
+                    .props
+                    .finish_proven_plain_shape(shapes[simple.len() - 1]);
+                drop(object);
+                unsafe {
+                    for k in 0..argc {
+                        std::ptr::drop_in_place(args.add(k));
+                    }
+                }
+                self.depth -= 1;
+                return Some(Ok(this_val));
+            }
         }
         let saved_ctor = std::mem::replace(&mut self.constructing, false);
         // The body runs with new.target = the callee (what the layered path's pending-new-target

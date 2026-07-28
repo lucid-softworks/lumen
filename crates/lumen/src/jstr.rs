@@ -108,6 +108,23 @@ pub fn unit_str(unit: u16) -> String {
     from_units(&[unit])
 }
 
+thread_local! {
+    /// Immutable one-code-unit ASCII strings are returned constantly by `charAt`, string
+    /// indexing, and string iterators. Share their buffers instead of allocating the same 128
+    /// values repeatedly.
+    static ASCII_UNITS: [crate::lstr::LStr; 128] =
+        std::array::from_fn(|unit| unit_str(unit as u16).into());
+}
+
+/// The engine string for one UTF-16 code unit, interned for ASCII.
+pub fn unit_lstr(unit: u16) -> crate::lstr::LStr {
+    if unit < 128 {
+        ASCII_UNITS.with(|units| units[unit as usize].clone())
+    } else {
+        unit_str(unit).into()
+    }
+}
+
 /// The spec's code-unit-wise string comparison (differs from `str` byte order for strings mixing
 /// supplementary-plane characters with U+E000..U+FFFF, and for smuggled surrogates).
 pub fn cmp_units(a: &str, b: &str) -> std::cmp::Ordering {

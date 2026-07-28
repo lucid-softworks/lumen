@@ -3590,6 +3590,14 @@ impl Interp {
         self.make_regexp_with_proto(source, flags, proto)
     }
 
+    pub(crate) fn make_regexp_compiled(
+        &mut self,
+        re: Rc<crate::regex::Regex>,
+    ) -> Result<Value, Abrupt> {
+        let proto = self.regexp_alloc_proto()?;
+        Ok(self.make_regexp_object(re, proto))
+    }
+
     /// GetPrototypeFromConstructor for RegExpAlloc: `new` with a subclass/cross-realm newTarget
     /// overrides the instance prototype (falling back to newTarget's realm's %RegExp.prototype%).
     pub(crate) fn regexp_alloc_proto(&mut self) -> Result<Option<crate::value::Gc>, Abrupt> {
@@ -3615,6 +3623,14 @@ impl Interp {
         proto: Option<crate::value::Gc>,
     ) -> Result<Value, Abrupt> {
         let re = self.compiled_regexp(source, flags)?;
+        Ok(self.make_regexp_object(re, proto))
+    }
+
+    fn make_regexp_object(
+        &mut self,
+        re: Rc<crate::regex::Regex>,
+        proto: Option<crate::value::Gc>,
+    ) -> Value {
         let obj = Object::new(proto);
         let ptr = Rc::as_ptr(&obj) as usize;
         // source/flags/global/... are accessor getters on RegExp.prototype (computed from the
@@ -3625,13 +3641,13 @@ impl Interp {
         );
         self.gc_pin(&obj);
         self.regexps.insert(ptr, re);
-        Ok(Value::Obj(obj))
+        Value::Obj(obj)
     }
 
     /// Return the immutable matcher shared by every RegExp with this source/flag pair. Observable
     /// state lives on the freshly allocated JS object, not in `Regex`, so sharing the program does
     /// not share `lastIndex` or object identity.
-    fn compiled_regexp(
+    pub(crate) fn compiled_regexp(
         &mut self,
         source: &str,
         flags: &str,
@@ -4872,7 +4888,6 @@ impl Interp {
                             self.map_data.insert(dp, v);
                         }
                         if let Some(v) = self.typed_arrays.remove(&sp) {
-                            self.inline_ic_safe.set(false);
                             dst.borrow().ic_plain.set(false);
                             self.typed_arrays.insert(dp, v);
                         }
@@ -5172,12 +5187,12 @@ impl Interp {
             }
             p
         });
-        let obj = crate::value::Object::new(Some(self.object_proto.clone()));
-        {
-            let mut b = obj.borrow_mut();
-            b.props =
-                map.instantiate_plain((0..count).map(|slot| unsafe { base.add(slot).read() }));
-        }
+        let props = map.instantiate_plain((0..count).map(|slot| unsafe { base.add(slot).read() }));
+        let obj = crate::value::Object::new_with_parts(
+            Some(self.object_proto.clone()),
+            props,
+            crate::value::Exotic::None,
+        );
         Value::Obj(obj)
     }
 
@@ -5199,11 +5214,11 @@ impl Interp {
             }
             p
         });
-        let obj = crate::value::Object::new(Some(self.object_proto.clone()));
-        {
-            let mut b = obj.borrow_mut();
-            b.props = map.instantiate_plain(values.into_iter());
-        }
+        let obj = crate::value::Object::new_with_parts(
+            Some(self.object_proto.clone()),
+            map.instantiate_plain(values.into_iter()),
+            crate::value::Exotic::None,
+        );
         Value::Obj(obj)
     }
 
@@ -6381,6 +6396,67 @@ impl Interp {
         cache: &std::cell::Cell<crate::bytecode::IcState>,
     ) -> Result<Value, Abrupt> {
         let key = crate::builtins::well_known_key(self, "hasInstance");
+        // Checked counterpart of the machine-code hit. This also makes helper fallbacks cheap
+        // when the generated path cannot consume last-reference operands: the cached RHS shape
+        // proves no own @@hasInstance appeared, while the inherited intrinsic is read live.
+        let cached = cache.get();
+        if self.inline_ic_safe.get() && cached.depth == 0 {
+            if let (Some(key), Value::Obj(lhs), Value::Obj(rhs)) = (key.as_deref(), l, r) {
+                let canonical = self
+                    .function_proto
+                    .borrow()
+                    .props
+                    .get(key)
+                    .filter(|property| !property.accessor())
+                    .map(Property::value)
+                    .is_some_and(|value| {
+                        matches!(
+                            value,
+                            Value::Obj(ref function)
+                                if matches!(
+                                    function.borrow().call,
+                                    Callable::Native(native)
+                                        if native as usize
+                                            == crate::builtins::default_has_instance
+                                                as *const () as usize
+                                )
+                        )
+                    });
+                let target = if canonical {
+                    let b = rhs.borrow();
+                    (b.is_constructor
+                        && matches!(b.exotic, Exotic::None)
+                        && b.ic_plain.get()
+                        && b.props.shape() == cached.recv_shape
+                        && b.proto
+                            .as_ref()
+                            .is_some_and(|p| Rc::ptr_eq(p, &self.function_proto)))
+                    .then(|| {
+                        b.props
+                            .entry_at(cached.slot as usize)
+                            .and_then(|(_, property)| {
+                                (!property.accessor()).then(|| property.value())
+                            })
+                    })
+                    .flatten()
+                } else {
+                    None
+                };
+                if let Some(Value::Obj(target)) = target {
+                    let mut cur = Some(lhs.clone());
+                    while let Some(object) = cur {
+                        let next = object.borrow().proto.clone();
+                        match next {
+                            Some(proto) if Rc::ptr_eq(&proto, &target) => {
+                                return Ok(Value::Bool(true));
+                            }
+                            Some(proto) => cur = Some(proto),
+                            None => return Ok(Value::Bool(false)),
+                        }
+                    }
+                }
+            }
+        }
         let fill = match (key.as_deref(), r) {
             (Some(key), Value::Obj(o)) if self.ordinary_get_ptr(Rc::as_ptr(o) as usize) => {
                 let b = o.borrow();

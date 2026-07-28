@@ -811,46 +811,37 @@ impl Object {
     /// chunks derive a conservative straight-line field count, replacing the usual 1 → 2 → 4
     /// growth sequence with one exact allocation. The hint lives on shared code, not instances.
     pub(crate) fn new_with_capacity(proto: Option<Gc>, property_capacity: usize) -> Gc {
+        Self::new_with_parts(proto, Props::with_capacity(property_capacity), Exotic::None)
+    }
+
+    /// Allocate an object around an already-finalized property map. Literal fast paths can build
+    /// the map from moved stack values before allocation, avoiding an empty map plus RefCell
+    /// replacement on every object.
+    pub(crate) fn new_with_parts(proto: Option<Gc>, props: Props, exotic: Exotic) -> Gc {
         GC_STATE.with(|state| {
             state.live.set(state.live.get() + 1);
-            // Ordinary constructor instances dominate allocation-heavy code and usually die
-            // shortly after the benchmark iteration. Reuse their small named-property buffer:
-            // the RcBox still has ordinary Rust ownership, but the second heap allocation no
-            // longer has to pass through malloc/free for every object.
-            let entries = if property_capacity > 0 && property_capacity <= ENTRY_POOL_MAX_CAP {
-                let mut pool = state.entry_pool.borrow_mut();
-                (property_capacity..=ENTRY_POOL_MAX_CAP)
-                    .find_map(|capacity| pool[capacity].pop())
-                    .unwrap_or_else(|| Vec::with_capacity(property_capacity))
-            } else {
-                Vec::with_capacity(property_capacity)
+            let mut reg = state.registry.borrow_mut();
+            let slot = match reg.free.pop() {
+                Some(slot) => slot,
+                None => {
+                    let slot = reg.entries.len();
+                    reg.entries.push(std::ptr::null());
+                    slot
+                }
             };
+            let slot_u32: u32 = slot.try_into().expect("object registry exceeded u32 slots");
             let obj = Rc::new(RefCell::new(Object {
                 proto,
-                props: Props::with_entries(entries),
+                props,
                 extensible: true,
                 call: Callable::None,
-                exotic: Exotic::None,
+                exotic,
                 ic_plain: Cell::new(true),
                 is_constructor: false,
                 gc_mark: Cell::new(false),
-                gc_internal: Cell::new(0),
+                gc_internal: Cell::new(slot_u32),
             }));
-            let mut reg = state.registry.borrow_mut();
-            let slot = match reg.free.pop() {
-                Some(slot) => {
-                    reg.entries[slot] = Rc::as_ptr(&obj);
-                    slot
-                }
-                None => {
-                    let slot = reg.entries.len();
-                    reg.entries.push(Rc::as_ptr(&obj));
-                    slot
-                }
-            };
-            let slot: u32 = slot.try_into().expect("object registry exceeded u32 slots");
-            obj.borrow().gc_internal.set(slot);
-            drop(reg);
+            reg.entries[slot] = Rc::as_ptr(&obj);
             obj
         })
     }
@@ -862,9 +853,6 @@ impl Drop for Object {
         // is O(1), does not touch another (possibly borrowed) object, and bounds registry memory
         // by peak simultaneously-live objects instead of cumulative allocation count.
         let slot = self.gc_internal.get() as usize;
-        // Move the emptyable allocation out before entering TLS. Clearing it may recursively
-        // release child objects, so no registry/pool RefCell borrow can remain live at that point.
-        let recyclable = self.props.take_recyclable_entries();
         let _ = GC_STATE.try_with(|state| {
             let mut reg = state.registry.borrow_mut();
             if slot < reg.entries.len() && !reg.entries[slot].is_null() {
@@ -873,14 +861,6 @@ impl Drop for Object {
             }
             drop(reg);
             state.live.set(state.live.get() - 1);
-            if let Some(mut entries) = recyclable {
-                let capacity = entries.capacity();
-                entries.clear();
-                let mut pool = state.entry_pool.borrow_mut();
-                if pool[capacity].len() < ENTRY_POOL_PER_CAP {
-                    pool[capacity].push(entries);
-                }
-            }
         });
         // `try_with` so a drop during thread-local teardown at process exit can't panic.
     }
@@ -895,13 +875,9 @@ struct GcRegistry {
     free: Vec<usize>,
 }
 
-const ENTRY_POOL_MAX_CAP: usize = 16;
-const ENTRY_POOL_PER_CAP: usize = 64;
-
 struct GcState {
     registry: RefCell<GcRegistry>,
     live: Cell<i64>,
-    entry_pool: RefCell<[Vec<Vec<(Rc<str>, Property)>>; ENTRY_POOL_MAX_CAP + 1]>,
 }
 
 thread_local! {
@@ -911,7 +887,6 @@ thread_local! {
             free: Vec::new(),
         }),
         live: Cell::new(0),
-        entry_pool: RefCell::new(std::array::from_fn(|_| Vec::new())),
     };
 }
 
@@ -1311,10 +1286,76 @@ impl Property {
 
 /// Insertion-ordered string-keyed property map. A `Vec` of entries preserves order (good enough for
 /// `for-in`/`Object.keys`); a side `HashMap` keeps lookup O(1).
+const INLINE_PACKED_CAPACITY: usize = 10;
+
+struct InlinePacked {
+    len: u8,
+    slots: [std::mem::MaybeUninit<Property>; INLINE_PACKED_CAPACITY],
+}
+
+impl InlinePacked {
+    const EMPTY: InlinePacked = InlinePacked {
+        len: 0,
+        slots: [const { std::mem::MaybeUninit::uninit() }; INLINE_PACKED_CAPACITY],
+    };
+
+    unsafe fn from_raw(items: *mut Value, len: usize) -> InlinePacked {
+        debug_assert!(len <= INLINE_PACKED_CAPACITY);
+        let mut packed = InlinePacked::default();
+        for index in 0..len {
+            packed.slots[index].write(Property::plain(unsafe { items.add(index).read() }));
+        }
+        packed.len = len as u8;
+        packed
+    }
+
+    fn as_slice(&self) -> &[Property] {
+        unsafe {
+            std::slice::from_raw_parts(self.slots.as_ptr().cast::<Property>(), self.len as usize)
+        }
+    }
+
+    fn into_vec(&mut self) -> Vec<Property> {
+        let len = self.len as usize;
+        let mut values = Vec::with_capacity(len);
+        for index in 0..len {
+            values.push(unsafe { self.slots[index].assume_init_read() });
+        }
+        self.len = 0;
+        values
+    }
+}
+
+impl Default for InlinePacked {
+    fn default() -> Self {
+        InlinePacked::EMPTY
+    }
+}
+
+impl Clone for InlinePacked {
+    fn clone(&self) -> Self {
+        let mut clone = InlinePacked::default();
+        for (index, property) in self.as_slice().iter().enumerate() {
+            clone.slots[index].write(property.clone());
+        }
+        clone.len = self.len;
+        clone
+    }
+}
+
+impl Drop for InlinePacked {
+    fn drop(&mut self) {
+        for index in 0..self.len as usize {
+            unsafe { self.slots[index].assume_init_drop() };
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 struct DenseBuffers {
     index: Option<Box<crate::fasthash::FastMap<Rc<str>, usize>>>,
     packed: Option<Box<Vec<Property>>>,
+    inline_packed: InlinePacked,
     elems: Vec<u32>,
     mirror: Vec<f64>,
 }
@@ -1327,6 +1368,7 @@ unsafe impl Sync for EmptyDenseBuffers {}
 static EMPTY_DENSE_BUFFERS: EmptyDenseBuffers = EmptyDenseBuffers(DenseBuffers {
     index: None,
     packed: None,
+    inline_packed: InlinePacked::EMPTY,
     elems: Vec::new(),
     mirror: Vec::new(),
 });
@@ -1351,7 +1393,22 @@ impl DenseStorage {
         self.0.as_deref_mut()?.index.as_deref_mut()
     }
     fn packed_mut(&mut self) -> Option<&mut Vec<Property>> {
-        self.0.as_deref_mut()?.packed.as_deref_mut()
+        let dense = self.0.as_deref_mut()?;
+        if dense.packed.is_none() && dense.inline_packed.len != 0 {
+            dense.packed = Some(Box::new(dense.inline_packed.into_vec()));
+        }
+        dense.packed.as_deref_mut()
+    }
+    fn packed_ref(&self) -> Option<&[Property]> {
+        let dense = self.0.as_deref()?;
+        match dense.packed.as_deref() {
+            Some(packed) => Some(packed),
+            None if dense.inline_packed.len != 0 => Some(dense.inline_packed.as_slice()),
+            None => None,
+        }
+    }
+    fn packed_is_some(&self) -> bool {
+        self.packed_ref().is_some()
     }
     fn set_index(&mut self, index: Option<Box<crate::fasthash::FastMap<Rc<str>, usize>>>) {
         if index.is_some() {
@@ -1362,9 +1419,12 @@ impl DenseStorage {
     }
     fn set_packed(&mut self, packed: Option<Box<Vec<Property>>>) {
         if packed.is_some() {
-            self.buffers_mut().packed = packed;
+            let dense = self.buffers_mut();
+            dense.inline_packed = InlinePacked::default();
+            dense.packed = packed;
         } else if let Some(d) = self.0.as_deref_mut() {
             d.packed = None;
+            d.inline_packed = InlinePacked::default();
         }
     }
     #[inline]
@@ -1643,6 +1703,9 @@ thread_local! {
         Rc::from("prototype"),
         Rc::from("constructor"),
     ];
+    /// Shape reached by adding the intrinsic `"length"` key to an empty map. Array literals
+    /// create this same one-property named map constantly.
+    static ARRAY_LENGTH_SHAPE: Cell<u32> = const { Cell::new(0) };
 }
 
 /// The property key for array index `n`, interned for small `n`.
@@ -1699,15 +1762,54 @@ impl Props {
         }
     }
 
-    /// Detach a small ordinary named-property buffer for the thread-local object allocator.
-    /// Dense/indexed maps keep their storage private, and large maps are returned to the system
-    /// rather than allowing one workload spike to permanently inflate the pool.
-    fn take_recyclable_entries(&mut self) -> Option<Vec<(Rc<str>, Property)>> {
-        let capacity = self.entries.capacity();
-        if self.elems.0.is_none() && capacity > 0 && capacity <= ENTRY_POOL_MAX_CAP {
-            Some(std::mem::take(&mut self.entries))
-        } else {
-            None
+    /// Construct a small dense array map directly from moved JIT stack values.
+    ///
+    /// # Safety
+    /// `items..items+len` contains initialized `Value`s relinquished by the caller.
+    pub(crate) unsafe fn packed_array_from_raw(items: *mut Value, len: usize) -> Props {
+        debug_assert!(len <= 32);
+        let inline = len <= INLINE_PACKED_CAPACITY;
+        let mut packed = Vec::with_capacity(if inline { 0 } else { len });
+        if !inline {
+            for index in 0..len {
+                packed.push(Property::plain(unsafe { items.add(index).read() }));
+            }
+        }
+        let length_key = fn_key(0);
+        let shape = ARRAY_LENGTH_SHAPE.with(|cached| {
+            let shape = cached.get();
+            if shape != 0 {
+                shape
+            } else {
+                let shape = shape_transition(SHAPE_EMPTY, &length_key);
+                cached.set(shape);
+                shape
+            }
+        });
+        Props {
+            entries: vec![(
+                length_key,
+                Property::data(Value::Num(len as f64), true, false, false),
+            )],
+            shape,
+            elems: DenseStorage(Some(Box::new(DenseBuffers {
+                index: None,
+                packed: (!inline).then(|| Box::new(packed)),
+                inline_packed: if inline {
+                    unsafe { InlinePacked::from_raw(items, len) }
+                } else {
+                    InlinePacked::default()
+                },
+                elems: Vec::new(),
+                mirror: Vec::new(),
+            }))),
+            mirror_flags: 0,
+            mirror_holes: 0,
+            proto_flag: Cell::new(false),
+            has_far: Cell::new(false),
+            elem_mode: Cell::new(true),
+            proto_slot: Cell::new(NO_SLOT),
+            len_slot: Cell::new(0),
         }
     }
 
@@ -1760,12 +1862,12 @@ impl Props {
     }
 
     /// Reserve the exact backing storage for a dense array whose initial length is known.
-    /// `entries` needs one additional slot for the array's own `length` property. Numeric arrays
-    /// also keep the raw-f64 mirror; object arrays invalidate it on their first element, so
-    /// reserving mirror storage for those would be pure waste.
+    /// `entries` needs one additional slot for the array's own `length` property. Small literals
+    /// use the keyless packed representation: it avoids allocating/cloning one decimal string key
+    /// per element, while all indexed/reflection paths already understand packed properties.
+    /// Larger numeric arrays retain the raw-f64 mirror used by numeric JIT regions.
     pub(crate) fn reserve_dense_exact(&mut self, len: usize, numeric: bool) {
-        // Keep the range narrow so large numeric work arrays retain the JIT mirror fast path.
-        if numeric && (8..=32).contains(&len) {
+        if (1..=32).contains(&len) {
             self.entries.reserve_exact(1); // own `length`
             self.elems
                 .set_packed(Some(Box::new(Vec::with_capacity(len))));
@@ -1774,7 +1876,7 @@ impl Props {
             self.entries.reserve_exact(len.saturating_add(1));
             self.elems.reserve_exact(len);
         }
-        if numeric && self.elems.packed.is_none() {
+        if numeric && !self.elems.packed_is_some() {
             self.elems.mirror_reserve_exact(len);
         }
     }
@@ -1790,7 +1892,7 @@ impl Props {
         if !*ENABLED.get_or_init(|| std::env::var_os("LUMEN_JIT_NO_PACKED_HOLES").is_none())
             || len == 0
             || len > 8
-            || self.elems.packed.is_some()
+            || self.elems.packed_is_some()
         {
             return;
         }
@@ -1875,7 +1977,7 @@ impl Props {
     /// dense map" — the caller must fall back to the string-keyed path, not conclude absence.
     #[inline]
     pub(crate) fn get_index(&self, n: u32) -> Option<&Property> {
-        if let Some(packed) = &self.elems.packed {
+        if let Some(packed) = self.elems.packed_ref() {
             return packed
                 .get(n as usize)
                 .filter(|p| !matches!(p.value(), Value::Empty));
@@ -1892,12 +1994,15 @@ impl Props {
     pub(crate) fn get_index_mut(&mut self, n: u32) -> Option<&mut Property> {
         // A raw &mut escape can rewrite the value behind the mirror's back.
         self.mirror_invalidate();
-        let dense = self.elems.buffers_mut();
-        if let Some(packed) = &mut dense.packed {
-            return packed
+        if self.elems.packed_is_some() {
+            return self
+                .elems
+                .packed_mut()
+                .expect("packed storage checked")
                 .get_mut(n as usize)
                 .filter(|p| !matches!(p.value(), Value::Empty));
         }
+        let dense = self.elems.buffers_mut();
         let slot = *dense.elems.get(n as usize)?;
         if slot == NO_SLOT {
             return None;
@@ -2092,7 +2197,7 @@ impl Props {
     /// (`elem_mode`) maps only: the shape is untouched. Returns `false` (nothing changed) when
     /// the gates don't hold; the caller runs the generic path.
     pub(crate) fn try_append_element(&mut self, n: u32, prop: Property) -> Result<(), Property> {
-        if let Some(packed) = &self.elems.packed {
+        if let Some(packed) = self.elems.packed_ref() {
             if self.has_far.get() || !self.elem_mode.get() || n as usize != packed.len() {
                 return Err(prop);
             }
@@ -2116,6 +2221,49 @@ impl Props {
         Ok(())
     }
 
+    /// Insert an absent canonical index directly into the classic dense map, including a bounded
+    /// run of holes. The caller has already proved ordinary Array prototype semantics. This is
+    /// the numeric-key counterpart of `insert`: it avoids parsing/comparing a decimal key we
+    /// already know, while retaining the JIT-addressable entry/slot layout.
+    pub(crate) fn try_define_dense_element(
+        &mut self,
+        n: u32,
+        prop: Property,
+    ) -> Result<(), Property> {
+        if self.elems.packed_is_some() || self.has_far.get() || !self.elem_mode.get() {
+            return Err(prop);
+        }
+        let n = n as usize;
+        let old_len = self.elems.len();
+        if n < old_len {
+            if self.elems[n] != NO_SLOT {
+                return Err(prop);
+            }
+        } else if n > old_len + 256 {
+            return Err(prop);
+        }
+        self.note_structural();
+        let slot = self.entries.len();
+        let key = index_key(n);
+        if let Some(index) = self.elems.index_mut() {
+            index.insert(key.clone(), slot);
+        }
+        self.reserve_entry();
+        self.entries.push((key, prop));
+        if n < old_len {
+            self.elems[n] = slot as u32;
+            self.mirror_sync(n, slot, true);
+        } else {
+            let pads = n - old_len;
+            while self.elems.len() < n {
+                self.elems.push(NO_SLOT);
+            }
+            self.elems.push(slot as u32);
+            self.mirror_grow(pads, slot);
+        }
+        Ok(())
+    }
+
     pub(crate) fn append_element(&mut self, n: u32, prop: Property) -> bool {
         self.try_append_element(n, prop).is_ok()
     }
@@ -2129,7 +2277,7 @@ impl Props {
         if self.has_far.get() || !self.elem_mode.get() {
             return None;
         }
-        if let Some(packed) = &self.elems.packed {
+        if let Some(packed) = self.elems.packed_ref() {
             if n as usize + 1 != packed.len() {
                 return None;
             }
@@ -2231,6 +2379,13 @@ impl Props {
             if let Some(p) = self.get_index(n) {
                 return Some(p);
             }
+            // Every canonical index is recorded in the dense sidecar unless a deliberately
+            // sparse, far-ahead insertion has ever occurred. With no such insertion, a dense
+            // miss proves absence; scanning every string-key entry is both redundant and
+            // especially costly for a hole read from a large array.
+            if !self.has_far.get() {
+                return None;
+            }
         }
         self.find(key).map(|i| &self.entries[i].1)
     }
@@ -2243,8 +2398,7 @@ impl Props {
         if let Some(n) = canonical_index(key) {
             if self
                 .elems
-                .packed
-                .as_ref()
+                .packed_ref()
                 .and_then(|p| p.get(n as usize))
                 .is_some_and(|p| !matches!(p.value(), Value::Empty))
             {
@@ -2337,9 +2491,27 @@ impl Props {
         self.note_inserted(slot);
     }
 
+    /// Build the named-property prefix of a brand-new ordinary object after creation ICs proved
+    /// every key absent/non-indexed and supplied the complete shape chain. Up to the small-map
+    /// threshold no dense/index sidecar or special-slot memo can be required, so the whole batch
+    /// is just entry appends followed by its already-known final shape.
+    pub(crate) fn append_proven_plain(&mut self, key: Rc<str>, prop: Property) {
+        debug_assert!(self.entries.len() < INDEX_THRESHOLD);
+        debug_assert!(canonical_index(&key).is_none());
+        debug_assert!(self.elems.0.is_none());
+        self.reserve_entry();
+        self.entries.push((key, prop));
+    }
+
+    pub(crate) fn finish_proven_plain_shape(&mut self, shape: u32) {
+        debug_assert!(!self.entries.is_empty());
+        debug_assert!(self.entries.len() <= INDEX_THRESHOLD);
+        self.shape = shape;
+    }
+
     pub(crate) fn insert(&mut self, key: impl Into<Rc<str>>, prop: Property) {
         let key = key.into();
-        if let (Some(n), Some(packed)) = (canonical_index(&key), self.elems.packed.as_ref()) {
+        if let (Some(n), Some(packed)) = (canonical_index(&key), self.elems.packed_ref()) {
             let n = n as usize;
             if n < packed.len() {
                 self.note_structural();
@@ -2400,7 +2572,7 @@ impl Props {
             Some(n) => (n as usize) < from,
             None => true,
         };
-        let packed_remove = self.elems.packed.as_ref().is_some_and(|p| {
+        let packed_remove = self.elems.packed_ref().is_some_and(|p| {
             p.len() > from && p[from..].iter().any(|p| !matches!(p.value(), Value::Empty))
         });
         if !packed_remove && self.entries.iter().all(|(k, _)| keep(k)) {
@@ -2428,7 +2600,7 @@ impl Props {
     }
 
     pub(crate) fn remove(&mut self, key: &str) -> bool {
-        if let (Some(n), Some(packed)) = (canonical_index(key), self.elems.packed.as_ref()) {
+        if let (Some(n), Some(packed)) = (canonical_index(key), self.elems.packed_ref()) {
             if packed
                 .get(n as usize)
                 .is_some_and(|p| !matches!(p.value(), Value::Empty))
@@ -2488,8 +2660,8 @@ impl Props {
     /// are excluded here (and from [`ordered_keys`]); private access reads them via [`get`] directly.
     pub(crate) fn keys(&self) -> Vec<Rc<str>> {
         self.elems
-            .packed
-            .iter()
+            .packed_ref()
+            .into_iter()
             .flat_map(|p| p.iter().enumerate())
             .filter(|(_, p)| !matches!(p.value(), Value::Empty))
             .map(|(n, _)| index_key(n))
@@ -2503,7 +2675,7 @@ impl Props {
         let mut ints: Vec<(u32, Rc<str>)> = Vec::new();
         let mut strs: Vec<Rc<str>> = Vec::new();
         let mut syms: Vec<Rc<str>> = Vec::new();
-        if let Some(packed) = &self.elems.packed {
+        if let Some(packed) = self.elems.packed_ref() {
             ints.extend(
                 packed
                     .iter()
@@ -2538,8 +2710,8 @@ impl Props {
     /// Every live property value, including keyless packed elements (for GC tracing).
     pub(crate) fn values(&self) -> impl Iterator<Item = &Property> {
         self.elems
-            .packed
-            .iter()
+            .packed_ref()
+            .into_iter()
             .flat_map(|p| p.iter())
             .filter(|p| !matches!(p.value(), Value::Empty))
             .chain(self.entries.iter().map(|(_, p)| p))
@@ -2548,8 +2720,8 @@ impl Props {
     pub(crate) fn highest_nonconfig_index_from(&self, from: usize) -> Option<usize> {
         let packed = self
             .elems
-            .packed
-            .iter()
+            .packed_ref()
+            .into_iter()
             .flat_map(|p| p.iter().enumerate())
             .filter_map(|(n, p)| {
                 (!matches!(p.value(), Value::Empty) && !p.configurable() && n >= from).then_some(n)
@@ -2566,8 +2738,8 @@ impl Props {
     pub(crate) fn integrity_ok(&self, frozen: bool) -> bool {
         let valid = |p: &Property| !p.configurable() && (!frozen || p.accessor() || !p.writable());
         self.elems
-            .packed
-            .iter()
+            .packed_ref()
+            .into_iter()
             .flat_map(|p| p.iter())
             .filter(|p| !matches!(p.value(), Value::Empty))
             .all(valid)
