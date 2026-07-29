@@ -22,15 +22,28 @@ pub(crate) enum Captures {
 }
 
 impl Captures {
-    fn from_vec(spans: Vec<Option<(usize, usize)>>) -> Self {
-        if spans.len() <= INLINE_CAPTURES {
+    fn from_slots(slots: &[Option<usize>], groups: usize) -> Self {
+        let len = groups + 1;
+        if len <= INLINE_CAPTURES {
             let mut inline = [None; INLINE_CAPTURES];
-            inline[..spans.len()].copy_from_slice(&spans);
+            for (group, span) in inline[..len].iter_mut().enumerate() {
+                *span = match (slots[2 * group], slots[2 * group + 1]) {
+                    (Some(a), Some(b)) => Some((a.min(b), a.max(b))),
+                    _ => None,
+                };
+            }
             Captures::Inline {
-                len: spans.len() as u8,
+                len: len as u8,
                 spans: inline,
             }
         } else {
+            let mut spans = Vec::with_capacity(len);
+            for group in 0..len {
+                spans.push(match (slots[2 * group], slots[2 * group + 1]) {
+                    (Some(a), Some(b)) => Some((a.min(b), a.max(b))),
+                    _ => None,
+                });
+            }
             Captures::Heap(spans.into_boxed_slice())
         }
     }
@@ -61,25 +74,16 @@ impl AsRef<[Option<(usize, usize)>]> for Captures {
 /// A compiled regular expression.
 pub struct Regex {
     prog: Vec<Inst>,
-    /// A linear-time byte automaton for the common ASCII-compatible subset. JavaScript regexp
-    /// syntax outside that subset (and every non-ASCII subject) stays on the complete matcher
-    /// below. Keeping this as an optional acceleration tier means conformance never depends on
-    /// the host regexp dialect.
-    fast_ascii: Option<regex::bytes::Regex>,
-    /// Capture-location storage is sized by the compiled automaton and recycled across matches.
-    /// Matching cannot invoke JavaScript, so a regexp cannot re-enter this cell while borrowed.
-    fast_ascii_locs: Option<std::cell::RefCell<regex::bytes::CaptureLocations>>,
-    /// Backreference-capable ASCII accelerator for a conservative subset whose capture
-    /// participation is statically guaranteed. Runtime errors fall back to the complete matcher.
-    fast_fancy_ascii: Option<fancy_regex::Regex>,
-    /// Unicode-string automaton for legacy patterns whose semantics can be projected exactly.
-    /// It matches the smuggled UTF-16 element string in `ReText::wide_src`.
-    fast_wide: Option<regex::Regex>,
-    fast_wide_locs: Option<std::cell::RefCell<regex::CaptureLocations>>,
     nmarks: usize,
     /// Start-position prescan derived from the program (see [`first_filter`]): lets the scan
     /// skip positions that cannot begin a match instead of running the backtracker at each.
     first: FirstFilter,
+    /// Exact leading ASCII byte, when the first-set proof has only one case-sensitive literal.
+    /// The byte input scans this eight bytes at a time before entering the backtracker.
+    first_byte: Option<u8>,
+    /// Capture-free, case-sensitive ASCII literal program. Searching it directly is equivalent
+    /// to executing `Save(0), Char*, Save(1), Match`, without paying the backtracking VM dispatch.
+    literal_ascii: Option<Box<[u8]>>,
     /// [`FirstFilter::Atoms`] baked into a byte-indexed table (elements < 256): the scan loop
     /// becomes one load per position.
     first_lut: Option<Box<[bool; 256]>>,
@@ -526,10 +530,6 @@ pub struct ReText {
     /// The source string when it is pure ASCII (element index == byte index): matching runs
     /// over its bytes and `slice` copies straight out of it.
     ascii_src: Option<crate::lstr::LStr>,
-    /// Non-ASCII legacy (non-u/v) subjects encoded as one Rust scalar per UTF-16 code unit.
-    wide_src: Option<String>,
-    /// Byte offset of each element boundary in `wide_src` (length = n_elems + 1).
-    wide_offsets: Vec<usize>,
 }
 
 impl ReText {
@@ -546,8 +546,6 @@ impl ReText {
                 n_elems: s.len(),
                 unicode,
                 ascii_src: Some(s.clone()),
-                wide_src: None,
-                wide_offsets: Vec::new(),
             };
         }
         // Keep the engine string itself: `LStr::clone` is one refcount bump and its immutable
@@ -564,8 +562,6 @@ impl ReText {
                 n_elems: s.len(),
                 unicode,
                 ascii_src: Some(src.unwrap_or_else(|| crate::lstr::LStr::from(s))),
-                wide_src: None,
-                wide_offsets: Vec::new(),
             };
         }
         if unicode {
@@ -578,8 +574,6 @@ impl ReText {
                     unit_of: None,
                     unicode,
                     ascii_src: None,
-                    wide_src: None,
-                    wide_offsets: Vec::new(),
                 };
             }
             let mut unit_of = Vec::with_capacity(cps.len() + 1);
@@ -595,26 +589,15 @@ impl ReText {
                 unit_of: Some(unit_of),
                 unicode,
                 ascii_src: None,
-                wide_src: None,
-                wide_offsets: Vec::new(),
             }
         } else {
             let units = crate::jstr::units(s);
-            let mut wide_src = String::with_capacity(s.len());
-            let mut wide_offsets = Vec::with_capacity(units.len() + 1);
-            for &unit in &units {
-                wide_offsets.push(wide_src.len());
-                wide_src.push(elem_of_cp(unit as u32));
-            }
-            wide_offsets.push(wide_src.len());
             ReText {
                 n_elems: units.len(),
                 elems: units.iter().map(|&u| u as u32).collect(),
                 unit_of: None,
                 unicode,
                 ascii_src: None,
-                wide_src: Some(wide_src),
-                wide_offsets,
             }
         }
     }
@@ -636,14 +619,6 @@ impl ReText {
             None => e.min(self.n_elems),
             Some(unit_of) => unit_of[e.min(self.n_elems)],
         }
-    }
-
-    fn wide_byte(&self, element: usize) -> usize {
-        self.wide_offsets[element.min(self.n_elems)]
-    }
-
-    fn wide_element(&self, byte: usize) -> Option<usize> {
-        self.wide_offsets.binary_search(&byte).ok()
     }
 
     #[allow(clippy::len_without_is_empty)]
@@ -714,420 +689,6 @@ fn has_named_group(pattern: &str) -> bool {
     false
 }
 
-/// Project legacy `\uXXXX` atoms onto the ASCII alphabet used by the byte matcher.
-///
-/// This is only consulted for subjects already proven entirely ASCII. Code points above 0x7f
-/// can therefore be removed from classes; a range crossing the boundary is capped at 0x7f.
-/// Outside a class an above-ASCII literal becomes byte 0xff, which cannot occur in such a
-/// subject. Raw `[` inside a JS character class is escaped for Rust's nested-class syntax.
-fn project_fast_ascii_pattern(pattern: &str) -> Option<String> {
-    fn hex4(bytes: &[u8]) -> Option<u32> {
-        if bytes.len() < 4 || !bytes[..4].iter().all(u8::is_ascii_hexdigit) {
-            return None;
-        }
-        std::str::from_utf8(&bytes[..4])
-            .ok()
-            .and_then(|digits| u32::from_str_radix(digits, 16).ok())
-    }
-    fn push_ascii_escape(out: &mut String, cp: u32) {
-        use std::fmt::Write;
-        let _ = write!(out, "\\x{:02x}", cp.min(0xff));
-    }
-
-    let bytes = pattern.as_bytes();
-    let mut out = String::with_capacity(pattern.len());
-    let mut in_class = false;
-    let mut index = 0usize;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\\' if bytes.get(index + 1) == Some(&b'u') => {
-                let cp = hex4(bytes.get(index + 2..index + 6)?)?;
-                let after = index + 6;
-                if in_class && bytes.get(after) == Some(&b'-') {
-                    // Consume a complete `\uXXXX-\uYYYY` range together so dropping a
-                    // non-ASCII endpoint can never leave a dangling range operator.
-                    if bytes.get(after + 1) != Some(&b'\\') || bytes.get(after + 2) != Some(&b'u') {
-                        return None;
-                    }
-                    let end = hex4(bytes.get(after + 3..after + 7)?)?;
-                    if cp <= 0x7f {
-                        push_ascii_escape(&mut out, cp);
-                        out.push('-');
-                        push_ascii_escape(&mut out, end.min(0x7f));
-                    }
-                    index = after + 7;
-                    continue;
-                }
-                if cp <= 0x7f {
-                    push_ascii_escape(&mut out, cp);
-                } else if !in_class {
-                    out.push_str("\\xff");
-                }
-                index = after;
-                continue;
-            }
-            b'\\' => {
-                index += 1;
-                let escaped = *bytes.get(index)?;
-                // In legacy (non-u/v) ECMAScript regexps, punctuation that is not regexp
-                // syntax may be identity-escaped. Rust's regexp parser intentionally rejects
-                // several of those escapes. A slash is syntax only in a JS regexp *literal*
-                // delimiter, not in the pattern supplied to RegExp, and a quote is never
-                // regexp syntax, so both project to the same literal byte without the slash.
-                // (u/v patterns never enter this ASCII tier.)
-                if matches!(escaped, b'/' | b'"' | b'\'') {
-                    out.push(escaped as char);
-                } else {
-                    out.push('\\');
-                    out.push(escaped as char);
-                }
-            }
-            b'[' if in_class => out.push_str("\\["),
-            b'[' => {
-                in_class = true;
-                out.push('[');
-            }
-            b']' if in_class => {
-                in_class = false;
-                out.push(']');
-            }
-            byte => out.push(byte as char),
-        }
-        index += 1;
-    }
-    Some(out)
-}
-
-/// Compile the syntax shared exactly enough by ECMAScript and `regex`'s byte automaton.
-///
-/// This deliberately rejects constructs whose capture or assertion semantics need our full
-/// backtracker. Compilation itself is the final syntax filter: harmless JS identity escapes that
-/// the byte engine doesn't accept simply fall back as well.
-fn compile_fast_ascii(pattern: &str, flags: &str) -> Option<regex::bytes::Regex> {
-    if !pattern.is_ascii() || flags.contains('u') || flags.contains('v') {
-        return None;
-    }
-
-    let bytes = pattern.as_bytes();
-    // Rust's parser treats the legacy-JS empty class differently. Its capture state after a
-    // repeated group also does not implement ECMAScript's per-iteration clearing rule. Repeating
-    // a group with no capture nested inside it is safe: the group's own capture is overwritten
-    // on every successful iteration. A nested capture could instead retain a prior iteration's
-    // value, so only that structural case stays on the complete matcher.
-    {
-        let mut escaped = false;
-        let mut class_start = None;
-        for (index, byte) in bytes.iter().copied().enumerate() {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            match byte {
-                b'\\' => escaped = true,
-                b'[' if class_start.is_none() => class_start = Some(index),
-                b']' => {
-                    if let Some(start) = class_start.take() {
-                        // Legacy `[]` is never-match and `[^]` is match-any; Rust parses these
-                        // differently. An escaped or raw `[` inside a non-empty JS class is not
-                        // another class opener and must not trigger this check.
-                        let inside = &bytes[start + 1..index];
-                        if inside.is_empty() || inside == b"^" {
-                            return None;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    let mut groups: Vec<bool> = Vec::new();
-    let mut escaped = false;
-    let mut in_class = false;
-    for (index, &byte) in bytes.iter().enumerate() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match byte {
-            b'\\' => escaped = true,
-            b'[' if !in_class => in_class = true,
-            b']' if in_class => in_class = false,
-            b'(' if !in_class => {
-                let capturing = bytes.get(index + 1) != Some(&b'?');
-                if capturing {
-                    groups.iter_mut().for_each(|nested| *nested = true);
-                }
-                groups.push(false);
-            }
-            b')' if !in_class => {
-                let has_inner_capture = groups.pop().unwrap_or(false);
-                if has_inner_capture && matches!(bytes.get(index + 1), Some(b'*' | b'+' | b'{')) {
-                    return None;
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut escaped = false;
-    let mut in_class = false;
-    for (i, &b) in bytes.iter().enumerate() {
-        if escaped {
-            // Backreferences, legacy octal escapes and named backreferences require the complete
-            // ECMAScript matcher. Ordinary character/class escapes are shared by both engines.
-            if b.is_ascii_digit() || b == b'k' || b == b'c' {
-                return None;
-            }
-            escaped = false;
-            continue;
-        }
-        match b {
-            b'\\' => escaped = true,
-            b'[' => in_class = true,
-            b']' => in_class = false,
-            b'(' if !in_class && bytes.get(i + 1) == Some(&b'?') => {
-                // Non-capturing groups are shared. Lookarounds, named groups and inline flag
-                // groups are not admitted here.
-                if bytes.get(i + 2) != Some(&b':') {
-                    return None;
-                }
-            }
-            _ => {}
-        }
-    }
-    if escaped {
-        return None;
-    }
-
-    let projected = project_fast_ascii_pattern(pattern)?;
-    let mut builder = regex::bytes::RegexBuilder::new(&projected);
-    builder
-        .unicode(false)
-        .case_insensitive(flags.contains('i'))
-        .multi_line(flags.contains('m'))
-        .dot_matches_new_line(flags.contains('s'));
-    builder.build().ok()
-}
-
-/// Prove that every backreference is preceded on all paths by its capture and that repeated
-/// bodies contain no captures (where host and ECMAScript per-iteration clearing can differ).
-/// The proof is deliberately narrow; rejection only selects the complete matcher.
-fn fancy_backrefs_safe(
-    node: &Node,
-    guaranteed: &mut std::collections::BTreeSet<usize>,
-    saw_backref: &mut bool,
-) -> bool {
-    fn contains_capture(node: &Node) -> bool {
-        match node {
-            Node::Group(Some(_), _) => true,
-            Node::Concat(nodes) | Node::Alt(nodes) => nodes.iter().any(contains_capture),
-            Node::Group(None, inner)
-            | Node::Repeat(inner, ..)
-            | Node::Look(_, inner)
-            | Node::LookBehind(_, inner)
-            | Node::Modifier { inner, .. } => contains_capture(inner),
-            _ => false,
-        }
-    }
-
-    match node {
-        Node::Concat(nodes) => nodes
-            .iter()
-            .all(|node| fancy_backrefs_safe(node, guaranteed, saw_backref)),
-        Node::Alt(nodes) => {
-            let incoming = guaranteed.clone();
-            let mut intersection: Option<std::collections::BTreeSet<usize>> = None;
-            for node in nodes {
-                let mut branch = incoming.clone();
-                if !fancy_backrefs_safe(node, &mut branch, saw_backref) {
-                    return false;
-                }
-                intersection = Some(match intersection {
-                    None => branch,
-                    Some(current) => current.intersection(&branch).copied().collect(),
-                });
-            }
-            *guaranteed = intersection.unwrap_or(incoming);
-            true
-        }
-        Node::Group(index, inner) => {
-            if !fancy_backrefs_safe(inner, guaranteed, saw_backref) {
-                return false;
-            }
-            if let Some(index) = index {
-                guaranteed.insert(*index);
-            }
-            true
-        }
-        Node::Repeat(inner, min, ..) => {
-            if contains_capture(inner) {
-                return false;
-            }
-            let mut after = guaranteed.clone();
-            if !fancy_backrefs_safe(inner, &mut after, saw_backref) {
-                return false;
-            }
-            if *min > 0 {
-                *guaranteed = after;
-            }
-            true
-        }
-        Node::Backref(group) => {
-            *saw_backref = true;
-            *group != 0 && guaranteed.contains(group)
-        }
-        Node::Look(_, inner) => {
-            if contains_capture(inner) {
-                return false;
-            }
-            *saw_backref = true; // also enables this tier for capture-free lookahead
-            let mut inside = guaranteed.clone();
-            fancy_backrefs_safe(inner, &mut inside, saw_backref)
-        }
-        // Duplicate-name alternatives, lookbehind, inline flags, and JS whitespace classes
-        // have host-dialect edge cases outside this accelerator's contract.
-        Node::BackrefAlt(_)
-        | Node::NamedBackref(_)
-        | Node::LookBehind(..)
-        | Node::Modifier { .. } => false,
-        Node::Class(class) => !class.builtins.iter().any(|c| matches!(c, 's' | 'S')),
-        _ => true,
-    }
-}
-
-fn compile_fancy_ascii(pattern: &str, flags: &str, ast: &Node) -> Option<fancy_regex::Regex> {
-    if !pattern.is_ascii() || flags.contains('u') || flags.contains('v') {
-        return None;
-    }
-    let mut guaranteed = std::collections::BTreeSet::new();
-    let mut saw_backref = false;
-    if !fancy_backrefs_safe(ast, &mut guaranteed, &mut saw_backref) || !saw_backref {
-        return None;
-    }
-    let projected = project_fast_ascii_pattern(pattern)?;
-    let mut modifiers = String::new();
-    if flags.contains('i') {
-        modifiers.push('i');
-    }
-    if flags.contains('m') {
-        modifiers.push('m');
-    }
-    if flags.contains('s') {
-        modifiers.push('s');
-    }
-    let pattern = format!("(?{modifiers}:{projected})");
-    fancy_regex::Regex::new(&pattern).ok()
-}
-
-fn compile_fast_wide(flags: &str, ast: &Node) -> Option<regex::Regex> {
-    if flags.contains('u') || flags.contains('v') || flags.contains('i') {
-        return None;
-    }
-    fn hex(out: &mut String, cp: u32) {
-        use std::fmt::Write;
-        let _ = write!(out, "\\x{{{cp:x}}}");
-    }
-    fn class(out: &mut String, cc: &CharClass) -> Option<()> {
-        if !cc.props.is_empty() || cc.builtins.iter().any(char::is_ascii_uppercase) {
-            return None;
-        }
-        out.push('[');
-        if cc.negate {
-            out.push('^');
-        }
-        for &(lo, hi) in &cc.ranges {
-            hex(out, lo);
-            if hi != lo {
-                out.push('-');
-                hex(out, hi);
-            }
-        }
-        for builtin in &cc.builtins {
-            match builtin {
-                'd' => out.push_str("0-9"),
-                'w' => out.push_str("A-Za-z0-9_"),
-                's' => {
-                    for cp in [
-                        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0xA0, 0x1680, 0x2000, 0x2001, 0x2002,
-                        0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x2028,
-                        0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF,
-                    ] {
-                        hex(out, cp);
-                    }
-                }
-                _ => return None,
-            }
-        }
-        out.push(']');
-        Some(())
-    }
-    fn node(out: &mut String, n: &Node) -> Option<()> {
-        match n {
-            Node::Empty => out.push_str("(?:)"),
-            Node::Char(cp) => hex(out, *cp),
-            Node::Any => out.push('.'),
-            Node::Class(cc) => class(out, cc)?,
-            Node::Concat(nodes) => {
-                for child in nodes {
-                    node(out, child)?;
-                }
-            }
-            Node::Alt(nodes) => {
-                out.push_str("(?:");
-                for (index, child) in nodes.iter().enumerate() {
-                    if index != 0 {
-                        out.push('|');
-                    }
-                    node(out, child)?;
-                }
-                out.push(')');
-            }
-            Node::Group(index, inner) => {
-                out.push_str(if index.is_some() { "(" } else { "(?:" });
-                node(out, inner)?;
-                out.push(')');
-            }
-            Node::Repeat(inner, min, max, greedy) => {
-                out.push_str("(?:");
-                node(out, inner)?;
-                out.push_str("){");
-                out.push_str(&min.to_string());
-                match max {
-                    Some(max) if max == min => {}
-                    Some(max) => {
-                        out.push(',');
-                        out.push_str(&max.to_string());
-                    }
-                    None => out.push(','),
-                }
-                out.push('}');
-                if !greedy {
-                    out.push('?');
-                }
-            }
-            Node::Start => out.push('^'),
-            Node::End => out.push('$'),
-            // Word boundaries need the legacy ASCII word predicate, while these constructs
-            // require the complete ECMAScript matcher or the fancy ASCII tier.
-            Node::WordB(_)
-            | Node::Backref(_)
-            | Node::NamedBackref(_)
-            | Node::BackrefAlt(_)
-            | Node::Look(..)
-            | Node::LookBehind(..)
-            | Node::Modifier { .. } => return None,
-        }
-        Some(())
-    }
-
-    let mut pattern = String::new();
-    node(&mut pattern, ast)?;
-    let mut builder = regex::RegexBuilder::new(&pattern);
-    builder
-        .multi_line(flags.contains('m'))
-        .dot_matches_new_line(flags.contains('s'));
-    builder.build().ok()
-}
-
 impl Regex {
     pub fn new(pattern: &str, flags: &str) -> Result<Regex, String> {
         let mut seen = String::new();
@@ -1182,11 +743,6 @@ impl Regex {
             }
         }
         resolve_named_backrefs(&mut ast, &p.names);
-        let fast_fancy_ascii = compile_fancy_ascii(pattern, flags, &ast);
-        let fast_wide = compile_fast_wide(flags, &ast);
-        let fast_wide_locs = fast_wide
-            .as_ref()
-            .map(|fast| std::cell::RefCell::new(fast.capture_locations()));
         // Wrap the whole match in group-0 saves.
         let mut prog = vec![Inst::Save(0)];
         let mut nmarks = 0usize;
@@ -1196,19 +752,44 @@ impl Regex {
         // The `flags` accessor returns flags in canonical order.
         let canonical: String = "dgimsuvy".chars().filter(|c| flags.contains(*c)).collect();
         let first = first_filter(&prog, flags.contains('m'));
-        let fast_ascii = compile_fast_ascii(pattern, flags);
-        let fast_ascii_locs = fast_ascii
-            .as_ref()
-            .map(|fast| std::cell::RefCell::new(fast.capture_locations()));
+        let first_byte = if !flags.contains('i') {
+            match &first {
+                FirstFilter::Atoms(atoms) if atoms.len() == 1 => match &atoms[0] {
+                    Rep::Char(c) if *c < 0x80 => Some(*c as u8),
+                    _ => None,
+                },
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let literal_ascii = if !flags.contains('i') && p.ngroups == 0 {
+            let chars = if prog.len() >= 4
+                && matches!(prog.first(), Some(Inst::Save(0)))
+                && matches!(prog.get(prog.len() - 2), Some(Inst::Save(1)))
+                && matches!(prog.last(), Some(Inst::Match))
+            {
+                prog[1..prog.len() - 2]
+                    .iter()
+                    .map(|inst| match inst {
+                        Inst::Char(c) if *c < 0x80 => Some(*c as u8),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()
+            } else {
+                None
+            }
+            .filter(|literal| !literal.is_empty());
+            chars.map(Vec::into_boxed_slice)
+        } else {
+            None
+        };
         let mut re = Regex {
-            fast_ascii,
-            fast_ascii_locs,
-            fast_fancy_ascii,
-            fast_wide,
-            fast_wide_locs,
             unicode,
             nmarks,
             first,
+            first_byte,
+            literal_ascii,
             first_lut: None,
             prog,
             ngroups: p.ngroups,
@@ -1268,117 +849,30 @@ impl Regex {
     pub fn exec_text_shared(&self, text: &ReText, start: usize) -> Option<Captures> {
         match &text.ascii_src {
             Some(s) => {
-                if let Some(fast) = &self.fast_ascii {
-                    if start > s.len() {
-                        None
-                    } else {
-                        let mut locs = self
-                            .fast_ascii_locs
-                            .as_ref()
-                            .expect("ASCII matcher capture storage")
-                            .borrow_mut();
-                        let whole = fast.captures_read_at(&mut locs, s.as_bytes(), start)?;
-                        if self.sticky && whole.start() != start {
-                            None
-                        } else {
-                            let mut out = Vec::with_capacity(self.ngroups + 1);
-                            for group in 0..=self.ngroups {
-                                out.push(locs.get(group));
-                            }
-                            Some(Captures::from_vec(out))
-                        }
-                    }
-                } else if let Some(fancy) = &self.fast_fancy_ascii {
-                    match fancy.captures_from_pos(s, start) {
-                        Ok(Some(caps)) => {
-                            let whole = caps.get(0)?;
-                            if self.sticky && whole.start() != start {
-                                None
-                            } else {
-                                let mut out = Vec::with_capacity(self.ngroups + 1);
-                                for group in 0..=self.ngroups {
-                                    out.push(caps.get(group).map(|m| (m.start(), m.end())));
-                                }
-                                Some(Captures::from_vec(out))
-                            }
-                        }
-                        Ok(None) => None,
-                        // The complete engine retains the authoritative step/depth limits.
-                        Err(_) => self.exec_impl(s.as_bytes(), start).map(Captures::from_vec),
-                    }
+                if let Some(literal) = &self.literal_ascii {
+                    let span = find_ascii_literal(s.as_bytes(), start, literal, self.sticky)?;
+                    Some(Captures::one(span))
                 } else {
-                    self.exec_impl(s.as_bytes(), start).map(Captures::from_vec)
+                    self.exec_impl(s.as_bytes(), start)
                 }
             }
-            None => {
-                if let (Some(subject), Some(fast)) = (&text.wide_src, &self.fast_wide) {
-                    if start > text.len() {
-                        return None;
-                    }
-                    let start_byte = text.wide_byte(start);
-                    let mut locs = self
-                        .fast_wide_locs
-                        .as_ref()
-                        .expect("wide matcher capture storage")
-                        .borrow_mut();
-                    let whole = fast.captures_read_at(&mut locs, subject, start_byte)?;
-                    let whole_start = text.wide_element(whole.start())?;
-                    if self.sticky && whole_start != start {
-                        None
-                    } else {
-                        let mut out = Vec::with_capacity(self.ngroups + 1);
-                        for group in 0..=self.ngroups {
-                            out.push(locs.get(group).and_then(|(a, b)| {
-                                Some((text.wide_element(a)?, text.wide_element(b)?))
-                            }));
-                        }
-                        Some(Captures::from_vec(out))
-                    }
-                } else {
-                    self.exec_impl(&text.elems[..], start)
-                        .map(Captures::from_vec)
-                }
-            }
+            None => self.exec_impl(&text.elems[..], start),
         }
     }
 
-    /// Match for a caller that only observes matcher side effects. A pattern without capture
-    /// groups needs just the whole-match span, so the ASCII tier can use `find_at` instead of
-    /// allocating and populating the regex crate's capture-location buffer.
+    /// Match for a caller that only observes matcher side effects.
     pub fn exec_text_discard_shared(&self, text: &ReText, start: usize) -> Option<Captures> {
-        if self.ngroups == 0 {
-            if let (Some(subject), Some(fast)) = (&text.ascii_src, &self.fast_ascii) {
-                if start > subject.len() {
-                    return None;
-                }
-                let found = fast.find_at(subject.as_bytes(), start)?;
-                if self.sticky && found.start() != start {
-                    return None;
-                }
-                return Some(Captures::one((found.start(), found.end())));
-            }
-        }
         self.exec_text_shared(text, start)
     }
 
     /// Whole-match-only search for operations whose JavaScript result is dead. Capture groups
     /// can be recovered lazily if a legacy RegExp static is subsequently observed.
     pub(crate) fn find_text_shared(&self, text: &ReText, start: usize) -> Option<(usize, usize)> {
-        if let (Some(subject), Some(fast)) = (&text.ascii_src, &self.fast_ascii) {
-            if start > subject.len() {
-                return None;
-            }
-            let found = fast.find_at(subject.as_bytes(), start)?;
-            if self.sticky && found.start() != start {
-                return None;
-            }
-            return Some((found.start(), found.end()));
-        }
         self.exec_text_shared(text, start)
             .and_then(|captures| captures[0])
     }
 
-    fn exec_impl<I: ReInput>(&self, input: I, start: usize) -> Option<Vec<Option<(usize, usize)>>> {
+    fn exec_impl<I: ReInput>(&self, input: I, start: usize) -> Option<Captures> {
         if start > input.len() {
             return None;
         }
@@ -1413,34 +907,41 @@ impl Regex {
             // Prescan: skip positions that cannot begin a match. Sticky regexes get exactly one
             // attempt at `start`, so the filter only ever saves that single attempt for them.
             if !self.sticky {
-                match &self.first {
-                    FirstFilter::Anchored => {
-                        // `^` (non-multiline) can only match at position 0: one attempt at
-                        // `from` decides the scan (any later position fails the assert too).
-                        if from > 0 {
-                            break 'scan None;
-                        }
-                    }
-                    FirstFilter::Atoms(atoms) => {
-                        // Every path consumes an element first: find the next viable one. Small
-                        // elements go through the precomputed table (one load per position).
-                        let len = input.len();
-                        loop {
-                            if from >= len {
+                if let Some(byte) = self.first_byte {
+                    let Some(found) = input.find_byte(from, byte) else {
+                        break 'scan None;
+                    };
+                    from = found;
+                } else {
+                    match &self.first {
+                        FirstFilter::Anchored => {
+                            // `^` (non-multiline) can only match at position 0: one attempt at
+                            // `from` decides the scan (any later position fails the assert too).
+                            if from > 0 {
                                 break 'scan None;
                             }
-                            let c = input.at(from);
-                            let viable = match &self.first_lut {
-                                Some(lut) if (c as usize) < 256 => lut[c as usize],
-                                _ => self.first_matches(atoms, c),
-                            };
-                            if viable {
-                                break;
-                            }
-                            from += 1;
                         }
+                        FirstFilter::Atoms(atoms) => {
+                            // Every path consumes an element first: find the next viable one. Small
+                            // elements go through the precomputed table (one load per position).
+                            let len = input.len();
+                            loop {
+                                if from >= len {
+                                    break 'scan None;
+                                }
+                                let c = input.at(from);
+                                let viable = match &self.first_lut {
+                                    Some(lut) if (c as usize) < 256 => lut[c as usize],
+                                    _ => self.first_matches(atoms, c),
+                                };
+                                if viable {
+                                    break;
+                                }
+                                from += 1;
+                            }
+                        }
+                        FirstFilter::None => {}
                     }
-                    FirstFilter::None => {}
                 }
             }
             m.caps.fill(None);
@@ -1449,15 +950,7 @@ impl Regex {
             m.steps = 0;
             m.depth = 0;
             if m.run(&self.prog, 0, from) {
-                let mut out = Vec::with_capacity(self.ngroups + 1);
-                for g in 0..=self.ngroups {
-                    out.push(match (m.caps[2 * g], m.caps[2 * g + 1]) {
-                        // A group inside a lookbehind captured right-to-left: normalize the span.
-                        (Some(a), Some(b)) => Some((a.min(b), a.max(b))),
-                        _ => None,
-                    });
-                }
-                break 'scan Some(out);
+                break 'scan Some(Captures::from_slots(&m.caps, self.ngroups));
             }
             if self.sticky {
                 break 'scan None;
@@ -2880,12 +2373,51 @@ fn clone_class(cc: &CharClass) -> CharClass {
 /// native stack on big inputs.
 const MAX_MATCH_DEPTH: u32 = 3000;
 
+fn find_ascii_literal(
+    subject: &[u8],
+    start: usize,
+    literal: &[u8],
+    sticky: bool,
+) -> Option<(usize, usize)> {
+    if start > subject.len() || literal.len() > subject.len().saturating_sub(start) {
+        return None;
+    }
+    if sticky {
+        return subject[start..]
+            .starts_with(literal)
+            .then_some((start, start + literal.len()));
+    }
+    let mut from = start;
+    while from + literal.len() <= subject.len() {
+        let found = subject.find_byte(from, literal[0])?;
+        if found + literal.len() > subject.len() {
+            return None;
+        }
+        if subject[found..].starts_with(literal) {
+            return Some((found, found + literal.len()));
+        }
+        from = found + 1;
+    }
+    None
+}
+
 /// The matcher's view of a subject: element `i` as a code point / code unit. Monomorphized for
 /// bytes (an ASCII subject — the common case, matched with no `Vec<u32>` materialization at all)
 /// and for wide elements (anything non-ASCII).
 pub trait ReInput: Copy {
     fn len(&self) -> usize;
     fn at(&self, i: usize) -> u32;
+
+    #[inline]
+    fn find_byte(&self, mut from: usize, byte: u8) -> Option<usize> {
+        while from < self.len() {
+            if self.at(from) == byte as u32 {
+                return Some(from);
+            }
+            from += 1;
+        }
+        None
+    }
 }
 
 impl ReInput for &[u8] {
@@ -2896,6 +2428,30 @@ impl ReInput for &[u8] {
     #[inline(always)]
     fn at(&self, i: usize) -> u32 {
         self[i] as u32
+    }
+
+    #[inline]
+    fn find_byte(&self, from: usize, byte: u8) -> Option<usize> {
+        let bytes = self.get(from..)?;
+        let repeated = u64::from_ne_bytes([byte; 8]);
+        let low_bits = 0x0101_0101_0101_0101u64;
+        let high_bits = 0x8080_8080_8080_8080u64;
+        let mut chunks = bytes.chunks_exact(8);
+        for (chunk_index, chunk) in chunks.by_ref().enumerate() {
+            let word = u64::from_ne_bytes(chunk.try_into().unwrap());
+            let different = word ^ repeated;
+            if different.wrapping_sub(low_bits) & !different & high_bits != 0 {
+                if let Some(offset) = chunk.iter().position(|candidate| *candidate == byte) {
+                    return Some(from + chunk_index * 8 + offset);
+                }
+            }
+        }
+        let tail_start = from + bytes.len() - chunks.remainder().len();
+        chunks
+            .remainder()
+            .iter()
+            .position(|candidate| *candidate == byte)
+            .map(|offset| tail_start + offset)
     }
 }
 
@@ -2927,16 +2483,20 @@ struct Matcher<I: ReInput> {
 }
 
 impl<I: ReInput> Matcher<I> {
+    #[inline(always)]
     fn icase(&self) -> bool {
         self.flags.last().unwrap().0
     }
+    #[inline(always)]
     fn multiline(&self) -> bool {
         self.flags.last().unwrap().1
     }
+    #[inline(always)]
     fn dotall(&self) -> bool {
         self.flags.last().unwrap().2
     }
     /// Compare two subject/pattern code points under the active case rules.
+    #[inline(always)]
     fn eqc_uu(&self, a: u32, b: u32) -> bool {
         if a == b {
             return true;
@@ -2956,6 +2516,7 @@ impl<I: ReInput> Matcher<I> {
     }
 
     /// The next element to consume and the position after it, honouring the match direction.
+    #[inline(always)]
     fn step(&self, pos: usize) -> Option<(u32, usize)> {
         if self.back {
             if pos > 0 {
@@ -2970,6 +2531,7 @@ impl<I: ReInput> Matcher<I> {
         }
     }
 
+    #[inline(always)]
     fn rep_matches(&self, rep: &Rep, c: u32) -> bool {
         match rep {
             Rep::Char(ch) => self.eqc_uu(c, *ch),
@@ -3769,39 +3331,25 @@ fn class_set_to_node(mut set: ClassSet) -> Node {
 }
 
 #[cfg(test)]
-mod fast_ascii_diagnostics {
+mod internal_engine_diagnostics {
     #[test]
-    fn escaped_open_bracket_is_not_an_empty_class() {
+    fn escaped_open_bracket_patterns_compile() {
         for pattern in [r"\s*([+>~\s])\s*([a-zA-Z#.*:\[])", r"^[\s[]?shapgvba"] {
-            assert!(
-                super::compile_fast_ascii(pattern, "g").is_some(),
-                "fast ASCII compilation rejected {pattern:?}"
-            );
+            super::Regex::new(pattern, "g")
+                .unwrap_or_else(|error| panic!("internal matcher rejected {pattern:?}: {error}"));
         }
     }
 
     #[test]
-    fn legacy_identity_escaped_punctuation_uses_ascii_tier() {
-        assert!(
-            super::compile_fast_ascii(r#"(^|[^\\])\"\\\/Qngr\((-?[0-9]+)\)\\\/\""#, "g").is_some()
-        );
+    fn legacy_identity_escaped_punctuation_compiles() {
+        super::Regex::new(r#"(^|[^\\])\"\\\/Qngr\((-?[0-9]+)\)\\\/\""#, "g")
+            .expect("internal matcher should accept legacy identity escapes");
     }
 
     #[test]
-    fn guaranteed_ascii_backreference_uses_fancy_tier() {
+    fn guaranteed_ascii_backreference_matches() {
         let re =
             super::Regex::new(r#"^(\[) *@?([\w-]+) *([!*$^~=]*) *('?"?)(.*?)\4 *\]"#, "").unwrap();
-        assert!(
-            re.fast_fancy_ascii.is_some(),
-            "{:?}",
-            fancy_regex::Regex::new(&format!(
-                "(?:{})",
-                super::project_fast_ascii_pattern(
-                    r#"^(\[) *@?([\w-]+) *([!*$^~=]*) *('?"?)(.*?)\4 *\]"#
-                )
-                .unwrap()
-            ))
-        );
         let input = crate::lstr::LStr::from("[glcr=fhozvg]");
         let text = super::ReText::new_rc(false, &input);
         let caps = re.exec_text_shared(&text, 0).unwrap();
@@ -3809,22 +3357,38 @@ mod fast_ascii_diagnostics {
     }
 
     #[test]
-    fn capture_free_ascii_lookahead_uses_fancy_tier() {
+    fn capture_free_ascii_lookahead_matches() {
         let re = super::Regex::new("HF(?=;)", "i").unwrap();
-        assert!(re.fast_fancy_ascii.is_some());
         let input = crate::lstr::LStr::from("xhf;y");
         let text = super::ReText::new_rc(false, &input);
         assert_eq!(re.exec_text_shared(&text, 0).unwrap()[0], Some((1, 3)));
     }
 
     #[test]
-    fn legacy_pattern_uses_wide_automaton_with_unit_offsets() {
+    fn legacy_pattern_uses_utf16_element_offsets() {
         let re = super::Regex::new(r"Qngr\((-?[0-9]+)\)", "").unwrap();
-        assert!(re.fast_wide.is_some());
         let input = crate::lstr::LStr::from("‰Qngr(-12)");
         let text = super::ReText::new_rc(false, &input);
         let caps = re.exec_text_shared(&text, 0).unwrap();
         assert_eq!(caps[0], Some((1, 10)));
         assert_eq!(caps[1], Some((6, 9)));
+    }
+
+    #[test]
+    fn internal_literal_plan_honors_start_and_sticky() {
+        let input = crate::lstr::LStr::from("xxneedle--needle");
+        let text = super::ReText::new_rc(false, &input);
+        let search = super::Regex::new("needle", "").unwrap();
+        assert_eq!(
+            search.exec_text_shared(&text, 3).unwrap()[0],
+            Some((10, 16))
+        );
+
+        let sticky = super::Regex::new("needle", "y").unwrap();
+        assert!(sticky.exec_text_shared(&text, 3).is_none());
+        assert_eq!(
+            sticky.exec_text_shared(&text, 10).unwrap()[0],
+            Some((10, 16))
+        );
     }
 }
