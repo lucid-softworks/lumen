@@ -33,6 +33,18 @@ const NUM_CLASSES: usize = MAX_CLASS / STEP;
 /// the small, hot allocation classes.
 const BYTES_PER_CLASS: usize = 256 * 1024;
 
+const fn class_caps() -> [usize; NUM_CLASSES] {
+    let mut caps = [0; NUM_CLASSES];
+    let mut class = 0;
+    while class < NUM_CLASSES {
+        caps[class] = BYTES_PER_CLASS / ((class + 1) * STEP);
+        class += 1;
+    }
+    caps
+}
+
+const CLASS_CAPS: [usize; NUM_CLASSES] = class_caps();
+
 struct Cache {
     heads: [Cell<*mut u8>; NUM_CLASSES],
     counts: [Cell<usize>; NUM_CLASSES],
@@ -64,11 +76,6 @@ fn class_of(size: usize, align: usize) -> Option<usize> {
 fn class_layout(class: usize) -> Layout {
     // Size is a non-zero multiple of STEP with STEP alignment: always valid.
     unsafe { Layout::from_size_align_unchecked((class + 1) * STEP, STEP) }
-}
-
-#[inline]
-fn class_cap(class: usize) -> usize {
-    BYTES_PER_CLASS / ((class + 1) * STEP)
 }
 
 fn drain(cache: &Cache) {
@@ -106,16 +113,14 @@ pub struct ClassAlloc;
 unsafe impl GlobalAlloc for ClassAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if let Some(class) = class_of(layout.size(), layout.align()) {
-            let cached = CACHE
-                .try_with(|c| {
-                    let p = c.heads[class].get();
-                    if !p.is_null() {
-                        c.heads[class].set(unsafe { *(p as *mut *mut u8) });
-                        c.counts[class].set(c.counts[class].get() - 1);
-                    }
-                    p
-                })
-                .unwrap_or(std::ptr::null_mut());
+            let cached = CACHE.with(|c| {
+                let p = c.heads[class].get();
+                if !p.is_null() {
+                    c.heads[class].set(unsafe { *(p as *mut *mut u8) });
+                    c.counts[class].set(c.counts[class].get() - 1);
+                }
+                p
+            });
             if !cached.is_null() {
                 return cached;
             }
@@ -126,18 +131,16 @@ unsafe impl GlobalAlloc for ClassAlloc {
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         if let Some(class) = class_of(layout.size(), layout.align()) {
-            let cached = CACHE
-                .try_with(|c| {
-                    if c.counts[class].get() < class_cap(class) {
-                        unsafe { *(ptr as *mut *mut u8) = c.heads[class].get() };
-                        c.heads[class].set(ptr);
-                        c.counts[class].set(c.counts[class].get() + 1);
-                        true
-                    } else {
-                        false
-                    }
-                })
-                .unwrap_or(false);
+            let cached = CACHE.with(|c| {
+                if c.counts[class].get() < CLASS_CAPS[class] {
+                    unsafe { *(ptr as *mut *mut u8) = c.heads[class].get() };
+                    c.heads[class].set(ptr);
+                    c.counts[class].set(c.counts[class].get() + 1);
+                    true
+                } else {
+                    false
+                }
+            });
             if !cached {
                 System.dealloc(ptr, class_layout(class));
             }

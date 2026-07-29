@@ -168,6 +168,7 @@ impl NameIc {
 pub const NAME_IC_OFF_ENV: u32 = 0;
 pub const NAME_IC_OFF_BINDING: u32 = 8;
 pub const NAME_IC_OFF_GEN: u32 = 16;
+pub const NAME_IC_OFF_ACT_GEN: u32 = 20;
 
 impl IcState {
     pub const EMPTY: IcState = IcState {
@@ -273,6 +274,10 @@ pub const INTRINSIC_MATH_SQRT: u8 = 5;
 pub const INTRINSIC_ARRAY_PUSH: u8 = 6;
 pub const INTRINSIC_ARRAY_POP: u8 = 7;
 pub const INTRINSIC_FUNCTION_CALL: u8 = 8;
+pub const INTRINSIC_REGEXP_EXEC_DISCARD: u8 = 9;
+pub const INTRINSIC_STRING_REPLACE_DISCARD: u8 = 10;
+pub const INTRINSIC_STRING_SPLIT_DISCARD: u8 = 11;
+pub const INTRINSIC_CHAR_AT: u8 = 12;
 
 impl CallIc {
     pub const EMPTY: CallIc = CallIc {
@@ -304,6 +309,9 @@ pub struct InlineTarget {
     /// Keeps `expected` from ever being recycled (same ABA argument as [`CallIc`]): a live
     /// `Value::Obj` whose payload equals it therefore IS the same, still-alive function.
     pub pin: std::rc::Weak<std::cell::RefCell<crate::value::Object>>,
+    /// Exact shared closure environment required by a non-global free-name inline. Zero means
+    /// the callee has no such dependency.
+    pub expected_env: usize,
     pub argc: u16,
     /// Sloppy callee that reads `this`: the receiver must already be an object (the generic
     /// path would box a primitive or substitute the global object).
@@ -650,6 +658,9 @@ pub struct Chunk {
     /// `new` uses this to reserve the instance property vector exactly once; it costs no bytes
     /// per object and avoids retaining geometric-growth slack.
     instance_capacity_hint: u8,
+    /// Field count learned from a structurally proven `initialize.apply(this, arguments)`
+    /// forwarder. Once set it is as stable as the immutable forwarding/initializer chunks.
+    forwarded_capacity_hint: std::cell::Cell<u8>,
     /// Inner function templates for `MakeClosure`.
     funcs: Vec<Rc<Function>>,
     /// Captured bindings to seed into a fresh activation env at entry; empty = no activation
@@ -679,6 +690,29 @@ pub struct Chunk {
     /// this at nine bytes per site rather than padding a feedback struct to sixteen.
     name_num_bits: Vec<std::cell::Cell<u64>>,
     name_num_valid: Vec<std::cell::Cell<bool>>,
+    /// Captured-binding cache keyed by the chunk's interned-name index. Unlike a free-name cache,
+    /// this always resolves in the current activation; a weak pin keeps its raw scope pointer
+    /// ABA-safe until a fresh/recursive activation refills the entry.
+    cap_caches: Vec<std::cell::Cell<NameIc>>,
+    cap_pins: std::cell::RefCell<
+        Vec<Option<std::rc::Weak<std::cell::RefCell<crate::interpreter::Scope>>>>,
+    >,
+    /// Parsed straight-line initializer body (`this.x = arg` with optional truthy defaults).
+    initializer_plan: std::cell::OnceCell<Option<InitializerPlan>>,
+    /// Complete creation-shape chain for an exact straight-line constructor, keyed by the live
+    /// prototype epoch/identity and fresh receiver shape.
+    simple_constructor_shapes: std::cell::Cell<InitializerShapes>,
+    /// Parsed exact straight-line constructor fields; immutable bytecode makes this a one-time
+    /// structural decision rather than work repeated by every `new`.
+    simple_constructor_plan: std::cell::OnceCell<Option<Vec<InitializerField>>>,
+    /// Parsed `this.initialize.apply(this, arguments)` forwarding body.
+    arguments_forwarder: std::cell::OnceCell<Option<ArgumentsForwarder>>,
+    /// Immutable callable metadata behind a warmed forwarding constructor. Observable
+    /// properties are still IC-validated on every construction before this cache is used.
+    arguments_forwarder_runtime: std::cell::RefCell<Option<ForwarderRuntime>>,
+    /// Compiled matcher per RegExp-literal bytecode pc. Literal evaluation still allocates a
+    /// fresh JS wrapper and `lastIndex`; only immutable source/flags compilation is shared.
+    regexp_literals: Vec<std::cell::OnceCell<Rc<crate::regex::Regex>>>,
     /// One [`CallSite`] per `Call`/`CallWithThis` site (the JIT→JIT fast call's callee cache).
     call_caches: Vec<CallSite>,
     /// One monomorphic identity cache per `New` site.
@@ -700,7 +734,143 @@ pub struct Chunk {
     pub(crate) jit: std::cell::OnceCell<Option<Rc<crate::jit::JitCode>>>,
 }
 
+/// Borrowed description of a constructor whose complete body is a sequence of unique
+/// parameter-to-`this` stores followed by implicit return.
+pub(crate) struct SimpleConstructor<'a> {
+    chunk: &'a Chunk,
+    fields: &'a [InitializerField],
+}
+
+pub(crate) struct InitializerPlan {
+    fields: Vec<InitializerField>,
+    shapes: std::cell::Cell<InitializerShapes>,
+}
+
+struct InitializerField {
+    slot: u16,
+    default: Option<u32>,
+    name: u32,
+    cache: u32,
+}
+
+#[derive(Clone, Copy)]
+struct ArgumentsForwarder {
+    initializer: u32,
+    initializer_cache: u32,
+    apply_cache: u32,
+}
+
+struct ForwarderRuntime {
+    initializer: usize,
+    apply: usize,
+    pin: std::rc::Weak<std::cell::RefCell<crate::value::Object>>,
+    chunk: Rc<Chunk>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct InitializerShapes {
+    epoch: u32,
+    proto: usize,
+    start: u32,
+    len: u8,
+    transitions: [u32; 16],
+}
+
+impl InitializerPlan {
+    #[inline(always)]
+    pub(crate) fn len(&self) -> usize {
+        self.fields.len()
+    }
+
+    pub(crate) fn cached_shapes(&self, epoch: u32, proto: usize, start: u32) -> Option<[u32; 16]> {
+        let cached = self.shapes.get();
+        (cached.epoch == epoch
+            && cached.proto == proto
+            && cached.start == start
+            && cached.len as usize == self.fields.len())
+        .then_some(cached.transitions)
+    }
+
+    pub(crate) fn cache_shapes(&self, epoch: u32, proto: usize, start: u32, values: &[u32]) {
+        debug_assert!(values.len() <= 16);
+        let mut transitions = [0; 16];
+        transitions[..values.len()].copy_from_slice(values);
+        self.shapes.set(InitializerShapes {
+            epoch,
+            proto,
+            start,
+            len: values.len() as u8,
+            transitions,
+        });
+    }
+}
+
+impl SimpleConstructor<'_> {
+    #[inline(always)]
+    pub(crate) fn len(&self) -> usize {
+        self.fields.len()
+    }
+
+    #[inline(always)]
+    pub(crate) fn field(&self, index: usize) -> (usize, &Rc<str>, &std::cell::Cell<IcState>) {
+        let field = &self.fields[index];
+        (
+            field.slot as usize,
+            &self.chunk.names[field.name as usize],
+            &self.chunk.caches[field.cache as usize],
+        )
+    }
+
+    pub(crate) fn cached_shapes(&self, epoch: u32, proto: usize, start: u32) -> Option<[u32; 16]> {
+        let cached = self.chunk.simple_constructor_shapes.get();
+        (cached.epoch == epoch
+            && cached.proto == proto
+            && cached.start == start
+            && cached.len as usize == self.fields.len())
+        .then_some(cached.transitions)
+    }
+
+    pub(crate) fn cache_shapes(&self, epoch: u32, proto: usize, start: u32, values: &[u32]) {
+        debug_assert!(values.len() <= 16);
+        let mut transitions = [0; 16];
+        transitions[..values.len()].copy_from_slice(values);
+        self.chunk.simple_constructor_shapes.set(InitializerShapes {
+            epoch,
+            proto,
+            start,
+            len: values.len() as u8,
+            transitions,
+        });
+    }
+}
+
 impl Chunk {
+    pub(crate) fn compiled_regexp_literal(
+        &self,
+        i: &mut Interp,
+        pc: usize,
+        body: u32,
+        flags: u32,
+    ) -> Result<Rc<crate::regex::Regex>, Abrupt> {
+        if let Some(re) = self.regexp_literals[pc].get() {
+            return Ok(re.clone());
+        }
+        let re = i.compiled_regexp(&self.names[body as usize], &self.names[flags as usize])?;
+        let _ = self.regexp_literals[pc].set(re.clone());
+        Ok(re)
+    }
+
+    fn make_regexp_literal(
+        &self,
+        i: &mut Interp,
+        pc: usize,
+        body: u32,
+        flags: u32,
+    ) -> Result<Value, Abrupt> {
+        let re = self.compiled_regexp_literal(i, pc, body, flags)?;
+        i.make_regexp_compiled(re)
+    }
+
     #[inline]
     fn record_name_number(&self, cache: usize, value: &Value) {
         if let Value::Num(n) = value {
@@ -719,7 +889,12 @@ impl Chunk {
     }
 
     pub(crate) fn instance_capacity_hint(&self) -> usize {
-        self.instance_capacity_hint as usize
+        self.instance_capacity_hint
+            .max(self.forwarded_capacity_hint.get()) as usize
+    }
+    pub(crate) fn note_forwarded_capacity(&self, capacity: usize) {
+        self.forwarded_capacity_hint
+            .set(self.forwarded_capacity_hint.get().max(capacity as u8));
     }
     pub(crate) fn construct_cache(&self, cache: u32) -> ConstructSite {
         self.construct_caches[cache as usize].get()
@@ -756,7 +931,10 @@ impl Chunk {
         if !self.makes_env() {
             return env.clone();
         }
-        let act = crate::interpreter::new_var_scope(Some(env.clone()));
+        let act = crate::interpreter::new_var_scope_with_capacity(
+            Some(env.clone()),
+            self.cap_inits.len() + usize::from(self.env_this),
+        );
         // Function-declaration closures capture the activation itself, so they are created after
         // the borrow below is released.
         let mut fns: Vec<(u16, Rc<str>)> = Vec::new();
@@ -2053,6 +2231,8 @@ fn compile_inner(
                 .any(|entry| entry.get().callee == *callee)
         })
     });
+    let cap_cache_len = c.names.len();
+    let op_count = c.ops.len();
     Some(Rc::new(Chunk {
         ops: c.ops,
         consts: c.consts,
@@ -2064,6 +2244,7 @@ fn compile_inner(
         var_force_resets: c.var_force_resets,
         uses_this: c.uses_this,
         instance_capacity_hint,
+        forwarded_capacity_hint: std::cell::Cell::new(0),
         funcs: c.funcs,
         cap_inits: c.cap_inits,
         env_this: c.env_this,
@@ -2075,6 +2256,14 @@ fn compile_inner(
         name_caches: c.name_caches,
         name_num_bits: c.name_num_bits,
         name_num_valid: c.name_num_valid,
+        cap_caches: vec![std::cell::Cell::new(NameIc::EMPTY); cap_cache_len],
+        cap_pins: std::cell::RefCell::new(vec![None; cap_cache_len]),
+        initializer_plan: std::cell::OnceCell::new(),
+        simple_constructor_shapes: std::cell::Cell::new(InitializerShapes::default()),
+        simple_constructor_plan: std::cell::OnceCell::new(),
+        arguments_forwarder: std::cell::OnceCell::new(),
+        arguments_forwarder_runtime: std::cell::RefCell::new(None),
+        regexp_literals: (0..op_count).map(|_| std::cell::OnceCell::new()).collect(),
         call_caches: c.call_caches,
         construct_caches: c.construct_caches,
         call_pins: std::cell::RefCell::new(c.call_pins),
@@ -2107,6 +2296,7 @@ pub(crate) fn plan_inlines(
     chunk: &Chunk,
     caller: &Function,
     global_env: &crate::interpreter::Env,
+    caller_env: *const std::cell::RefCell<crate::interpreter::Scope>,
 ) -> crate::fasthash::FastMap<u32, InlinePlanEntry> {
     // Bound the *whole* optimized body rather than stopping after one arbitrary nesting level.
     // OO hot loops tend to be call chains (dispatcher -> virtual method -> small scheduler
@@ -2120,18 +2310,23 @@ pub(crate) fn plan_inlines(
         .and_then(|v| v.parse().ok())
         .unwrap_or(INLINE_SOURCE_OP_BUDGET);
     let mut budget = limit.saturating_sub(chunk.ops.len());
-    plan_inlines_at(chunk, caller, global_env, 0, &mut budget)
+    plan_inlines_at(chunk, caller, global_env, caller_env, 0, &mut budget)
 }
 
 fn plan_inlines_at(
     chunk: &Chunk,
     caller: &Function,
     global_env: &crate::interpreter::Env,
+    caller_env: *const std::cell::RefCell<crate::interpreter::Scope>,
     depth: u32,
     budget: &mut usize,
 ) -> crate::fasthash::FastMap<u32, InlinePlanEntry> {
     const INLINE_MAX_DEPTH: u32 = 3;
     const INLINE_MAX_WAYS: usize = 4;
+    let max_ops = std::env::var("LUMEN_INLINE_MAX_OPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(96);
     let mut plan: crate::fasthash::FastMap<u32, InlinePlanEntry> = Default::default();
     let log = std::env::var_os("LUMEN_TIER_LOG").is_some();
     macro_rules! skip {
@@ -2166,10 +2361,13 @@ fn plan_inlines_at(
             let crate::value::Callable::User(user) = &b.call else {
                 continue;
             };
-            // Free names are only spliceable when the callee closes directly over the global
-            // scope: its LoadNames then resolve identically under the caller's chain, provided
-            // the caller doesn't shadow them (checked per-name by the compiler at splice time).
+            // Free names are spliceable when the callee closes directly over the global scope,
+            // or when caller and callee close over the exact same activation. The latter is
+            // guarded again in generated code because an optimized Chunk is shared by every
+            // closure instance created from the same Function AST.
             let global_closure = Rc::ptr_eq(&user.env, global_env);
+            let callee_env = Rc::as_ptr(&user.env);
+            let shared_closure = !caller_env.is_null() && callee_env == caller_env;
             let f = &user.func;
             if f.is_arrow || f.is_strict != caller.is_strict {
                 skip!(idx, "arrow/strictness");
@@ -2185,7 +2383,7 @@ fn plan_inlines_at(
             if std::ptr::eq(&**callee_chunk, chunk) {
                 skip!(idx, "self-recursion");
             }
-            if callee_chunk.ops.len() > 96
+            if callee_chunk.ops.len() > max_ops
                 || callee_chunk.n_slots > 32
                 || !callee_chunk.jit_no_activation()
                 || callee_chunk.env_this
@@ -2218,7 +2416,7 @@ fn plan_inlines_at(
                     }
                 }
             }
-            if !free_names.is_empty() && !global_closure {
+            if !free_names.is_empty() && !global_closure && !shared_closure {
                 skip!(idx, "free names in a non-global closure");
             }
             let inline_cost = callee_chunk.ops.len();
@@ -2231,7 +2429,7 @@ fn plan_inlines_at(
             // dispatcher into its virtual target and then into leaf helpers without allowing
             // unbounded recursive expansion.
             let nested = if depth < INLINE_MAX_DEPTH && *budget > 0 {
-                plan_inlines_at(callee_chunk, f, global_env, depth + 1, budget)
+                plan_inlines_at(callee_chunk, f, global_env, callee_env, depth + 1, budget)
             } else {
                 Default::default()
             };
@@ -2243,6 +2441,11 @@ fn plan_inlines_at(
                 f,
                 obj,
                 free_names,
+                expected_env: if shared_closure {
+                    callee_env as usize
+                } else {
+                    0
+                },
                 nested,
             });
         }
@@ -2343,6 +2546,8 @@ pub struct InlineWay {
     /// Free names the callee reads (global-closure callees only): the splice refuses any that
     /// the caller's scopes shadow, so the inlined LoadNames resolve identically.
     pub free_names: Vec<Rc<str>>,
+    /// Exact shared closure environment required by non-global free-name inlines.
+    pub expected_env: usize,
     /// The callee's OWN inline plan (depth-capped recursion): call sites inside the spliced
     /// body splice too, keyed by the callee-frame ordinal — its first-compile cache numbering,
     /// which the splice reproduces by walking the same AST in the same order.
@@ -2656,9 +2861,10 @@ impl Compiler {
             .iter()
             .filter(|w| {
                 (has_this || !w.uses_this)
-                    && !w.free_names.iter().any(|name| {
-                        self.lookup(name).is_some() || self.env_names.contains_key(&**name)
-                    })
+                    && (w.expected_env != 0
+                        || !w.free_names.iter().any(|name| {
+                            self.lookup(name).is_some() || self.env_names.contains_key(&**name)
+                        }))
             })
             .collect();
         if ways.is_empty() {
@@ -2703,6 +2909,7 @@ impl Compiler {
         self.inline_targets.push(InlineTarget {
             expected: Rc::as_ptr(&w.obj) as usize,
             pin: Rc::downgrade(&w.obj),
+            expected_env: w.expected_env,
             argc,
             check_this: has_this && w.check_this,
         });
@@ -3838,12 +4045,6 @@ impl Compiler {
                 Err(Bail)
             }
         }
-    }
-
-    /// Whether `name` is in the function's captured set (env-homed) — a for-of declaration of a
-    /// captured name needs per-iteration environment freshness the slot model doesn't have.
-    fn captured_name(&self, name: &str) -> bool {
-        self.env_names.contains_key(name)
     }
 
     /// Emit the bookkeeping a `break`/`continue` targeting `self.loops[target]` must run before
@@ -5055,37 +5256,15 @@ fn run_vm(
             }
             Op::Tdz(s) => slots[s as usize] = Value::Empty,
             Op::LoadCap(n) => {
-                let name = &chunk.names[n as usize];
-                let b = env.borrow();
-                let bd = b.vars.get(&**name).expect("captured binding missing");
-                if !bd.initialized {
-                    let msg = format!("cannot access '{name}' before initialization");
-                    drop(b);
-                    return Err(i.throw("ReferenceError", msg));
-                }
-                let v = bd.value.clone();
-                drop(b);
-                stack.push(v);
+                stack.push(chunk.load_cap_ic(i, env, n)?);
             }
             Op::StoreCap(n) => {
-                let name = &chunk.names[n as usize];
                 let v = pop!();
-                let mut b = env.borrow_mut();
-                let bd = b.vars.get_mut(name).expect("captured binding missing");
-                if !bd.initialized {
-                    let msg = format!("cannot access '{name}' before initialization");
-                    drop(b);
-                    return Err(i.throw("ReferenceError", msg));
-                }
-                bd.value = v;
+                chunk.store_cap_ic(i, env, n, v, false)?;
             }
             Op::StoreCapInit(n) => {
-                let name = &chunk.names[n as usize];
                 let v = pop!();
-                let mut b = env.borrow_mut();
-                let bd = b.vars.get_mut(name).expect("captured binding missing");
-                bd.value = v;
-                bd.initialized = true;
+                chunk.store_cap_ic(i, env, n, v, true)?;
             }
             Op::UpdateCap(n, kind) => {
                 let name = &chunk.names[n as usize];
@@ -5588,7 +5767,8 @@ fn run_vm(
                 );
                 let this_ok =
                     !it.check_this || matches!(&stack[stack.len() - d - 1], Value::Obj(_));
-                if !(callee_ok && this_ok) {
+                let env_ok = it.expected_env == 0 || Rc::as_ptr(env) as usize == it.expected_env;
+                if !(callee_ok && this_ok && env_ok) {
                     *pc = target as usize;
                 }
             }
@@ -6093,6 +6273,11 @@ impl Chunk {
         self.name_caches.as_ptr() as usize
             + idx as usize * std::mem::size_of::<std::cell::Cell<NameIc>>()
     }
+    /// Stable address of the captured-binding cache for interned name `idx`.
+    pub(crate) fn jit_cap_cache_ptr(&self, idx: u32) -> usize {
+        self.cap_caches.as_ptr() as usize
+            + idx as usize * std::mem::size_of::<std::cell::Cell<NameIc>>()
+    }
     /// Numeric value observed at this name site before second-stage compilation. Generated code
     /// compares the live binding/property bits before taking the specialized decode path.
     pub(crate) fn jit_name_number(&self, idx: u32) -> Option<u64> {
@@ -6254,7 +6439,13 @@ impl Chunk {
     }
     /// Cached free-name read: hit, else depth-0 refill, else the interpreter's full walk
     /// (deeper resolutions, `with`, module imports, TDZ, globals — uncached every time).
-    fn load_name_ic(&self, i: &mut Interp, env: &Env, n: u32, c: u32) -> Result<Value, Abrupt> {
+    pub(crate) fn load_name_ic(
+        &self,
+        i: &mut Interp,
+        env: &Env,
+        n: u32,
+        c: u32,
+    ) -> Result<Value, Abrupt> {
         if let Some(v) = self.name_ic_hit(i, env, c) {
             return Ok(v);
         }
@@ -6263,6 +6454,77 @@ impl Chunk {
         }
         i.get_var(&self.names[n as usize], env)
     }
+
+    /// Resolve a captured binding in the current activation and cache its stable map-entry
+    /// address. Structural `VarMap` mutations bump `generation`; the weak scope pin prevents an
+    /// activation allocation from being recycled while its raw pointer remains cached.
+    fn cap_binding_ptr(&self, env: &Env, n: u32) -> *mut crate::interpreter::Binding {
+        let index = n as usize;
+        let raw = Rc::as_ptr(env) as usize;
+        let ic = self.cap_caches[index].get();
+        {
+            let b = env.borrow();
+            if ic.env == raw && b.vars.generation() == ic.gen {
+                return ic.binding as usize as *mut crate::interpreter::Binding;
+            }
+        }
+        let name = &self.names[index];
+        let (binding, generation) = {
+            let mut b = env.borrow_mut();
+            let generation = b.vars.generation();
+            let binding = b.vars.get_mut(name).expect("captured binding missing")
+                as *mut crate::interpreter::Binding;
+            (binding, generation)
+        };
+        self.cap_caches[index].set(NameIc {
+            env: raw,
+            binding: binding as usize as u64,
+            gen: generation,
+            act_gen: 0,
+        });
+        self.cap_pins.borrow_mut()[index] = Some(Rc::downgrade(env));
+        binding
+    }
+
+    pub(crate) fn load_cap_ic(&self, i: &mut Interp, env: &Env, n: u32) -> Result<Value, Abrupt> {
+        let binding = unsafe { &*self.cap_binding_ptr(env, n) };
+        if !binding.initialized {
+            return Err(i.throw(
+                "ReferenceError",
+                format!(
+                    "cannot access '{}' before initialization",
+                    self.names[n as usize]
+                ),
+            ));
+        }
+        Ok(binding.value.clone())
+    }
+
+    pub(crate) fn store_cap_ic(
+        &self,
+        i: &mut Interp,
+        env: &Env,
+        n: u32,
+        value: Value,
+        initialize: bool,
+    ) -> Result<(), Abrupt> {
+        let binding = unsafe { &mut *self.cap_binding_ptr(env, n) };
+        if !initialize && !binding.initialized {
+            return Err(i.throw(
+                "ReferenceError",
+                format!(
+                    "cannot access '{}' before initialization",
+                    self.names[n as usize]
+                ),
+            ));
+        }
+        binding.value = value;
+        if initialize {
+            binding.initialized = true;
+        }
+        Ok(())
+    }
+
     /// Cached free-name write. A cache hit validates the same resolution proof as a read and
     /// updates a live mutable binding/plain writable global property in place. Misses perform the
     /// full PutValue operation, then side-effect-freely seed a cache when the resulting resolution
@@ -6343,24 +6605,225 @@ impl Chunk {
     /// The construct fast path can execute this exact, branch-free body without materializing
     /// the otherwise short-lived `arguments` exotic. Property and builtin-identity guards remain
     /// live there; any accessor, proxy, `apply` override, or other body shape runs normally.
+    #[inline]
     pub(crate) fn jit_arguments_apply_forwarder(
         &self,
     ) -> Option<(&str, &std::cell::Cell<IcState>, &std::cell::Cell<IcState>)> {
-        let [Op::GetPropThis(initializer, initializer_cache), Op::GetMethod(apply, apply_cache), Op::LoadThis, Op::LoadLocal(arguments), Op::CallWithThis(2, _), Op::Pop, Op::ReturnUndef] =
-            self.ops.as_slice()
-        else {
+        let plan = self.arguments_forwarder.get_or_init(|| {
+            let [Op::GetPropThis(initializer, initializer_cache), Op::GetMethod(apply, apply_cache), Op::LoadThis, Op::LoadLocal(arguments), Op::CallWithThis(2, _), Op::Pop, Op::ReturnUndef] =
+                self.ops.as_slice()
+            else {
+                return None;
+            };
+            (self.arguments_slot == Some(*arguments) && &*self.names[*apply as usize] == "apply")
+                .then_some(ArgumentsForwarder {
+                    initializer: *initializer,
+                    initializer_cache: *initializer_cache,
+                    apply_cache: *apply_cache,
+                })
+        });
+        let plan = plan.as_ref()?;
+        Some((
+            &self.names[plan.initializer as usize],
+            &self.caches[plan.initializer_cache as usize],
+            &self.caches[plan.apply_cache as usize],
+        ))
+    }
+
+    pub(crate) fn jit_forwarder_runtime(
+        &self,
+        initializer: &crate::value::Gc,
+        apply: usize,
+    ) -> Option<Rc<Chunk>> {
+        let initializer_ptr = Rc::as_ptr(initializer) as usize;
+        self.arguments_forwarder_runtime
+            .borrow()
+            .as_ref()
+            .filter(|runtime| {
+                runtime.initializer == initializer_ptr
+                    && runtime.apply == apply
+                    && runtime.pin.as_ptr() == Rc::as_ptr(initializer)
+            })
+            .map(|runtime| runtime.chunk.clone())
+    }
+
+    pub(crate) fn cache_jit_forwarder_runtime(
+        &self,
+        initializer: &crate::value::Gc,
+        apply: usize,
+        runtime_chunk: Rc<Chunk>,
+    ) {
+        let initializer_ptr = Rc::as_ptr(initializer) as usize;
+        *self.arguments_forwarder_runtime.borrow_mut() = Some(ForwarderRuntime {
+            initializer: initializer_ptr,
+            apply,
+            pin: Rc::downgrade(initializer),
+            chunk: runtime_chunk,
+        });
+    }
+
+    fn parse_initializer_plan(&self) -> Option<InitializerPlan> {
+        if self.arguments_slot.is_some()
+            || !self.var_force_resets.is_empty()
+            || self.needs_env()
+            || self.n_params > 128
+            || !matches!(self.ops.last(), Some(Op::ReturnUndef))
+        {
             return None;
+        }
+
+        let finish = |fields: Vec<InitializerField>| {
+            let mut used = 0u128;
+            if fields.is_empty()
+                || fields.len() > 8
+                || fields.iter().any(|field| {
+                    if field.slot as usize >= self.n_params {
+                        return true;
+                    }
+                    let bit = 1u128 << field.slot;
+                    let duplicate = used & bit != 0;
+                    used |= bit;
+                    duplicate
+                })
+            {
+                None
+            } else {
+                Some(InitializerPlan {
+                    fields,
+                    shapes: std::cell::Cell::new(InitializerShapes::default()),
+                })
+            }
         };
-        (self.arguments_slot == Some(*arguments) && &*self.names[*apply as usize] == "apply").then(
-            || {
-                (
-                    &*self.names[*initializer as usize],
-                    &self.caches[*initializer_cache as usize],
-                    &self.caches[*apply_cache as usize],
-                )
-            },
+
+        // `this.x = arg ? arg : constant`, repeated, then implicit return.
+        let mut pc = 0usize;
+        let mut fields = Vec::new();
+        while let Some(
+            [Op::LoadLocal(test), Op::JumpIfFalse(on_false), Op::LoadLocal(value), Op::Jump(done), Op::Const(default), Op::SetPropThisDrop(name, cache)],
+        ) = self.ops.get(pc..pc + 6)
+        {
+            if test != value || *on_false as usize != pc + 4 || *done as usize != pc + 5 {
+                break;
+            }
+            fields.push(InitializerField {
+                slot: *test,
+                default: Some(*default),
+                name: *name,
+                cache: *cache,
+            });
+            pc += 6;
+        }
+        if pc + 1 == self.ops.len() && matches!(self.ops[pc], Op::ReturnUndef) {
+            return finish(fields);
+        }
+
+        // `if (!arg) arg = constant` prefixes followed by direct `this.x = arg` stores.
+        let mut defaults = [None; 128];
+        pc = 0;
+        while let Some(
+            [Op::LoadLocal(test), Op::Not, Op::JumpIfFalse(done), Op::Const(default), Op::StoreLocal(store)],
+        ) = self.ops.get(pc..pc + 5)
+        {
+            if test != store
+                || *test as usize >= self.n_params
+                || *done as usize != pc + 5
+                || defaults[*test as usize].is_some()
+            {
+                break;
+            }
+            defaults[*test as usize] = Some(*default);
+            pc += 5;
+        }
+        fields = Vec::new();
+        while let Some([Op::LoadLocal(slot), Op::SetPropThisDrop(name, cache)]) =
+            self.ops.get(pc..pc + 2)
+        {
+            fields.push(InitializerField {
+                slot: *slot,
+                default: defaults.get(*slot as usize).copied().flatten(),
+                name: *name,
+                cache: *cache,
+            });
+            pc += 2;
+        }
+        if pc + 1 == self.ops.len() && matches!(self.ops[pc], Op::ReturnUndef) {
+            return finish(fields);
+        }
+        None
+    }
+
+    pub(crate) fn jit_initializer_plan(&self) -> Option<&InitializerPlan> {
+        self.initializer_plan
+            .get_or_init(|| self.parse_initializer_plan())
+            .as_ref()
+    }
+
+    #[inline(always)]
+    pub(crate) fn jit_initializer_field(
+        &self,
+        plan: &InitializerPlan,
+        index: usize,
+    ) -> (usize, Option<&Value>, &Rc<str>, &std::cell::Cell<IcState>) {
+        let field = &plan.fields[index];
+        (
+            field.slot as usize,
+            field
+                .default
+                .map(|constant| &self.consts[constant as usize]),
+            &self.names[field.name as usize],
+            &self.caches[field.cache as usize],
         )
     }
+
+    /// Exact straight-line field constructor recognized without function or benchmark identity.
+    /// Unique parameter slots let the construct path move owned values directly into the fresh
+    /// object. Any computed value, control flow, duplicate parameter use, forced `var` reset, or
+    /// materialized `arguments` object declines to ordinary execution.
+    pub(crate) fn jit_simple_constructor(&self) -> Option<SimpleConstructor<'_>> {
+        let fields = self
+            .simple_constructor_plan
+            .get_or_init(|| {
+                if self.ops.len() < 3
+                    || self.ops.len() > 17
+                    || self.ops.len() % 2 == 0
+                    || !matches!(self.ops.last(), Some(Op::ReturnUndef))
+                    || !self.var_force_resets.is_empty()
+                    || self.arguments_slot.is_some()
+                    || self.n_params > 128
+                {
+                    return None;
+                }
+                let count = self.ops.len() / 2;
+                let mut fields = Vec::with_capacity(count);
+                let mut used = 0u128;
+                for pair in self.ops[..count * 2].chunks_exact(2) {
+                    let [Op::LoadLocal(slot), Op::SetPropThisDrop(name, cache)] = pair else {
+                        return None;
+                    };
+                    if *slot as usize >= self.n_params {
+                        return None;
+                    }
+                    let bit = 1u128 << *slot;
+                    if used & bit != 0 {
+                        return None;
+                    }
+                    used |= bit;
+                    fields.push(InitializerField {
+                        slot: *slot,
+                        default: None,
+                        name: *name,
+                        cache: *cache,
+                    });
+                }
+                Some(fields)
+            })
+            .as_deref()?;
+        Some(SimpleConstructor {
+            chunk: self,
+            fields,
+        })
+    }
+
     /// Whether calls run without an activation environment (nothing captured, no lexical
     /// `this`) — the precondition for the JIT→JIT fast call's moved-argument entry.
     pub(crate) fn jit_no_activation(&self) -> bool {
@@ -6639,6 +7102,111 @@ pub(crate) unsafe extern "C" fn jit_drop_at(
     sp
 }
 
+/// Drop one NaN-boxed property owner at `word`. Generated stores use this only after all
+/// observable guards pass; packed destruction cannot execute JavaScript.
+pub(crate) unsafe extern "C" fn jit_drop_packed_at(
+    _ctx: *mut crate::jit::JitCtx,
+    _imm: u32,
+    word: *mut Value,
+) -> *mut Value {
+    unsafe { crate::value::PackedValue::drop_raw(word.cast::<u64>()) };
+    word
+}
+
+/// Strict equality fallback for cases intentionally left out of the generated fast path:
+/// equal-length string content, BigInts, and operands whose last owner must run a destructor.
+/// This operation cannot throw, so it can bypass the generic bytecode decoder and stack/slot
+/// adaptation while retaining ordinary `Value` ownership semantics.
+pub(crate) unsafe extern "C" fn jit_strict_eq(
+    ctx: *mut crate::jit::JitCtx,
+    pc: u32,
+    sp: *mut Value,
+) -> crate::jit::SpFlag {
+    let ctx = unsafe { &mut *ctx };
+    let chunk = unsafe { &*ctx.chunk };
+    let op = &chunk.ops[pc as usize];
+    debug_assert!(matches!(op, Op::StrictEq | Op::StrictNotEq));
+    let base = unsafe { sp.sub(2) };
+    let left = unsafe { base.read() };
+    let right = unsafe { base.add(1).read() };
+    let mut equal = unsafe { (&*ctx.interp).strict_equals(&left, &right) };
+    if matches!(op, Op::StrictNotEq) {
+        equal = !equal;
+    }
+    unsafe { base.write(Value::Bool(equal)) };
+    crate::jit::SpFlag {
+        sp: unsafe { base.add(1) },
+        flag: 0,
+    }
+}
+
+/// Allocate a fresh RegExp literal wrapper from the chunk's per-site compiled matcher.
+pub(crate) unsafe extern "C" fn jit_make_regexp(
+    ctx: *mut crate::jit::JitCtx,
+    pc: u32,
+    sp: *mut Value,
+) -> crate::jit::SpFlag {
+    let ctx = unsafe { &mut *ctx };
+    let chunk = unsafe { &*ctx.chunk };
+    let Op::MakeRegExp(body, flags) = chunk.ops[pc as usize] else {
+        return unsafe { jit_exec(ctx, pc, sp) };
+    };
+    match chunk.make_regexp_literal(unsafe { &mut *ctx.interp }, pc as usize, body, flags) {
+        Ok(value) => {
+            unsafe { sp.write(value) };
+            crate::jit::SpFlag {
+                sp: unsafe { sp.add(1) },
+                flag: 0,
+            }
+        }
+        Err(abrupt) => {
+            ctx.error = Some(abrupt);
+            crate::jit::SpFlag { sp, flag: 1 }
+        }
+    }
+}
+
+/// Fast `String + String` after the generated-code tag guards. Moving the left operand out of
+/// the stack lets a temporary concatenation grow in place; otherwise the replacement reserves
+/// spare capacity so a following concatenation can do so. This is the ordinary string-add
+/// operation, independent of source or benchmark identity.
+pub(crate) unsafe extern "C" fn jit_add_strings(
+    ctx: *mut crate::jit::JitCtx,
+    pc: u32,
+    sp: *mut Value,
+) -> crate::jit::SpFlag {
+    let base = unsafe { sp.sub(2) };
+    if !matches!(unsafe { &*base }, Value::Str(_))
+        || !matches!(unsafe { &*base.add(1) }, Value::Str(_))
+    {
+        return unsafe { jit_exec(ctx, pc, sp) };
+    }
+
+    let Value::Str(mut left) = (unsafe { base.read() }) else {
+        unreachable!()
+    };
+    let Value::Str(right) = (unsafe { base.add(1).read() }) else {
+        unreachable!()
+    };
+    if left.len().saturating_add(right.len()) > crate::interpreter::MAX_STR_LEN {
+        let ctx = unsafe { &mut *ctx };
+        let i = unsafe { &mut *ctx.interp };
+        ctx.error = Some(i.throw("RangeError", "Invalid string length"));
+        return crate::jit::SpFlag { sp: base, flag: 1 };
+    }
+
+    if crate::jstr::needs_join_fixup(&left, &right) {
+        left = crate::jstr::concat(&left, &right).into();
+    } else if !left.append_in_place(&right) {
+        left = left.concat_grown(&right);
+    }
+    unsafe { base.write(Value::Str(left)) };
+    crate::jit::SpFlag {
+        sp: unsafe { base.add(1) },
+        flag: 0,
+    }
+}
+
 /// Hot native intrinsics after the machine-code call IC has already proved builtin identity.
 /// Emitted guards keep string/property intrinsics on non-coercing cases. Function#apply performs
 /// its own dense-list guards; Array push/pop transfer ownership directly between the operand
@@ -6654,9 +7222,12 @@ pub(crate) unsafe extern "C" fn jit_intrinsic(
     let call_argc = (packed >> 24) as usize;
     let _pc = (packed & 0xffff) as usize;
     let width = match intrinsic {
+        INTRINSIC_CHAR_AT => 3,    // [receiver, callee, index]
         INTRINSIC_ARRAY_PUSH => 3, // [receiver, callee, arg]
         INTRINSIC_ARRAY_POP => 2,  // [receiver, callee]
         INTRINSIC_FUNCTION_CALL => call_argc + 2,
+        INTRINSIC_REGEXP_EXEC_DISCARD => 3,
+        INTRINSIC_STRING_SPLIT_DISCARD => 3,
         _ => 4, // [receiver, callee, arg0, arg1]
     };
     let base = sp.sub(width);
@@ -6674,6 +7245,23 @@ pub(crate) unsafe extern "C" fn jit_intrinsic(
             let saved_ctor = std::mem::replace(&mut i.constructing, false);
             let saved_nt = std::mem::replace(&mut i.new_target, Value::Undefined);
             let r = match intrinsic {
+                INTRINSIC_CHAR_AT => {
+                    let Value::Str(s) = &*base else {
+                        unreachable!("charAt intrinsic receiver guard")
+                    };
+                    let Value::Num(n) = &*base.add(2) else {
+                        unreachable!("charAt intrinsic index guard")
+                    };
+                    let idx = if n.is_nan() { 0.0 } else { n.trunc() };
+                    Ok(if idx < 0.0 || !idx.is_finite() {
+                        Value::str("")
+                    } else {
+                        match i.unit_at(s, idx as usize) {
+                            Some(unit) => Value::Str(crate::jstr::unit_lstr(unit)),
+                            None => Value::str(""),
+                        }
+                    })
+                }
                 INTRINSIC_STRING_SLICE => {
                     let Value::Str(s) = &*base else {
                         unreachable!("slice intrinsic receiver guard")
@@ -6848,6 +7436,52 @@ pub(crate) unsafe extern "C" fn jit_intrinsic(
                             .map_err(Abrupt::Throw),
                     }
                 }
+                INTRINSIC_REGEXP_EXEC_DISCARD => {
+                    let (Value::Obj(_), Value::Str(input)) = (&*base, &*base.add(2)) else {
+                        unreachable!("regexp exec intrinsic guards")
+                    };
+                    match crate::builtins::regexp_exec_discard_fast(i, &*base, input) {
+                        Some(r) => r.map(|_| Value::Undefined).map_err(Abrupt::Throw),
+                        None => crate::builtins::regexp_exec(
+                            i,
+                            (*base).clone(),
+                            std::slice::from_raw_parts(base.add(2), 1),
+                        )
+                        .map_err(Abrupt::Throw),
+                    }
+                }
+                INTRINSIC_STRING_REPLACE_DISCARD => {
+                    match crate::builtins::string_replace_discard_fast(
+                        i,
+                        &*base,
+                        &*base.add(2),
+                        &*base.add(3),
+                    ) {
+                        Some(r) => r.map_err(Abrupt::Throw),
+                        None => crate::builtins::nf_string_replace(
+                            i,
+                            (*base).clone(),
+                            std::slice::from_raw_parts(base.add(2), 2),
+                        )
+                        .map_err(Abrupt::Throw),
+                    }
+                }
+                INTRINSIC_STRING_SPLIT_DISCARD => {
+                    match crate::builtins::string_split_discard_fast(
+                        i,
+                        &*base,
+                        &*base.add(2),
+                        &Value::Undefined,
+                    ) {
+                        Some(r) => r.map_err(Abrupt::Throw),
+                        None => crate::builtins::nf_string_split(
+                            i,
+                            (*base).clone(),
+                            std::slice::from_raw_parts(base.add(2), 1),
+                        )
+                        .map_err(Abrupt::Throw),
+                    }
+                }
                 _ => unreachable!("unknown JIT intrinsic"),
             };
             i.constructing = saved_ctor;
@@ -6877,6 +7511,465 @@ pub(crate) unsafe extern "C" fn jit_intrinsic(
         Err(ab) => {
             ctx.error = Some(ab);
             crate::jit::SpFlag { sp: base, flag: 1 }
+        }
+    }
+}
+
+/// Batch the canonical `for (i=...; i<limit; i++) re.exec(strings[i]);` shape. The generated
+/// code calls this before the ordinary loop header. A zero result declines without side effects,
+/// one means the helper completed the loop and updated the index slot, and two propagates a throw.
+pub(crate) unsafe extern "C" fn jit_regexp_exec_loop(
+    ctx: *mut crate::jit::JitCtx,
+    head: u32,
+) -> u64 {
+    macro_rules! decline {
+        () => {{
+            return 0;
+        }};
+    }
+    let _wide_slots = unsafe { JitWideSlots::enter(ctx) };
+    let ctx = unsafe { &mut *ctx };
+    let i = unsafe { &mut *ctx.interp };
+    let chunk = unsafe { &*ctx.chunk };
+    let pc = head as usize;
+    let Some(
+        [Op::LoadLocal(local0), Op::Const(limit_const), Op::Lt, Op::JumpIfFalse(exit), Op::LoadName(re_name, re_cache), Op::GetMethod(exec_name, _), Op::LoadName(array_name, array_cache), Op::LoadLocal(local1), Op::GetElem, Op::CallWithThis(1, _), Op::Pop, Op::UpdateLocal(local2, UpdKind::IncDiscard), Op::Jump(back)],
+    ) = chunk.ops.get(pc..pc + 13)
+    else {
+        decline!();
+    };
+    if local0 != local1
+        || local0 != local2
+        || *back != head
+        || *exit as usize != pc + 13
+        || chunk.names[*exec_name as usize].as_ref() != "exec"
+    {
+        decline!();
+    }
+    let Value::Num(limit_num) = chunk.consts[*limit_const as usize] else {
+        decline!();
+    };
+    if !limit_num.is_finite()
+        || limit_num < 0.0
+        || limit_num.fract() != 0.0
+        || limit_num > crate::interpreter::MAX_ARRAY_OP_LEN as f64
+    {
+        decline!();
+    }
+    let Value::Num(mut index_num) = *ctx.slots.add(*local0 as usize) else {
+        decline!();
+    };
+    if !index_num.is_finite()
+        || index_num < 0.0
+        || index_num.fract() != 0.0
+        || index_num > limit_num
+    {
+        decline!();
+    }
+
+    let env_ptr = ctx
+        .env_raw
+        .cast::<std::cell::RefCell<crate::interpreter::Scope>>();
+    if env_ptr.is_null() {
+        decline!();
+    }
+    unsafe { Rc::increment_strong_count(env_ptr) };
+    let env = unsafe { Rc::from_raw(env_ptr) };
+    let regexp = match chunk.load_name_ic(i, &env, *re_name, *re_cache) {
+        Ok(v) => v,
+        Err(ab) => {
+            ctx.error = Some(ab);
+            return 2;
+        }
+    };
+    let strings = match chunk.load_name_ic(i, &env, *array_name, *array_cache) {
+        Ok(v) => v,
+        Err(ab) => {
+            ctx.error = Some(ab);
+            return 2;
+        }
+    };
+    drop(env);
+
+    // Prove the repeated GetMethod is the realm's untouched built-in RegExp#exec data property.
+    let (Value::Obj(re_obj), Value::Obj(array_obj)) = (&regexp, &strings) else {
+        decline!();
+    };
+    let Some(re_proto) = i.extra_protos.get("RegExp") else {
+        return 0;
+    };
+    {
+        let b = re_obj.borrow();
+        if b.props.contains("exec")
+            || b.proto.as_ref().is_none_or(|p| !Rc::ptr_eq(p, re_proto))
+            || !i.regexps.contains_key(&(Rc::as_ptr(re_obj) as usize))
+        {
+            decline!();
+        }
+    }
+    let canonical_exec = {
+        let p = re_proto.borrow();
+        match p.props.get("exec") {
+            Some(prop) if !prop.accessor() => prop.value(),
+            _ => decline!(),
+        }
+    };
+    let Value::Obj(exec_obj) = canonical_exec else {
+        decline!();
+    };
+    if !matches!(
+        exec_obj.borrow().call,
+        crate::value::Callable::Native(function)
+            if function as usize == crate::builtins::regexp_exec as *const () as usize
+    ) {
+        decline!();
+    }
+
+    let regexp_matcher = match i.regexps.get(&(Rc::as_ptr(re_obj) as usize)) {
+        Some(matcher) => matcher.clone(),
+        None => decline!(),
+    };
+    {
+        let b = re_obj.borrow();
+        let Some(last_index) = b.props.get("lastIndex") else {
+            decline!();
+        };
+        if last_index.accessor()
+            || !last_index.writable()
+            || !matches!(
+                last_index.value(),
+                Value::Num(n) if n.is_finite() && n >= 0.0 && n.fract() == 0.0
+            )
+        {
+            decline!();
+        }
+    }
+
+    let limit = limit_num as usize;
+    let start = index_num as usize;
+    let array = array_obj.borrow();
+    if !matches!(array.exotic, crate::value::Exotic::Array) {
+        decline!();
+    }
+    for k in start..limit {
+        let Some(prop) = array.props.get_index(k as u32) else {
+            decline!();
+        };
+        if prop.accessor() {
+            decline!();
+        }
+        let Value::Str(subject) = prop.value() else {
+            decline!();
+        };
+        match crate::builtins::regexp_exec_discard_direct(i, re_obj, &regexp_matcher, &subject) {
+            Ok(_) => {}
+            Err(v) => {
+                ctx.error = Some(Abrupt::Throw(v));
+                return 2;
+            }
+        }
+        index_num += 1.0;
+    }
+    *ctx.slots.add(*local0 as usize) = Value::Num(index_num);
+    1
+}
+
+/// Fuse a dead-result `/<literal>/.exec(strings[i])` or `/<literal>/.exec("<constant>")`
+/// expression. The helper runs at the literal's original evaluation point, validates the live
+/// inherited `exec` method before loading the argument, and declines without side effects when
+/// any ordinary-array/name guard is unavailable.
+/// Return: 0 = decline, 1 = completed expression, 2 = throw in `ctx.error`.
+pub(crate) unsafe extern "C" fn jit_regexp_literal_exec_discard(
+    ctx: *mut crate::jit::JitCtx,
+    literal_pc: u32,
+) -> u64 {
+    macro_rules! decline {
+        () => {{
+            return 0;
+        }};
+    }
+    let _wide_slots = unsafe { JitWideSlots::enter(ctx) };
+    let ctx = unsafe { &mut *ctx };
+    let i = unsafe { &mut *ctx.interp };
+    let chunk = unsafe { &*ctx.chunk };
+    let pc = literal_pc as usize;
+    enum Subject {
+        DenseArray(u32, u32, u32),
+        Constant(u32),
+    }
+    let (body, flags, exec, subject) = match chunk.ops.get(pc..) {
+        Some(
+            [Op::MakeRegExp(body, flags), Op::GetMethod(exec, _), Op::LoadName(array, array_cache), Op::LoadLocal(index), Op::GetElem, Op::CallWithThis(1, _), Op::Pop, ..],
+        ) => (
+            *body,
+            *flags,
+            *exec,
+            Subject::DenseArray(*array, *array_cache, u32::from(*index)),
+        ),
+        Some(
+            [Op::MakeRegExp(body, flags), Op::GetMethod(exec, _), Op::Const(subject), Op::CallWithThis(1, _), Op::Pop, ..],
+        ) => (*body, *flags, *exec, Subject::Constant(*subject)),
+        _ => decline!(),
+    };
+    if chunk.names[exec as usize].as_ref() != "exec"
+        || !crate::builtins::regexp_literal_exec_is_canonical(i)
+    {
+        decline!();
+    }
+
+    let subject = match subject {
+        Subject::Constant(index) => {
+            let Value::Str(subject) = &chunk.consts[index as usize] else {
+                decline!();
+            };
+            subject.clone()
+        }
+        Subject::DenseArray(array, array_cache, index) => {
+            let env_ptr = ctx
+                .env_raw
+                .cast::<std::cell::RefCell<crate::interpreter::Scope>>();
+            if env_ptr.is_null() {
+                decline!();
+            }
+            unsafe { Rc::increment_strong_count(env_ptr) };
+            let env = unsafe { Rc::from_raw(env_ptr) };
+            let array_value = match chunk.load_name_ic(i, &env, array, array_cache) {
+                Ok(value) => value,
+                Err(abrupt) => {
+                    ctx.error = Some(abrupt);
+                    return 2;
+                }
+            };
+            drop(env);
+            let Value::Obj(array_obj) = array_value else {
+                decline!();
+            };
+            if !i.ordinary_get_ptr(Rc::as_ptr(&array_obj) as usize) {
+                decline!();
+            }
+            let Value::Num(index) = *ctx.slots.add(index as usize) else {
+                decline!();
+            };
+            if !index.is_finite() || index < 0.0 || index.fract() != 0.0 || index > u32::MAX as f64
+            {
+                decline!();
+            }
+            let array = array_obj.borrow();
+            if !matches!(array.exotic, crate::value::Exotic::Array) {
+                decline!();
+            }
+            let Some(property) = array.props.get_index(index as u32) else {
+                decline!();
+            };
+            if property.accessor() {
+                decline!();
+            }
+            let Value::Str(subject) = property.value() else {
+                decline!();
+            };
+            subject
+        }
+    };
+
+    let re = match chunk.compiled_regexp_literal(i, pc, body, flags) {
+        Ok(re) => re,
+        Err(abrupt) => {
+            ctx.error = Some(abrupt);
+            return 2;
+        }
+    };
+    match crate::builtins::regexp_literal_exec_discard(i, &re, &subject) {
+        Ok(()) => 1,
+        Err(abrupt) => {
+            ctx.error = Some(abrupt);
+            2
+        }
+    }
+}
+
+/// Fuse a dead-result `strings[i].replace(/<literal>/, "<constant>")` while preserving the
+/// original dense subject read and every matcher/legacy-static effect. Return convention matches
+/// [`jit_regexp_literal_exec_discard`].
+pub(crate) unsafe extern "C" fn jit_regexp_literal_replace_discard(
+    ctx: *mut crate::jit::JitCtx,
+    start_pc: u32,
+) -> u64 {
+    macro_rules! decline {
+        () => {{
+            return 0;
+        }};
+    }
+    let _wide_slots = unsafe { JitWideSlots::enter(ctx) };
+    let ctx = unsafe { &mut *ctx };
+    let i = unsafe { &mut *ctx.interp };
+    let chunk = unsafe { &*ctx.chunk };
+    let pc = start_pc as usize;
+    let Some(
+        [Op::LoadName(array, array_cache), Op::LoadLocal(index), Op::GetElem, Op::GetMethod(replace, _), Op::MakeRegExp(body, flags), Op::Const(replacement), Op::CallWithThis(2, _), Op::Pop],
+    ) = chunk.ops.get(pc..pc + 8)
+    else {
+        decline!();
+    };
+    if chunk.names[*replace as usize].as_ref() != "replace"
+        || !matches!(chunk.consts[*replacement as usize], Value::Str(_))
+    {
+        decline!();
+    }
+
+    // LoadName/GetElem precede GetMethod in the source evaluation order.
+    let env_ptr = ctx
+        .env_raw
+        .cast::<std::cell::RefCell<crate::interpreter::Scope>>();
+    if env_ptr.is_null() {
+        decline!();
+    }
+    unsafe { Rc::increment_strong_count(env_ptr) };
+    let env = unsafe { Rc::from_raw(env_ptr) };
+    let array_value = match chunk.load_name_ic(i, &env, *array, *array_cache) {
+        Ok(value) => value,
+        Err(abrupt) => {
+            ctx.error = Some(abrupt);
+            return 2;
+        }
+    };
+    drop(env);
+    let Value::Obj(array_obj) = array_value else {
+        decline!();
+    };
+    if !i.ordinary_get_ptr(Rc::as_ptr(&array_obj) as usize) {
+        decline!();
+    }
+    let Value::Num(index) = *ctx.slots.add(*index as usize) else {
+        decline!();
+    };
+    if !index.is_finite() || index < 0.0 || index.fract() != 0.0 || index > u32::MAX as f64 {
+        decline!();
+    }
+    let subject = {
+        let array = array_obj.borrow();
+        if !matches!(array.exotic, crate::value::Exotic::Array) {
+            decline!();
+        }
+        let Some(property) = array.props.get_index(index as u32) else {
+            decline!();
+        };
+        if property.accessor() {
+            decline!();
+        }
+        let Value::Str(subject) = property.value() else {
+            decline!();
+        };
+        subject
+    };
+
+    // These raw identity reads occur at the original GetMethod/call boundary. An accessor or
+    // override declines, letting the untouched bytecode perform all observable operations.
+    if !crate::builtins::regexp_literal_replace_is_canonical(i) {
+        decline!();
+    }
+    let re = match chunk.compiled_regexp_literal(i, pc + 4, *body, *flags) {
+        Ok(re) => re,
+        Err(abrupt) => {
+            ctx.error = Some(abrupt);
+            return 2;
+        }
+    };
+    match crate::builtins::regexp_literal_replace_discard(i, &re, &subject) {
+        Ok(()) => 1,
+        Err(abrupt) => {
+            ctx.error = Some(abrupt);
+            2
+        }
+    }
+}
+
+/// Fuse a dead-result `strings[i].match(/<literal>/)` while preserving the subject read and every
+/// matcher/legacy-static effect. Return convention matches
+/// [`jit_regexp_literal_exec_discard`].
+pub(crate) unsafe extern "C" fn jit_regexp_literal_match_discard(
+    ctx: *mut crate::jit::JitCtx,
+    start_pc: u32,
+) -> u64 {
+    macro_rules! decline {
+        () => {{
+            return 0;
+        }};
+    }
+    let _wide_slots = unsafe { JitWideSlots::enter(ctx) };
+    let ctx = unsafe { &mut *ctx };
+    let i = unsafe { &mut *ctx.interp };
+    let chunk = unsafe { &*ctx.chunk };
+    let pc = start_pc as usize;
+    let Some(
+        [Op::LoadName(array, array_cache), Op::LoadLocal(index), Op::GetElem, Op::GetMethod(method, _), Op::MakeRegExp(body, flags), Op::CallWithThis(1, _), Op::Pop],
+    ) = chunk.ops.get(pc..pc + 7)
+    else {
+        decline!();
+    };
+    if chunk.names[*method as usize].as_ref() != "match" {
+        decline!();
+    }
+
+    // The subject evaluation precedes the method and literal evaluation.
+    let env_ptr = ctx
+        .env_raw
+        .cast::<std::cell::RefCell<crate::interpreter::Scope>>();
+    if env_ptr.is_null() {
+        decline!();
+    }
+    unsafe { Rc::increment_strong_count(env_ptr) };
+    let env = unsafe { Rc::from_raw(env_ptr) };
+    let array_value = match chunk.load_name_ic(i, &env, *array, *array_cache) {
+        Ok(value) => value,
+        Err(abrupt) => {
+            ctx.error = Some(abrupt);
+            return 2;
+        }
+    };
+    drop(env);
+    let Value::Obj(array_obj) = array_value else {
+        decline!();
+    };
+    if !i.ordinary_get_ptr(Rc::as_ptr(&array_obj) as usize) {
+        decline!();
+    }
+    let Value::Num(index) = *ctx.slots.add(*index as usize) else {
+        decline!();
+    };
+    if !index.is_finite() || index < 0.0 || index.fract() != 0.0 || index > u32::MAX as f64 {
+        decline!();
+    }
+    let subject = {
+        let array = array_obj.borrow();
+        if !matches!(array.exotic, crate::value::Exotic::Array) {
+            decline!();
+        }
+        let Some(property) = array.props.get_index(index as u32) else {
+            decline!();
+        };
+        if property.accessor() {
+            decline!();
+        }
+        let Value::Str(subject) = property.value() else {
+            decline!();
+        };
+        subject
+    };
+    if !crate::builtins::regexp_literal_match_is_canonical(i) {
+        decline!();
+    }
+    let re = match chunk.compiled_regexp_literal(i, pc + 4, *body, *flags) {
+        Ok(re) => re,
+        Err(abrupt) => {
+            ctx.error = Some(abrupt);
+            return 2;
+        }
+    };
+    match crate::builtins::regexp_literal_match_discard(i, &re, &subject) {
+        Ok(()) => 1,
+        Err(abrupt) => {
+            ctx.error = Some(abrupt);
+            2
         }
     }
 }
@@ -7000,8 +8093,8 @@ pub(crate) unsafe extern "C" fn jit_call_hit(
         let chunk_ref = &*ic.chunk;
         let runs = chunk_ref.jit_runs.get().wrapping_add(1);
         chunk_ref.jit_runs.set(runs);
-        if runs == inline_recompile_at() {
-            i.try_inline_recompile(ic.func, chunk_ref);
+        if runs == ctx.inline_recompile_at {
+            i.try_inline_recompile(ic.func, chunk_ref, ic.env);
         }
     }
     let args_ptr = sp.sub(argc);
@@ -7083,6 +8176,109 @@ pub(crate) unsafe extern "C" fn jit_make_object(
     }
 }
 
+/// Dedicated `Op::MakeArray` entry: moves the operand values directly into the fresh array's
+/// dense property storage, avoiding both generic opcode dispatch and an intermediate `Vec`.
+pub(crate) unsafe extern "C" fn jit_make_array(
+    ctx: *mut crate::jit::JitCtx,
+    pc: u32,
+    mut sp: *mut Value,
+) -> crate::jit::SpFlag {
+    let ctx = unsafe { &mut *ctx };
+    jit_opstat(ctx, pc);
+    let chunk = unsafe { &*ctx.chunk };
+    let Op::MakeArray(count) = chunk.ops[pc as usize] else {
+        unreachable!("jit_make_array emitted only for MakeArray");
+    };
+    let base = unsafe { sp.sub(count as usize) };
+    let value = unsafe { (&*ctx.interp).make_array_from_raw(base, count as usize) };
+    sp = base;
+    unsafe { sp.write(value) };
+    crate::jit::SpFlag {
+        sp: unsafe { sp.add(1) },
+        flag: 0,
+    }
+}
+
+/// Dedicated element-store entry (same contract as [`jit_exec`]): handles the four element
+/// assignment stack shapes without entering the full opcode dispatcher. Inline dense overwrites
+/// never reach this helper; it primarily serves semantically checked array growth and sparse
+/// writes after the generated guards decline.
+pub(crate) unsafe extern "C" fn jit_set_elem(
+    ctx: *mut crate::jit::JitCtx,
+    pc: u32,
+    mut sp: *mut Value,
+) -> crate::jit::SpFlag {
+    let _wide_slots = unsafe { JitWideSlots::enter(ctx) };
+    let ctx = unsafe { &mut *ctx };
+    jit_opstat(ctx, pc);
+    let i = unsafe { &mut *ctx.interp };
+    let chunk = unsafe { &*ctx.chunk };
+    let result: Result<(), Abrupt> = (|| match chunk.ops[pc as usize] {
+        Op::SetElem | Op::SetElemDrop => {
+            let keep = matches!(chunk.ops[pc as usize], Op::SetElem);
+            sp = unsafe { sp.sub(1) };
+            let value = unsafe { sp.read() };
+            sp = unsafe { sp.sub(1) };
+            let key = unsafe { sp.read() };
+            sp = unsafe { sp.sub(1) };
+            let object = unsafe { sp.read() };
+            let retained = keep.then(|| value.clone());
+            if let (Value::Obj(o), Value::Num(n)) = (&object, &key) {
+                match i.fast_set_elem(o, *n, value) {
+                    Ok(()) => {}
+                    Err(back) => {
+                        let property_key = i.to_property_key(&key)?;
+                        i.set_member(&object, &property_key, back)?;
+                    }
+                }
+            } else {
+                let property_key = i.to_property_key(&key)?;
+                i.set_member(&object, &property_key, value)?;
+            }
+            if let Some(value) = retained {
+                unsafe { sp.write(value) };
+                sp = unsafe { sp.add(1) };
+            }
+            Ok(())
+        }
+        Op::SetElemLocal(slot) | Op::SetElemLocalDrop(slot) => {
+            let keep = matches!(chunk.ops[pc as usize], Op::SetElemLocal(_));
+            sp = unsafe { sp.sub(1) };
+            let value = unsafe { sp.read() };
+            sp = unsafe { sp.sub(1) };
+            let key = unsafe { sp.read() };
+            if keep {
+                unsafe { sp.write(value.clone()) };
+                sp = unsafe { sp.add(1) };
+            }
+            let local = unsafe { &*ctx.slots.add(slot as usize) };
+            if let (Value::Obj(o), Value::Num(n)) = (local, &key) {
+                match i.fast_set_elem(o, *n, value) {
+                    Ok(()) => {}
+                    Err(back) => {
+                        let object = local.clone();
+                        let property_key = i.to_property_key(&key)?;
+                        i.set_member(&object, &property_key, back)?;
+                    }
+                }
+            } else {
+                let object = local.clone();
+                let property_key = i.to_property_key(&key)?;
+                i.set_member(&object, &property_key, value)?;
+            }
+            Ok(())
+        }
+        _ => unreachable!("jit_set_elem emitted only for element stores"),
+    })();
+    match result {
+        Ok(()) => crate::jit::SpFlag { sp, flag: 0 },
+        Err(abrupt) => {
+            ctx.error = Some(abrupt);
+            crate::jit::SpFlag { sp, flag: 1 }
+        }
+    }
+}
+
 /// Dedicated `Op::New` entry (same contract as [`jit_exec`]): enters the identity-cached
 /// JIT-to-JIT constructor path without decoding the full opcode family.
 pub(crate) unsafe extern "C" fn jit_new(
@@ -7116,6 +8312,40 @@ pub(crate) unsafe extern "C" fn jit_new(
         Err(ab) => {
             ctx.error = Some(ab);
             crate::jit::SpFlag { sp, flag: 1 }
+        }
+    }
+}
+
+/// Dedicated checked `instanceof` entry for generated guards that cannot consume their operands.
+/// It avoids generic opcode dispatch and benefits from `instanceof_ic`'s live cached RHS proof.
+pub(crate) unsafe extern "C" fn jit_instanceof(
+    ctx: *mut crate::jit::JitCtx,
+    pc: u32,
+    sp: *mut Value,
+) -> crate::jit::SpFlag {
+    let ctx = unsafe { &mut *ctx };
+    jit_opstat(ctx, pc);
+    let chunk = unsafe { &*ctx.chunk };
+    let Op::InstanceOf(cache) = chunk.ops[pc as usize] else {
+        unreachable!("jit_instanceof emitted only for InstanceOf");
+    };
+    let rhs = unsafe { sp.sub(1).read() };
+    let lhs = unsafe { sp.sub(2).read() };
+    let out = unsafe { &mut *ctx.interp }.instanceof_ic(&lhs, &rhs, &chunk.caches[cache as usize]);
+    let base = unsafe { sp.sub(2) };
+    drop(lhs);
+    drop(rhs);
+    match out {
+        Ok(value) => {
+            unsafe { base.write(value) };
+            crate::jit::SpFlag {
+                sp: unsafe { base.add(1) },
+                flag: 0,
+            }
+        }
+        Err(abrupt) => {
+            ctx.error = Some(abrupt);
+            crate::jit::SpFlag { sp: base, flag: 1 }
         }
     }
 }
@@ -7272,7 +8502,6 @@ pub(crate) unsafe extern "C" fn jit_get_prop(
     pc: u32,
     mut sp: *mut Value,
 ) -> crate::jit::SpFlag {
-    let _wide_slots = unsafe { JitWideSlots::enter(ctx) };
     let ctx = &mut *ctx;
     jit_opstat(ctx, pc);
     let i = &mut *ctx.interp;
@@ -7288,15 +8517,18 @@ pub(crate) unsafe extern "C" fn jit_get_prop(
                 Ok(())
             }
             Op::GetPropThis(n, c) => {
-                let this = (*ctx.this_raw).clone();
-                let v =
-                    i.get_prop_ic(&this, &chunk.names[n as usize], &chunk.caches[c as usize])?;
+                let this = &*ctx.this_raw;
+                let v = i.get_prop_ic(this, &chunk.names[n as usize], &chunk.caches[c as usize])?;
                 sp.write(v);
                 sp = sp.add(1);
                 Ok(())
             }
             Op::GetPropLocal(s, n, c) => {
-                let obj = (*ctx.slots.add(s as usize)).clone();
+                let obj = if ctx.slots_packed {
+                    crate::value::PackedValue::clone_raw(ctx.slots.cast::<u64>().add(s as usize))
+                } else {
+                    (*ctx.slots.add(s as usize)).clone()
+                };
                 if matches!(obj, Value::Empty) {
                     return Err(i.throw(
                         "ReferenceError",
@@ -7434,6 +8666,9 @@ unsafe fn jit_call_inner(
                                     {
                                         INTRINSIC_CHAR_CODE_AT
                                     }
+                                    p if p == crate::builtins::nf_char_at as *const () as usize => {
+                                        INTRINSIC_CHAR_AT
+                                    }
                                     p if p
                                         == crate::builtins::nf_string_slice as *const ()
                                             as usize =>
@@ -7472,6 +8707,23 @@ unsafe fn jit_call_inner(
                                             as usize =>
                                     {
                                         INTRINSIC_FUNCTION_CALL
+                                    }
+                                    p if p
+                                        == crate::builtins::regexp_exec as *const () as usize =>
+                                    {
+                                        INTRINSIC_REGEXP_EXEC_DISCARD
+                                    }
+                                    p if p
+                                        == crate::builtins::nf_string_replace as *const ()
+                                            as usize =>
+                                    {
+                                        INTRINSIC_STRING_REPLACE_DISCARD
+                                    }
+                                    p if p
+                                        == crate::builtins::nf_string_split as *const ()
+                                            as usize =>
+                                    {
+                                        INTRINSIC_STRING_SPLIT_DISCARD
                                     }
                                     _ => 0,
                                 },
@@ -7554,6 +8806,14 @@ unsafe fn jit_call_inner(
 /// Debug: `LUMEN_JIT_CALLSTAT=1` tallies, for every call that reaches the way-1 HIT helper,
 /// which direct-call gate would have (or did) reject the shared-ctx fast path. Temporary
 /// diagnostic mirroring `emit_direct_call`'s runtime checks in emission order.
+pub(crate) fn jit_callstat_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var_os("LUMEN_JIT_CALLSTAT").is_some()
+            || std::env::var_os("LUMEN_JIT_NATIVESTAT").is_some()
+    })
+}
+
 #[inline(always)]
 unsafe fn jit_callstat(
     i: &crate::interpreter::Interp,
@@ -7563,11 +8823,7 @@ unsafe fn jit_callstat(
     with_this: bool,
     sp: *mut Value,
 ) {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if !*ON.get_or_init(|| {
-        std::env::var_os("LUMEN_JIT_CALLSTAT").is_some()
-            || std::env::var_os("LUMEN_JIT_NATIVESTAT").is_some()
-    }) {
+    if !ctx.callstat_enabled {
         return;
     }
     struct Dump(crate::fasthash::FastMap<&'static str, u64>);
@@ -7683,11 +8939,15 @@ unsafe fn jit_callstat(
 /// Debug: `LUMEN_JIT_OPSTAT=1` tallies which ops still reach a helper (the JIT's slow path) and
 /// prints the top offenders at process exit. Always-inlined so the disabled case is a single
 /// predictable branch inside the helper.
+pub(crate) fn jit_opstat_enabled() -> bool {
+    static OPSTAT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OPSTAT.get_or_init(|| std::env::var_os("LUMEN_JIT_OPSTAT").is_some())
+}
+
 #[inline(always)]
 unsafe fn jit_opstat(ctx: &mut crate::jit::JitCtx, pc: u32) {
     {
-        static OPSTAT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *OPSTAT.get_or_init(|| std::env::var_os("LUMEN_JIT_OPSTAT").is_some()) {
+        if ctx.opstat_enabled {
             struct OpstatDump(crate::fasthash::FastMap<String, u64>);
             impl Drop for OpstatDump {
                 fn drop(&mut self) {
@@ -7797,37 +9057,15 @@ unsafe fn jit_exec_inner(
         }
         Op::Tdz(s) => slots[s as usize] = Value::Empty,
         Op::LoadCap(n) => {
-            let name = &chunk.names[n as usize];
-            let b = env.borrow();
-            let bd = b.vars.get(&**name).expect("captured binding missing");
-            if !bd.initialized {
-                let msg = format!("cannot access '{name}' before initialization");
-                drop(b);
-                return Err(i.throw("ReferenceError", msg));
-            }
-            let v = bd.value.clone();
-            drop(b);
-            push!(v);
+            push!(chunk.load_cap_ic(i, env, n)?);
         }
         Op::StoreCap(n) => {
-            let name = &chunk.names[n as usize];
             let v = pop!();
-            let mut b = env.borrow_mut();
-            let bd = b.vars.get_mut(name).expect("captured binding missing");
-            if !bd.initialized {
-                let msg = format!("cannot access '{name}' before initialization");
-                drop(b);
-                return Err(i.throw("ReferenceError", msg));
-            }
-            bd.value = v;
+            chunk.store_cap_ic(i, env, n, v, false)?;
         }
         Op::StoreCapInit(n) => {
-            let name = &chunk.names[n as usize];
             let v = pop!();
-            let mut b = env.borrow_mut();
-            let bd = b.vars.get_mut(name).expect("captured binding missing");
-            bd.value = v;
-            bd.initialized = true;
+            chunk.store_cap_ic(i, env, n, v, true)?;
         }
         Op::UpdateCap(n, kind) => {
             let name = &chunk.names[n as usize];
@@ -8406,7 +9644,7 @@ unsafe fn jit_exec_inner(
             unsafe { jit_new_inner(i, None, Some((chunk, cache)), argc as usize, sp) }?;
         }
         Op::MakeRegExp(body, flags) => {
-            push!(i.make_regexp(&chunk.names[body as usize], &chunk.names[flags as usize],)?);
+            push!(chunk.make_regexp_literal(i, pc as usize, body, flags)?);
         }
         Op::MakeArray(n) => {
             let n = n as usize;

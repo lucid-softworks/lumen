@@ -36,4 +36,6 @@ needless_range_loop = "allow"
 # Optimize the release build of the engine; debug stays fast to compile.
 [profile.release]
 opt-level = 3
-lto = "thin"
+lto = "fat"
+codegen-units = 1
+panic = "abort"

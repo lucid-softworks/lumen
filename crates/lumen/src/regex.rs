@@ -11,6 +11,65 @@ use std::rc::Rc;
 
 const MAX_REPEAT: usize = 1000;
 const STEP_LIMIT: u64 = 2_000_000;
+const INLINE_CAPTURES: usize = 4;
+
+pub(crate) enum Captures {
+    Inline {
+        len: u8,
+        spans: [Option<(usize, usize)>; INLINE_CAPTURES],
+    },
+    Heap(Box<[Option<(usize, usize)>]>),
+}
+
+impl Captures {
+    fn from_slots(slots: &[Option<usize>], groups: usize) -> Self {
+        let len = groups + 1;
+        if len <= INLINE_CAPTURES {
+            let mut inline = [None; INLINE_CAPTURES];
+            for (group, span) in inline[..len].iter_mut().enumerate() {
+                *span = match (slots[2 * group], slots[2 * group + 1]) {
+                    (Some(a), Some(b)) => Some((a.min(b), a.max(b))),
+                    _ => None,
+                };
+            }
+            Captures::Inline {
+                len: len as u8,
+                spans: inline,
+            }
+        } else {
+            let mut spans = Vec::with_capacity(len);
+            for group in 0..len {
+                spans.push(match (slots[2 * group], slots[2 * group + 1]) {
+                    (Some(a), Some(b)) => Some((a.min(b), a.max(b))),
+                    _ => None,
+                });
+            }
+            Captures::Heap(spans.into_boxed_slice())
+        }
+    }
+
+    fn one(span: (usize, usize)) -> Self {
+        let mut spans = [None; INLINE_CAPTURES];
+        spans[0] = Some(span);
+        Captures::Inline { len: 1, spans }
+    }
+}
+
+impl std::ops::Deref for Captures {
+    type Target = [Option<(usize, usize)>];
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Captures::Inline { len, spans } => &spans[..*len as usize],
+            Captures::Heap(spans) => spans,
+        }
+    }
+}
+
+impl AsRef<[Option<(usize, usize)>]> for Captures {
+    fn as_ref(&self) -> &[Option<(usize, usize)>] {
+        self
+    }
+}
 
 /// A compiled regular expression.
 pub struct Regex {
@@ -19,6 +78,12 @@ pub struct Regex {
     /// Start-position prescan derived from the program (see [`first_filter`]): lets the scan
     /// skip positions that cannot begin a match instead of running the backtracker at each.
     first: FirstFilter,
+    /// Exact leading ASCII byte, when the first-set proof has only one case-sensitive literal.
+    /// The byte input scans this eight bytes at a time before entering the backtracker.
+    first_byte: Option<u8>,
+    /// Capture-free, case-sensitive ASCII literal program. Searching it directly is equivalent
+    /// to executing `Save(0), Char*, Save(1), Match`, without paying the backtracking VM dispatch.
+    literal_ascii: Option<Box<[u8]>>,
     /// [`FirstFilter::Atoms`] baked into a byte-indexed table (elements < 256): the scan loop
     /// becomes one load per position.
     first_lut: Option<Box<[bool; 256]>>,
@@ -464,17 +529,31 @@ pub struct ReText {
     unicode: bool,
     /// The source string when it is pure ASCII (element index == byte index): matching runs
     /// over its bytes and `slice` copies straight out of it.
-    ascii_src: Option<Rc<str>>,
+    ascii_src: Option<crate::lstr::LStr>,
 }
 
 impl ReText {
     /// Prepare `s` for matching, keeping the caller's `Rc` for zero-copy ASCII slicing.
     pub fn new_rc(unicode: bool, s: &crate::lstr::LStr) -> ReText {
-        // One copy per (subject, mode) cache fill — the re_texts LRU amortizes it.
-        Self::build(unicode, s, Some(Rc::from(s.as_str())))
+        // Engine strings maintain an exact one-way ASCII hint in their allocation header.
+        // RegExp workloads commonly stream many distinct ASCII subjects through the tiny
+        // identity cache; consulting the hint avoids rescanning every subject just to select
+        // the byte matcher.
+        if s.ascii_hint() {
+            return ReText {
+                elems: Vec::new(),
+                unit_of: None,
+                n_elems: s.len(),
+                unicode,
+                ascii_src: Some(s.clone()),
+            };
+        }
+        // Keep the engine string itself: `LStr::clone` is one refcount bump and its immutable
+        // bytes can be matched and sliced directly.
+        Self::build(unicode, s, Some(s.clone()))
     }
 
-    fn build(unicode: bool, s: &str, src: Option<Rc<str>>) -> ReText {
+    fn build(unicode: bool, s: &str, src: Option<crate::lstr::LStr>) -> ReText {
         // ASCII: elements are the bytes, and element index == unit offset in both modes.
         if s.is_ascii() {
             return ReText {
@@ -482,7 +561,7 @@ impl ReText {
                 unit_of: None,
                 n_elems: s.len(),
                 unicode,
-                ascii_src: Some(src.unwrap_or_else(|| Rc::from(s))),
+                ascii_src: Some(src.unwrap_or_else(|| crate::lstr::LStr::from(s))),
             };
         }
         if unicode {
@@ -673,10 +752,44 @@ impl Regex {
         // The `flags` accessor returns flags in canonical order.
         let canonical: String = "dgimsuvy".chars().filter(|c| flags.contains(*c)).collect();
         let first = first_filter(&prog, flags.contains('m'));
+        let first_byte = if !flags.contains('i') {
+            match &first {
+                FirstFilter::Atoms(atoms) if atoms.len() == 1 => match &atoms[0] {
+                    Rep::Char(c) if *c < 0x80 => Some(*c as u8),
+                    _ => None,
+                },
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let literal_ascii = if !flags.contains('i') && p.ngroups == 0 {
+            let chars = if prog.len() >= 4
+                && matches!(prog.first(), Some(Inst::Save(0)))
+                && matches!(prog.get(prog.len() - 2), Some(Inst::Save(1)))
+                && matches!(prog.last(), Some(Inst::Match))
+            {
+                prog[1..prog.len() - 2]
+                    .iter()
+                    .map(|inst| match inst {
+                        Inst::Char(c) if *c < 0x80 => Some(*c as u8),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()
+            } else {
+                None
+            }
+            .filter(|literal| !literal.is_empty());
+            chars.map(Vec::into_boxed_slice)
+        } else {
+            None
+        };
         let mut re = Regex {
             unicode,
             nmarks,
             first,
+            first_byte,
+            literal_ascii,
             first_lut: None,
             prog,
             ngroups: p.ngroups,
@@ -732,18 +845,34 @@ impl Regex {
         })
     }
 
-    /// Try to match against a prepared subject, scanning forward from `start` (unless sticky/`y`,
-    /// which requires a match at exactly `start`). An ASCII subject matches directly over its
-    /// bytes; anything else over the element vector. Returns capture spans: index 0 is the whole
-    /// match, then one per group.
-    pub fn exec_text(&self, text: &ReText, start: usize) -> Option<Vec<Option<(usize, usize)>>> {
+    /// Match a prepared subject and return shared capture spans.
+    pub fn exec_text_shared(&self, text: &ReText, start: usize) -> Option<Captures> {
         match &text.ascii_src {
-            Some(s) => self.exec_impl(s.as_bytes(), start),
+            Some(s) => {
+                if let Some(literal) = &self.literal_ascii {
+                    let span = find_ascii_literal(s.as_bytes(), start, literal, self.sticky)?;
+                    Some(Captures::one(span))
+                } else {
+                    self.exec_impl(s.as_bytes(), start)
+                }
+            }
             None => self.exec_impl(&text.elems[..], start),
         }
     }
 
-    fn exec_impl<I: ReInput>(&self, input: I, start: usize) -> Option<Vec<Option<(usize, usize)>>> {
+    /// Match for a caller that only observes matcher side effects.
+    pub fn exec_text_discard_shared(&self, text: &ReText, start: usize) -> Option<Captures> {
+        self.exec_text_shared(text, start)
+    }
+
+    /// Whole-match-only search for operations whose JavaScript result is dead. Capture groups
+    /// can be recovered lazily if a legacy RegExp static is subsequently observed.
+    pub(crate) fn find_text_shared(&self, text: &ReText, start: usize) -> Option<(usize, usize)> {
+        self.exec_text_shared(text, start)
+            .and_then(|captures| captures[0])
+    }
+
+    fn exec_impl<I: ReInput>(&self, input: I, start: usize) -> Option<Captures> {
         if start > input.len() {
             return None;
         }
@@ -778,34 +907,41 @@ impl Regex {
             // Prescan: skip positions that cannot begin a match. Sticky regexes get exactly one
             // attempt at `start`, so the filter only ever saves that single attempt for them.
             if !self.sticky {
-                match &self.first {
-                    FirstFilter::Anchored => {
-                        // `^` (non-multiline) can only match at position 0: one attempt at
-                        // `from` decides the scan (any later position fails the assert too).
-                        if from > 0 {
-                            break 'scan None;
-                        }
-                    }
-                    FirstFilter::Atoms(atoms) => {
-                        // Every path consumes an element first: find the next viable one. Small
-                        // elements go through the precomputed table (one load per position).
-                        let len = input.len();
-                        loop {
-                            if from >= len {
+                if let Some(byte) = self.first_byte {
+                    let Some(found) = input.find_byte(from, byte) else {
+                        break 'scan None;
+                    };
+                    from = found;
+                } else {
+                    match &self.first {
+                        FirstFilter::Anchored => {
+                            // `^` (non-multiline) can only match at position 0: one attempt at
+                            // `from` decides the scan (any later position fails the assert too).
+                            if from > 0 {
                                 break 'scan None;
                             }
-                            let c = input.at(from);
-                            let viable = match &self.first_lut {
-                                Some(lut) if (c as usize) < 256 => lut[c as usize],
-                                _ => self.first_matches(atoms, c),
-                            };
-                            if viable {
-                                break;
-                            }
-                            from += 1;
                         }
+                        FirstFilter::Atoms(atoms) => {
+                            // Every path consumes an element first: find the next viable one. Small
+                            // elements go through the precomputed table (one load per position).
+                            let len = input.len();
+                            loop {
+                                if from >= len {
+                                    break 'scan None;
+                                }
+                                let c = input.at(from);
+                                let viable = match &self.first_lut {
+                                    Some(lut) if (c as usize) < 256 => lut[c as usize],
+                                    _ => self.first_matches(atoms, c),
+                                };
+                                if viable {
+                                    break;
+                                }
+                                from += 1;
+                            }
+                        }
+                        FirstFilter::None => {}
                     }
-                    FirstFilter::None => {}
                 }
             }
             m.caps.fill(None);
@@ -814,15 +950,7 @@ impl Regex {
             m.steps = 0;
             m.depth = 0;
             if m.run(&self.prog, 0, from) {
-                let mut out = Vec::with_capacity(self.ngroups + 1);
-                for g in 0..=self.ngroups {
-                    out.push(match (m.caps[2 * g], m.caps[2 * g + 1]) {
-                        // A group inside a lookbehind captured right-to-left: normalize the span.
-                        (Some(a), Some(b)) => Some((a.min(b), a.max(b))),
-                        _ => None,
-                    });
-                }
-                break 'scan Some(out);
+                break 'scan Some(Captures::from_slots(&m.caps, self.ngroups));
             }
             if self.sticky {
                 break 'scan None;
@@ -2245,12 +2373,51 @@ fn clone_class(cc: &CharClass) -> CharClass {
 /// native stack on big inputs.
 const MAX_MATCH_DEPTH: u32 = 3000;
 
+fn find_ascii_literal(
+    subject: &[u8],
+    start: usize,
+    literal: &[u8],
+    sticky: bool,
+) -> Option<(usize, usize)> {
+    if start > subject.len() || literal.len() > subject.len().saturating_sub(start) {
+        return None;
+    }
+    if sticky {
+        return subject[start..]
+            .starts_with(literal)
+            .then_some((start, start + literal.len()));
+    }
+    let mut from = start;
+    while from + literal.len() <= subject.len() {
+        let found = subject.find_byte(from, literal[0])?;
+        if found + literal.len() > subject.len() {
+            return None;
+        }
+        if subject[found..].starts_with(literal) {
+            return Some((found, found + literal.len()));
+        }
+        from = found + 1;
+    }
+    None
+}
+
 /// The matcher's view of a subject: element `i` as a code point / code unit. Monomorphized for
 /// bytes (an ASCII subject — the common case, matched with no `Vec<u32>` materialization at all)
 /// and for wide elements (anything non-ASCII).
 pub trait ReInput: Copy {
     fn len(&self) -> usize;
     fn at(&self, i: usize) -> u32;
+
+    #[inline]
+    fn find_byte(&self, mut from: usize, byte: u8) -> Option<usize> {
+        while from < self.len() {
+            if self.at(from) == byte as u32 {
+                return Some(from);
+            }
+            from += 1;
+        }
+        None
+    }
 }
 
 impl ReInput for &[u8] {
@@ -2261,6 +2428,30 @@ impl ReInput for &[u8] {
     #[inline(always)]
     fn at(&self, i: usize) -> u32 {
         self[i] as u32
+    }
+
+    #[inline]
+    fn find_byte(&self, from: usize, byte: u8) -> Option<usize> {
+        let bytes = self.get(from..)?;
+        let repeated = u64::from_ne_bytes([byte; 8]);
+        let low_bits = 0x0101_0101_0101_0101u64;
+        let high_bits = 0x8080_8080_8080_8080u64;
+        let mut chunks = bytes.chunks_exact(8);
+        for (chunk_index, chunk) in chunks.by_ref().enumerate() {
+            let word = u64::from_ne_bytes(chunk.try_into().unwrap());
+            let different = word ^ repeated;
+            if different.wrapping_sub(low_bits) & !different & high_bits != 0 {
+                if let Some(offset) = chunk.iter().position(|candidate| *candidate == byte) {
+                    return Some(from + chunk_index * 8 + offset);
+                }
+            }
+        }
+        let tail_start = from + bytes.len() - chunks.remainder().len();
+        chunks
+            .remainder()
+            .iter()
+            .position(|candidate| *candidate == byte)
+            .map(|offset| tail_start + offset)
     }
 }
 
@@ -2292,16 +2483,20 @@ struct Matcher<I: ReInput> {
 }
 
 impl<I: ReInput> Matcher<I> {
+    #[inline(always)]
     fn icase(&self) -> bool {
         self.flags.last().unwrap().0
     }
+    #[inline(always)]
     fn multiline(&self) -> bool {
         self.flags.last().unwrap().1
     }
+    #[inline(always)]
     fn dotall(&self) -> bool {
         self.flags.last().unwrap().2
     }
     /// Compare two subject/pattern code points under the active case rules.
+    #[inline(always)]
     fn eqc_uu(&self, a: u32, b: u32) -> bool {
         if a == b {
             return true;
@@ -2321,6 +2516,7 @@ impl<I: ReInput> Matcher<I> {
     }
 
     /// The next element to consume and the position after it, honouring the match direction.
+    #[inline(always)]
     fn step(&self, pos: usize) -> Option<(u32, usize)> {
         if self.back {
             if pos > 0 {
@@ -2335,24 +2531,7 @@ impl<I: ReInput> Matcher<I> {
         }
     }
 
-    /// Consume a backreference's captured text (element order preserved in both directions).
-    fn backref_step(&mut self, prog: &[Inst], pc: usize, pos: usize, text: &[u32]) -> bool {
-        let n = text.len();
-        if self.back {
-            if pos >= n && (0..n).all(|i| self.eqc_uu(self.input.at(pos - n + i), text[i])) {
-                self.run(prog, pc + 1, pos - n)
-            } else {
-                false
-            }
-        } else if pos + n <= self.input.len()
-            && (0..n).all(|i| self.eqc_uu(self.input.at(pos + i), text[i]))
-        {
-            self.run(prog, pc + 1, pos + n)
-        } else {
-            false
-        }
-    }
-
+    #[inline(always)]
     fn rep_matches(&self, rep: &Rep, c: u32) -> bool {
         match rep {
             Rep::Char(ch) => self.eqc_uu(c, *ch),
@@ -2361,9 +2540,165 @@ impl<I: ReInput> Matcher<I> {
         }
     }
 
+    /// Conservative viability test for the continuation at `pc` and `pos`.
+    ///
+    /// `Some(false)` proves that its first consuming instruction cannot match here; `Some(true)`
+    /// is only a possible match, and `None` means stateful bytecode prevented a proof. Lazy
+    /// quantifiers use this to skip impossible retry positions without changing match order.
+    fn continuation_viable(
+        &self,
+        prog: &[Inst],
+        mut pc: usize,
+        pos: usize,
+        mut budget: usize,
+        mut tainted_groups: u128,
+    ) -> Option<bool> {
+        while budget > 0 {
+            budget -= 1;
+            match &prog[pc] {
+                Inst::Char(expected) => {
+                    return Some(
+                        self.step(pos)
+                            .is_some_and(|(found, _)| self.eqc_uu(found, *expected)),
+                    );
+                }
+                Inst::Any => {
+                    return Some(self.step(pos).is_some_and(|(found, _)| {
+                        self.dotall() || !is_line_terminator_u32(found)
+                    }));
+                }
+                Inst::Class(class) => {
+                    return Some(self.step(pos).is_some_and(|(found, _)| {
+                        class.matches(found, self.icase(), self.unicode)
+                    }));
+                }
+                Inst::Many { rep, min, .. } => {
+                    let matches_here = self
+                        .step(pos)
+                        .is_some_and(|(found, _)| self.rep_matches(rep, found));
+                    if *min > 0 || matches_here {
+                        return Some(matches_here);
+                    }
+                    pc += 1;
+                }
+                Inst::Backref(group) => {
+                    let group = *group;
+                    if group >= 128 || tainted_groups & (1u128 << group) != 0 {
+                        return None;
+                    }
+                    if group == 0 || 2 * group + 1 >= self.caps.len() {
+                        pc += 1;
+                        continue;
+                    }
+                    match (self.caps[2 * group], self.caps[2 * group + 1]) {
+                        (Some(a), Some(b)) if a != b => {
+                            let first = self.input.at(a.min(b));
+                            return Some(
+                                self.step(pos)
+                                    .is_some_and(|(found, _)| self.eqc_uu(found, first)),
+                            );
+                        }
+                        _ => {
+                            pc += 1; // an empty or unset backreference consumes nothing
+                        }
+                    }
+                }
+                Inst::BackrefAlt(groups) => {
+                    if groups
+                        .iter()
+                        .any(|&group| group >= 128 || tainted_groups & (1u128 << group) != 0)
+                    {
+                        return None;
+                    }
+                    let captured = groups.iter().copied().find_map(|group| {
+                        match (self.caps[2 * group], self.caps[2 * group + 1]) {
+                            (Some(a), Some(b)) => Some((a.min(b), a.max(b))),
+                            _ => None,
+                        }
+                    });
+                    match captured {
+                        Some((a, b)) if a != b => {
+                            let first = self.input.at(a);
+                            return Some(
+                                self.step(pos)
+                                    .is_some_and(|(found, _)| self.eqc_uu(found, first)),
+                            );
+                        }
+                        _ => pc += 1,
+                    }
+                }
+                Inst::AssertStart => {
+                    if pos != 0
+                        && !(self.multiline() && is_line_terminator_u32(self.input.at(pos - 1)))
+                    {
+                        return Some(false);
+                    }
+                    pc += 1;
+                }
+                Inst::AssertEnd => {
+                    if pos != self.input.len()
+                        && !(self.multiline() && is_line_terminator_u32(self.input.at(pos)))
+                    {
+                        return Some(false);
+                    }
+                    pc += 1;
+                }
+                Inst::WordBoundary(want) => {
+                    let before =
+                        pos > 0 && is_word_ic(self.input.at(pos - 1), self.icase(), self.unicode);
+                    let after = pos < self.input.len()
+                        && is_word_ic(self.input.at(pos), self.icase(), self.unicode);
+                    if (before != after) != *want {
+                        return Some(false);
+                    }
+                    pc += 1;
+                }
+                Inst::Jmp(target) => pc = *target,
+                Inst::Split(a, b) => {
+                    let left = self.continuation_viable(prog, *a, pos, budget, tainted_groups);
+                    let right = self.continuation_viable(prog, *b, pos, budget, tainted_groups);
+                    return match (left, right) {
+                        (Some(false), Some(false)) => Some(false),
+                        (Some(true), _) | (_, Some(true)) => Some(true),
+                        _ => None,
+                    };
+                }
+                Inst::Match => return Some(true),
+                // Capture writes do not themselves consume input. Keep walking, but remember
+                // which groups have changed so a following backreference never consults stale
+                // state. This is especially valuable for `.*?\k` continuations: the compiler's
+                // group-end Save no longer hides the backreference's first-character filter.
+                Inst::Save(slot) => {
+                    let group = *slot / 2;
+                    if group >= 128 {
+                        return None;
+                    }
+                    tainted_groups |= 1u128 << group;
+                    pc += 1;
+                }
+                Inst::ClearCaps(lo, hi) => {
+                    if *hi >= 128 {
+                        return None;
+                    }
+                    for group in *lo..=*hi {
+                        tainted_groups |= 1u128 << group;
+                    }
+                    pc += 1;
+                }
+                Inst::SetMark(_) => pc += 1,
+                // These affect the next predicate or can branch on mutable state.
+                Inst::Look { .. }
+                | Inst::LookBehind { .. }
+                | Inst::PushFlags(..)
+                | Inst::PopFlags
+                | Inst::CheckProgress(_) => return None,
+            }
+        }
+        None
+    }
+
     fn run(&mut self, prog: &[Inst], pc: usize, pos: usize) -> bool {
-        self.steps += 1;
-        if self.steps > STEP_LIMIT || self.depth > MAX_MATCH_DEPTH {
+        if self.depth > MAX_MATCH_DEPTH {
             return false;
         }
         self.depth += 1;
@@ -2372,239 +2707,319 @@ impl<I: ReInput> Matcher<I> {
         r
     }
 
-    fn run_inner(&mut self, prog: &[Inst], pc: usize, pos: usize) -> bool {
-        match &prog[pc] {
-            Inst::Match => true,
-            Inst::Char(c) => match self.step(pos) {
-                Some((e, next)) if self.eqc_uu(e, *c) => self.run(prog, pc + 1, next),
-                _ => false,
-            },
-            Inst::Any => match self.step(pos) {
-                Some((e, next)) if self.dotall() || !is_line_terminator_u32(e) => {
-                    self.run(prog, pc + 1, next)
-                }
-                _ => false,
-            },
-            Inst::Class(cc) => match self.step(pos) {
-                Some((e, next)) if cc.matches(e, self.icase(), self.unicode) => {
-                    self.run(prog, pc + 1, next)
-                }
-                _ => false,
-            },
-            Inst::Save(slot) => {
-                let slot = *slot;
-                let old = self.caps[slot];
-                self.caps[slot] = Some(pos);
-                if self.run(prog, pc + 1, pos) {
-                    true
-                } else {
-                    self.caps[slot] = old;
-                    false
-                }
+    fn run_inner(&mut self, prog: &[Inst], mut pc: usize, mut pos: usize) -> bool {
+        // Straight-line regexp bytecode is overwhelmingly common. Execute it iteratively and
+        // reserve Rust recursion for genuine backtracking points and state that needs rollback.
+        // Besides avoiding a host call per character, this keeps the semantic step budget exact.
+        loop {
+            self.steps += 1;
+            if self.steps > STEP_LIMIT {
+                return false;
             }
-            Inst::Split(a, b) => {
-                let (a, b) = (*a, *b);
-                self.run(prog, a, pos) || self.run(prog, b, pos)
-            }
-            Inst::SetMark(id) => {
-                let id = *id;
-                let old = self.marks[id];
-                self.marks[id] = Some(pos);
-                if self.run(prog, pc + 1, pos) {
-                    true
-                } else {
-                    self.marks[id] = old;
-                    false
-                }
-            }
-            Inst::CheckProgress(id) => {
-                if self.marks[*id] == Some(pos) {
-                    false
-                } else {
-                    self.run(prog, pc + 1, pos)
-                }
-            }
-            Inst::Many {
-                rep,
-                min,
-                max,
-                greedy,
-            } => {
-                let (min, max, greedy) = (*min, *max, *greedy);
-                // Consume as many as the input allows (up to `max`), iteratively.
-                let cap = max.unwrap_or(usize::MAX);
-                let room = if self.back {
-                    pos
-                } else {
-                    self.input.len() - pos
-                };
-                let idx = |k: usize| if self.back { pos - 1 - k } else { pos + k };
-                let mut avail = 0;
-                while avail < cap
-                    && avail < room
-                    && self.rep_matches(rep, self.input.at(idx(avail)))
-                {
-                    avail += 1;
-                }
-                if avail < min {
-                    return false;
-                }
-                // Backtrack the count (greedy: high→min; lazy: min→high), recursing only on the
-                // continuation, so a run of N characters costs O(N) here plus one match per attempt.
-                let cont = |m: &mut Self, n: usize| {
-                    let p = if m.back { pos - n } else { pos + n };
-                    m.run(prog, pc + 1, p)
-                };
-                if greedy {
-                    let mut n = avail;
-                    loop {
-                        if cont(self, n) {
-                            return true;
-                        }
-                        if n == min {
-                            return false;
-                        }
-                        n -= 1;
+            match &prog[pc] {
+                Inst::Match => return true,
+                Inst::Char(c) => match self.step(pos) {
+                    Some((e, next)) if self.eqc_uu(e, *c) => {
+                        pc += 1;
+                        pos = next;
+                        continue;
                     }
-                } else {
-                    let mut n = min;
-                    loop {
-                        if cont(self, n) {
-                            return true;
-                        }
-                        if n == avail {
-                            return false;
-                        }
-                        n += 1;
+                    _ => return false,
+                },
+                Inst::Any => match self.step(pos) {
+                    Some((e, next)) if self.dotall() || !is_line_terminator_u32(e) => {
+                        pc += 1;
+                        pos = next;
+                        continue;
                     }
-                }
-            }
-            Inst::PushFlags(i, m, s) => {
-                let cur = *self.flags.last().unwrap();
-                let new = (i.unwrap_or(cur.0), m.unwrap_or(cur.1), s.unwrap_or(cur.2));
-                self.flags.push(new);
-                if self.run(prog, pc + 1, pos) {
-                    true
-                } else {
-                    self.flags.pop(); // undo on backtrack
-                    false
-                }
-            }
-            Inst::PopFlags => {
-                let popped = self.flags.pop().unwrap();
-                if self.run(prog, pc + 1, pos) {
-                    true
-                } else {
-                    self.flags.push(popped); // undo on backtrack
-                    false
-                }
-            }
-            Inst::Jmp(t) => self.run(prog, *t, pos),
-            Inst::AssertStart => {
-                let ok = pos == 0
-                    || (self.multiline() && is_line_terminator_u32(self.input.at(pos - 1)));
-                ok && self.run(prog, pc + 1, pos)
-            }
-            Inst::AssertEnd => {
-                let ok = pos == self.input.len()
-                    || (self.multiline() && is_line_terminator_u32(self.input.at(pos)));
-                ok && self.run(prog, pc + 1, pos)
-            }
-            Inst::WordBoundary(want) => {
-                let (icase, unicode) = (self.icase(), self.unicode);
-                let before = pos > 0 && is_word_ic(self.input.at(pos - 1), icase, unicode);
-                let after =
-                    pos < self.input.len() && is_word_ic(self.input.at(pos), icase, unicode);
-                let boundary = before != after;
-                (boundary == *want) && self.run(prog, pc + 1, pos)
-            }
-            Inst::Backref(g) => {
-                let g = *g;
-                if g == 0 || 2 * g + 1 >= self.caps.len() {
-                    return self.run(prog, pc + 1, pos); // invalid group: matches empty
-                }
-                match (self.caps[2 * g], self.caps[2 * g + 1]) {
-                    (Some(a), Some(b)) => {
-                        let (a, b) = (a.min(b), a.max(b));
-                        let text: Vec<u32> = (a..b).map(|i| self.input.at(i)).collect();
-                        self.backref_step(prog, pc, pos, &text)
+                    _ => return false,
+                },
+                Inst::Class(cc) => match self.step(pos) {
+                    Some((e, next)) if cc.matches(e, self.icase(), self.unicode) => {
+                        pc += 1;
+                        pos = next;
+                        continue;
                     }
-                    _ => self.run(prog, pc + 1, pos), // unset group matches empty
-                }
-            }
-            Inst::BackrefAlt(idxs) => {
-                // At most one same-named group can have captured; match through that one.
-                let g = idxs.iter().copied().find(|&g| {
-                    2 * g + 1 < self.caps.len()
-                        && self.caps[2 * g].is_some()
-                        && self.caps[2 * g + 1].is_some()
-                });
-                match g {
-                    None => self.run(prog, pc + 1, pos), // no group captured: matches empty
-                    Some(g) => {
-                        let (a, b) = (self.caps[2 * g].unwrap(), self.caps[2 * g + 1].unwrap());
-                        let (a, b) = (a.min(b), a.max(b));
-                        let text: Vec<u32> = (a..b).map(|i| self.input.at(i)).collect();
-                        self.backref_step(prog, pc, pos, &text)
-                    }
-                }
-            }
-            Inst::ClearCaps(lo, hi) => {
-                let (lo, hi) = (*lo, *hi);
-                let saved: Vec<Option<usize>> = self.caps[2 * lo..2 * hi + 2].to_vec();
-                for s in &mut self.caps[2 * lo..2 * hi + 2] {
-                    *s = None;
-                }
-                if self.run(prog, pc + 1, pos) {
-                    true
-                } else {
-                    self.caps[2 * lo..2 * hi + 2].copy_from_slice(&saved);
-                    false
-                }
-            }
-            Inst::Look { negate, prog: sub } => {
-                let negate = *negate;
-                let sub = sub.clone();
-                let saved = self.caps.clone();
-                // A nested lookahead always matches forward, even inside a lookbehind body.
-                let saved_back = std::mem::replace(&mut self.back, false);
-                let matched = self.run(&sub, 0, pos);
-                self.back = saved_back;
-                if negate {
-                    self.caps = saved; // negative lookahead: discard captures
-                    if matched {
-                        false
+                    _ => return false,
+                },
+                Inst::Save(slot) => {
+                    let slot = *slot;
+                    let old = self.caps[slot];
+                    self.caps[slot] = Some(pos);
+                    return if self.run(prog, pc + 1, pos) {
+                        true
                     } else {
-                        self.run(prog, pc + 1, pos)
-                    }
-                } else if matched {
-                    self.run(prog, pc + 1, pos)
-                } else {
-                    self.caps = saved;
-                    false
-                }
-            }
-            Inst::LookBehind { negate, prog: sub } => {
-                let negate = *negate;
-                let sub = sub.clone();
-                let saved = self.caps.clone();
-                // The body (compiled from the reversed AST) matches RIGHT-TO-LEFT from `pos`, so
-                // alternative order, greed, and captures follow the spec's backwards semantics.
-                let saved_back = std::mem::replace(&mut self.back, true);
-                let matched = self.run(&sub, 0, pos);
-                self.back = saved_back;
-                if negate {
-                    self.caps = saved; // negative lookbehind: discard captures
-                    if matched {
+                        self.caps[slot] = old;
                         false
+                    };
+                }
+                Inst::Split(a, b) => {
+                    let (a, b) = (*a, *b);
+                    return self.run(prog, a, pos) || self.run(prog, b, pos);
+                }
+                Inst::SetMark(id) => {
+                    let id = *id;
+                    let old = self.marks[id];
+                    self.marks[id] = Some(pos);
+                    return if self.run(prog, pc + 1, pos) {
+                        true
                     } else {
-                        self.run(prog, pc + 1, pos)
+                        self.marks[id] = old;
+                        false
+                    };
+                }
+                Inst::CheckProgress(id) => {
+                    if self.marks[*id] == Some(pos) {
+                        return false;
+                    } else {
+                        pc += 1;
+                        continue;
                     }
-                } else if matched {
-                    self.run(prog, pc + 1, pos)
-                } else {
-                    self.caps = saved;
-                    false
+                }
+                Inst::Many {
+                    rep,
+                    min,
+                    max,
+                    greedy,
+                } => {
+                    let (min, max, greedy) = (*min, *max, *greedy);
+                    // Consume as many as the input allows (up to `max`), iteratively.
+                    let cap = max.unwrap_or(usize::MAX);
+                    let room = if self.back {
+                        pos
+                    } else {
+                        self.input.len() - pos
+                    };
+                    let idx = |k: usize| if self.back { pos - 1 - k } else { pos + k };
+                    let mut avail = 0;
+                    while avail < cap
+                        && avail < room
+                        && self.rep_matches(rep, self.input.at(idx(avail)))
+                    {
+                        avail += 1;
+                    }
+                    if avail < min {
+                        return false;
+                    }
+                    // Backtrack the count (greedy: high→min; lazy: min→high), recursing only on the
+                    // continuation, so a run of N characters costs O(N) here plus one match per attempt.
+                    let cont = |m: &mut Self, n: usize| {
+                        let p = if m.back { pos - n } else { pos + n };
+                        m.run(prog, pc + 1, p)
+                    };
+                    if greedy {
+                        let mut n = avail;
+                        loop {
+                            if cont(self, n) {
+                                return true;
+                            }
+                            if n == min {
+                                return false;
+                            }
+                            n -= 1;
+                        }
+                    } else {
+                        let mut n = min;
+                        loop {
+                            let candidate = if self.back { pos - n } else { pos + n };
+                            if self.continuation_viable(prog, pc + 1, candidate, 16, 0)
+                                != Some(false)
+                                && cont(self, n)
+                            {
+                                return true;
+                            }
+                            if n == avail {
+                                return false;
+                            }
+                            n += 1;
+                        }
+                    }
+                }
+                Inst::PushFlags(i, m, s) => {
+                    let cur = *self.flags.last().unwrap();
+                    let new = (i.unwrap_or(cur.0), m.unwrap_or(cur.1), s.unwrap_or(cur.2));
+                    self.flags.push(new);
+                    return if self.run(prog, pc + 1, pos) {
+                        true
+                    } else {
+                        self.flags.pop();
+                        false
+                    };
+                }
+                Inst::PopFlags => {
+                    let popped = self.flags.pop().unwrap();
+                    return if self.run(prog, pc + 1, pos) {
+                        true
+                    } else {
+                        self.flags.push(popped);
+                        false
+                    };
+                }
+                Inst::Jmp(t) => {
+                    pc = *t;
+                    continue;
+                }
+                Inst::AssertStart => {
+                    let ok = pos == 0
+                        || (self.multiline() && is_line_terminator_u32(self.input.at(pos - 1)));
+                    if !ok {
+                        return false;
+                    }
+                    pc += 1;
+                    continue;
+                }
+                Inst::AssertEnd => {
+                    let ok = pos == self.input.len()
+                        || (self.multiline() && is_line_terminator_u32(self.input.at(pos)));
+                    if !ok {
+                        return false;
+                    }
+                    pc += 1;
+                    continue;
+                }
+                Inst::WordBoundary(want) => {
+                    let (icase, unicode) = (self.icase(), self.unicode);
+                    let before = pos > 0 && is_word_ic(self.input.at(pos - 1), icase, unicode);
+                    let after =
+                        pos < self.input.len() && is_word_ic(self.input.at(pos), icase, unicode);
+                    let boundary = before != after;
+                    if boundary != *want {
+                        return false;
+                    }
+                    pc += 1;
+                    continue;
+                }
+                Inst::Backref(g) => {
+                    let g = *g;
+                    if g == 0 || 2 * g + 1 >= self.caps.len() {
+                        pc += 1; // invalid group: matches empty
+                        continue;
+                    }
+                    match (self.caps[2 * g], self.caps[2 * g + 1]) {
+                        (Some(a), Some(b)) => {
+                            let (a, b) = (a.min(b), a.max(b));
+                            let n = b - a;
+                            let start = if self.back {
+                                if pos < n {
+                                    return false;
+                                }
+                                pos - n
+                            } else {
+                                if pos + n > self.input.len() {
+                                    return false;
+                                }
+                                pos
+                            };
+                            if !(0..n).all(|index| {
+                                self.eqc_uu(self.input.at(start + index), self.input.at(a + index))
+                            }) {
+                                return false;
+                            }
+                            pos = if self.back { pos - n } else { pos + n };
+                            pc += 1;
+                            continue;
+                        }
+                        _ => {
+                            pc += 1; // unset group matches empty
+                            continue;
+                        }
+                    }
+                }
+                Inst::BackrefAlt(idxs) => {
+                    // At most one same-named group can have captured; match through that one.
+                    let g = idxs.iter().copied().find(|&g| {
+                        2 * g + 1 < self.caps.len()
+                            && self.caps[2 * g].is_some()
+                            && self.caps[2 * g + 1].is_some()
+                    });
+                    match g {
+                        None => {
+                            pc += 1; // no group captured: matches empty
+                            continue;
+                        }
+                        Some(g) => {
+                            let (a, b) = (self.caps[2 * g].unwrap(), self.caps[2 * g + 1].unwrap());
+                            let (a, b) = (a.min(b), a.max(b));
+                            let n = b - a;
+                            let start = if self.back {
+                                if pos < n {
+                                    return false;
+                                }
+                                pos - n
+                            } else {
+                                if pos + n > self.input.len() {
+                                    return false;
+                                }
+                                pos
+                            };
+                            if !(0..n).all(|index| {
+                                self.eqc_uu(self.input.at(start + index), self.input.at(a + index))
+                            }) {
+                                return false;
+                            }
+                            pos = if self.back { pos - n } else { pos + n };
+                            pc += 1;
+                            continue;
+                        }
+                    }
+                }
+                Inst::ClearCaps(lo, hi) => {
+                    let (lo, hi) = (*lo, *hi);
+                    let saved: Vec<Option<usize>> = self.caps[2 * lo..2 * hi + 2].to_vec();
+                    for slot in &mut self.caps[2 * lo..2 * hi + 2] {
+                        *slot = None;
+                    }
+                    return if self.run(prog, pc + 1, pos) {
+                        true
+                    } else {
+                        self.caps[2 * lo..2 * hi + 2].copy_from_slice(&saved);
+                        false
+                    };
+                }
+                Inst::Look { negate, prog: sub } => {
+                    let negate = *negate;
+                    let sub = sub.clone();
+                    let saved = self.caps.clone();
+                    // A nested lookahead always matches forward, even inside a lookbehind body.
+                    let saved_back = std::mem::replace(&mut self.back, false);
+                    let matched = self.run(&sub, 0, pos);
+                    self.back = saved_back;
+                    return if negate {
+                        self.caps = saved;
+                        if matched {
+                            false
+                        } else {
+                            self.run(prog, pc + 1, pos)
+                        }
+                    } else if matched {
+                        self.run(prog, pc + 1, pos)
+                    } else {
+                        self.caps = saved;
+                        false
+                    };
+                }
+                Inst::LookBehind { negate, prog: sub } => {
+                    let negate = *negate;
+                    let sub = sub.clone();
+                    let saved = self.caps.clone();
+                    // The body (compiled from the reversed AST) matches RIGHT-TO-LEFT from `pos`, so
+                    // alternative order, greed, and captures follow the spec's backwards semantics.
+                    let saved_back = std::mem::replace(&mut self.back, true);
+                    let matched = self.run(&sub, 0, pos);
+                    self.back = saved_back;
+                    return if negate {
+                        self.caps = saved;
+                        if matched {
+                            false
+                        } else {
+                            self.run(prog, pc + 1, pos)
+                        }
+                    } else if matched {
+                        self.run(prog, pc + 1, pos)
+                    } else {
+                        self.caps = saved;
+                        false
+                    };
                 }
             }
         }
@@ -2913,4 +3328,67 @@ fn class_set_to_node(mut set: ClassSet) -> Node {
         .collect();
     alts.push(class);
     Node::Group(None, Box::new(Node::Alt(alts)))
+}
+
+#[cfg(test)]
+mod internal_engine_diagnostics {
+    #[test]
+    fn escaped_open_bracket_patterns_compile() {
+        for pattern in [r"\s*([+>~\s])\s*([a-zA-Z#.*:\[])", r"^[\s[]?shapgvba"] {
+            super::Regex::new(pattern, "g")
+                .unwrap_or_else(|error| panic!("internal matcher rejected {pattern:?}: {error}"));
+        }
+    }
+
+    #[test]
+    fn legacy_identity_escaped_punctuation_compiles() {
+        super::Regex::new(r#"(^|[^\\])\"\\\/Qngr\((-?[0-9]+)\)\\\/\""#, "g")
+            .expect("internal matcher should accept legacy identity escapes");
+    }
+
+    #[test]
+    fn guaranteed_ascii_backreference_matches() {
+        let re =
+            super::Regex::new(r#"^(\[) *@?([\w-]+) *([!*$^~=]*) *('?"?)(.*?)\4 *\]"#, "").unwrap();
+        let input = crate::lstr::LStr::from("[glcr=fhozvg]");
+        let text = super::ReText::new_rc(false, &input);
+        let caps = re.exec_text_shared(&text, 0).unwrap();
+        assert_eq!(caps[0], Some((0, 13)));
+    }
+
+    #[test]
+    fn capture_free_ascii_lookahead_matches() {
+        let re = super::Regex::new("HF(?=;)", "i").unwrap();
+        let input = crate::lstr::LStr::from("xhf;y");
+        let text = super::ReText::new_rc(false, &input);
+        assert_eq!(re.exec_text_shared(&text, 0).unwrap()[0], Some((1, 3)));
+    }
+
+    #[test]
+    fn legacy_pattern_uses_utf16_element_offsets() {
+        let re = super::Regex::new(r"Qngr\((-?[0-9]+)\)", "").unwrap();
+        let input = crate::lstr::LStr::from("‰Qngr(-12)");
+        let text = super::ReText::new_rc(false, &input);
+        let caps = re.exec_text_shared(&text, 0).unwrap();
+        assert_eq!(caps[0], Some((1, 10)));
+        assert_eq!(caps[1], Some((6, 9)));
+    }
+
+    #[test]
+    fn internal_literal_plan_honors_start_and_sticky() {
+        let input = crate::lstr::LStr::from("xxneedle--needle");
+        let text = super::ReText::new_rc(false, &input);
+        let search = super::Regex::new("needle", "").unwrap();
+        assert_eq!(
+            search.exec_text_shared(&text, 3).unwrap()[0],
+            Some((10, 16))
+        );
+
+        let sticky = super::Regex::new("needle", "y").unwrap();
+        assert!(sticky.exec_text_shared(&text, 3).is_none());
+        assert_eq!(
+            sticky.exec_text_shared(&text, 10).unwrap()[0],
+            Some((10, 16))
+        );
+    }
 }

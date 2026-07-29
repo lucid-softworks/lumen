@@ -1942,12 +1942,12 @@ fn regex_find_all(
     let mut out = Vec::new();
     let mut pos = 0;
     while pos <= text.len() {
-        match re.exec_text(text, pos) {
+        match re.exec_text_shared(text, pos) {
             None => break,
             Some(caps) => {
                 let (a, b) = caps[0].unwrap();
                 pos = if b > a { b } else { b + 1 };
-                out.push(caps);
+                out.push(caps.as_ref().to_vec());
                 if out.len() > MAX_ARRAY_OP_LEN {
                     break;
                 }
@@ -1969,7 +1969,7 @@ fn to_length_val(i: &mut Interp, v: &Value) -> Result<usize, Value> {
 
 /// `RegExp.prototype.exec`: returns the match array (with `index`/`input`) or `null`, advancing
 /// `lastIndex` for global/sticky regexes.
-fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
+pub(crate) fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
     let ptr = map_ptr(&this).ok_or_else(|| i.make_error("TypeError", "exec on non-RegExp"))?;
     if !i.regexps.contains_key(&ptr) {
         return Err(i.make_error("TypeError", "exec on non-RegExp"));
@@ -2012,7 +2012,7 @@ fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
         return Ok(Value::Null);
     }
     let last = text.elem_at_unit(last_units);
-    match re.exec_text(&text, last) {
+    match re.exec_text_discard_shared(&text, last) {
         None => {
             if use_last {
                 set_throw(i, &this, "lastIndex", Value::Num(0.0))?;
@@ -2120,6 +2120,379 @@ fn regexp_exec(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Val
     }
 }
 
+/// Allocation-free `RegExp.prototype.exec` for a JIT call whose result is immediately discarded.
+/// Returns `None` unless every potentially observable coercion/property operation is proven to be
+/// the ordinary built-in shape, in which case all matcher side effects (lastIndex and the legacy
+/// RegExp statics) are preserved.
+pub(crate) fn regexp_exec_discard_fast(
+    i: &mut Interp,
+    this: &Value,
+    input: &crate::lstr::LStr,
+) -> Option<Result<bool, Value>> {
+    let Value::Obj(obj) = this else {
+        return None;
+    };
+    let ptr = Rc::as_ptr(obj) as usize;
+    let re = i.regexps.get(&ptr)?.clone();
+    {
+        let b = obj.borrow();
+        if !matches!(b.exotic, Exotic::None) {
+            return None;
+        }
+        let p = b.props.get("lastIndex")?;
+        if p.accessor() || !p.writable() {
+            return None;
+        }
+        match p.value() {
+            Value::Num(n) if n.is_finite() && n >= 0.0 && n.fract() == 0.0 => {}
+            _ => return None,
+        }
+    }
+    Some(regexp_exec_discard_direct(i, obj, &re, input))
+}
+
+/// Committed half of [`regexp_exec_discard_fast`] for a caller that has already proven the
+/// direct ordinary RegExp object and pinned its matcher. No JavaScript runs during this routine,
+/// so a structural loop helper can validate those guards once and reuse them for every subject.
+pub(crate) fn regexp_exec_discard_direct(
+    i: &mut Interp,
+    obj: &Gc,
+    re: &Rc<crate::regex::Regex>,
+    input: &crate::lstr::LStr,
+) -> Result<bool, Value> {
+    let use_last = re.global || re.sticky;
+    let read_units = if use_last {
+        let b = obj.borrow();
+        match b
+            .props
+            .get("lastIndex")
+            .expect("direct regexp lastIndex")
+            .value()
+        {
+            Value::Num(n) => n as usize,
+            _ => unreachable!("direct regexp lastIndex guard"),
+        }
+    } else {
+        0
+    };
+    let text = i.re_text(re.unicode, input);
+    let last_units = if use_last { read_units } else { 0 };
+    let set_last = |n: usize| {
+        let mut b = obj.borrow_mut();
+        let p = b.props.get_mut("lastIndex").expect("guarded lastIndex");
+        p.set_value(Value::Num(n as f64));
+    };
+    if last_units > text.unit_index(text.len()) {
+        if use_last {
+            set_last(0);
+        }
+        return Ok(false);
+    }
+    let last = text.elem_at_unit(last_units);
+    match re.find_text_shared(&text, last) {
+        None => {
+            if use_last {
+                set_last(0);
+            }
+            Ok(false)
+        }
+        Some(whole @ (_, end)) => {
+            if use_last {
+                set_last(text.unit_index(end));
+            }
+            update_regexp_legacy_statics_lazy(i, re, whole, last, &text, input);
+            Ok(true)
+        }
+    }
+}
+
+/// Whether a fresh RegExp literal's inherited `exec` lookup is the untouched intrinsic. A fused
+/// JIT expression checks this at the original GetMethod point; any customization executes the
+/// ordinary allocation/property/call sequence.
+pub(crate) fn regexp_literal_exec_is_canonical(i: &Interp) -> bool {
+    i.extra_protos
+        .get("RegExp")
+        .and_then(|proto| {
+            let p = proto.borrow();
+            p.props
+                .get("exec")
+                .filter(|property| !property.accessor())
+                .map(Property::value)
+        })
+        .is_some_and(|value| {
+            matches!(
+                value,
+                Value::Obj(ref function)
+                    if matches!(
+                        function.borrow().call,
+                        Callable::Native(native)
+                            if native as usize == regexp_exec as *const () as usize
+                    )
+            )
+        })
+}
+
+/// Execute the matcher side of a fresh RegExp literal whose `exec` result and wrapper identity
+/// are both dead. The immutable program is still shared by source/flags, every subject is
+/// actually matched, and successful captures update the realm's legacy RegExp statics.
+pub(crate) fn regexp_literal_exec_discard(
+    i: &mut Interp,
+    re: &Rc<crate::regex::Regex>,
+    input: &crate::lstr::LStr,
+) -> Result<(), Abrupt> {
+    let text = i.re_text(re.unicode, input);
+    if let Some(whole) = re.find_text_shared(&text, 0) {
+        update_regexp_legacy_statics_lazy(i, re, whole, 0, &text, input);
+    }
+    Ok(())
+}
+
+/// Live builtin-identity guards for a fused dead-result
+/// `string.replace(/literal/, "constant")`. Raw data-property reads are intentionally
+/// side-effect-free; an accessor or override declines to the ordinary observable path.
+pub(crate) fn regexp_literal_replace_is_canonical(i: &Interp) -> bool {
+    let string_replace = i
+        .string_proto
+        .borrow()
+        .props
+        .get("replace")
+        .filter(|property| !property.accessor())
+        .map(Property::value)
+        .is_some_and(|value| {
+            matches!(
+                value,
+                Value::Obj(ref function)
+                    if matches!(
+                        function.borrow().call,
+                        Callable::Native(native)
+                            if native as usize == nf_string_replace as *const () as usize
+                    )
+            )
+        });
+    if !string_replace || !regexp::literal_match_dependencies_canonical(i) {
+        return false;
+    }
+    let Some(key) = well_known_key(i, "replace") else {
+        return false;
+    };
+    i.extra_protos
+        .get("RegExp")
+        .and_then(|proto| {
+            let p = proto.borrow();
+            p.props
+                .get(&key)
+                .filter(|property| !property.accessor())
+                .map(Property::value)
+        })
+        .is_some_and(|value| {
+            matches!(
+                value,
+                Value::Obj(ref function)
+                    if matches!(
+                        function.borrow().call,
+                        Callable::Native(native)
+                            if native as usize
+                                == regexp::re_sym_replace as *const () as usize
+                    )
+            )
+        })
+}
+
+/// Execute all matching side effects of a fresh literal used by a dead-result string replace.
+/// Replacement construction itself is unobservable once its already-string value and the
+/// builtin identities are proven; matching, global iteration, empty-match advancement, and
+/// legacy RegExp statics remain live.
+pub(crate) fn regexp_literal_replace_discard(
+    i: &mut Interp,
+    re: &Rc<crate::regex::Regex>,
+    input: &crate::lstr::LStr,
+) -> Result<(), Abrupt> {
+    let text = i.re_text(re.unicode, input);
+    let mut position = 0usize;
+    loop {
+        let search_start = position;
+        let Some((start, end)) = re.find_text_shared(&text, position) else {
+            break;
+        };
+        update_regexp_legacy_statics_lazy(i, re, (start, end), search_start, &text, input);
+        if !re.global {
+            break;
+        }
+        position = if end > start {
+            end
+        } else {
+            end.saturating_add(1)
+        };
+        if position > text.len() {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Live builtin-identity guards for a dead-result `string.match(/literal/)` fusion.
+pub(crate) fn regexp_literal_match_is_canonical(i: &Interp) -> bool {
+    let string_match = i
+        .string_proto
+        .borrow()
+        .props
+        .get("match")
+        .filter(|property| !property.accessor())
+        .map(Property::value)
+        .is_some_and(|value| {
+            matches!(
+                value,
+                Value::Obj(ref function)
+                    if matches!(
+                        function.borrow().call,
+                        Callable::Native(native)
+                            if native as usize == nf_string_match as *const () as usize
+                    )
+            )
+        });
+    if !string_match || !regexp::literal_match_dependencies_canonical(i) {
+        return false;
+    }
+    let Some(key) = well_known_key(i, "match") else {
+        return false;
+    };
+    i.extra_protos
+        .get("RegExp")
+        .and_then(|proto| {
+            let p = proto.borrow();
+            p.props
+                .get(&key)
+                .filter(|property| !property.accessor())
+                .map(Property::value)
+        })
+        .is_some_and(|value| {
+            matches!(
+                value,
+                Value::Obj(ref function)
+                    if matches!(
+                        function.borrow().call,
+                        Callable::Native(native)
+                            if native as usize
+                                == regexp::re_sym_match as *const () as usize
+                    )
+            )
+        })
+}
+
+/// Run the real matcher for a fresh RegExp literal used by a dead-result `String#match`.
+/// The result array and wrapper are unobservable, but global iteration and legacy statics are
+/// preserved.
+pub(crate) fn regexp_literal_match_discard(
+    i: &mut Interp,
+    re: &Rc<crate::regex::Regex>,
+    input: &crate::lstr::LStr,
+) -> Result<(), Abrupt> {
+    let text = i.re_text(re.unicode, input);
+    let mut position = 0usize;
+    loop {
+        let search_start = position;
+        let Some((start, end)) = re.find_text_shared(&text, position) else {
+            break;
+        };
+        update_regexp_legacy_statics_lazy(i, re, (start, end), search_start, &text, input);
+        if !re.global {
+            break;
+        }
+        position = if end > start {
+            end
+        } else {
+            end.saturating_add(1)
+        };
+        if position > text.len() {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Allocation-free dead-result `String.prototype.replace` for the direct ordinary RegExp case.
+/// The raw property checks are side-effect-free; any customization declines to the exact builtin.
+pub(crate) fn string_replace_discard_fast(
+    i: &mut Interp,
+    input: &Value,
+    search: &Value,
+    replacement: &Value,
+) -> Option<Result<Value, Value>> {
+    let (Value::Str(input), Value::Obj(obj), Value::Str(_)) = (input, search, replacement) else {
+        return None;
+    };
+    let ptr = Rc::as_ptr(obj) as usize;
+    let re = i.regexps.get(&ptr)?.clone();
+    let proto = i.extra_protos.get("RegExp")?.clone();
+    let replace_key = well_known_key(i, "replace")?;
+    {
+        let b = obj.borrow();
+        if !matches!(b.exotic, Exotic::None)
+            || b.props.contains(&replace_key)
+            || b.proto.as_ref().is_none_or(|p| !Rc::ptr_eq(p, &proto))
+            || [
+                "exec",
+                "flags",
+                "hasIndices",
+                "global",
+                "ignoreCase",
+                "multiline",
+                "dotAll",
+                "unicode",
+                "unicodeSets",
+                "sticky",
+            ]
+            .iter()
+            .any(|name| b.props.contains(name))
+        {
+            return None;
+        }
+        let last = b.props.get("lastIndex")?;
+        if last.accessor() || !last.writable() {
+            return None;
+        }
+        if re.sticky
+            && !re.global
+            && !matches!(
+                last.value(),
+                Value::Num(n) if n.is_finite() && n >= 0.0 && n.fract() == 0.0
+            )
+        {
+            return None;
+        }
+    }
+    if !regexp::literal_match_dependencies_canonical(i) {
+        return None;
+    }
+    let canonical = {
+        let p = proto.borrow();
+        let Value::Obj(method) = p.props.get(&replace_key)?.value() else {
+            return None;
+        };
+        let canonical = matches!(
+            method.borrow().call,
+            Callable::Native(nf)
+                if nf as usize == regexp::re_sym_replace as *const () as usize
+        );
+        canonical
+    };
+    if !canonical {
+        return None;
+    }
+    Some(regexp::re_sym_replace_discard_direct(i, obj, &re, input))
+}
+
+/// Allocation-free dead-result `String.prototype.split` for a direct ordinary RegExp separator.
+/// The child routine validates every protocol/species/flag dependency before touching state.
+pub(crate) fn string_split_discard_fast(
+    i: &mut Interp,
+    input: &Value,
+    separator: &Value,
+    limit: &Value,
+) -> Option<Result<Value, Value>> {
+    regexp::re_sym_split_discard_fast(i, input, separator, limit)
+}
+
 /// Refresh the %RegExp% constructor's legacy static state after a successful RegExpBuiltinExec.
 /// Record a successful match for the legacy `RegExp.$1`-style statics — deferred: the 14 strings
 /// (including full left/right-context copies of the subject) only materialize when one of the
@@ -2141,21 +2514,81 @@ fn update_regexp_legacy_statics(
             flush_regexp_legacy(i);
         }
     }
+    if let Some(previous) = i
+        .regexp_last
+        .as_mut()
+        .filter(|previous| Rc::ptr_eq(&previous.ctor, &ctor))
+    {
+        previous.input = input.clone();
+        previous.text = text.clone();
+        previous.caps.clear();
+        previous.caps.extend_from_slice(caps);
+        previous.ngroups = re.ngroups;
+        previous.lazy_captures = None;
+        return;
+    }
     i.regexp_last = Some(crate::interpreter::RegexpLastMatch {
         ctor,
         input: input.clone(),
         text: text.clone(),
         caps: caps.to_vec(),
         ngroups: re.ngroups,
+        lazy_captures: None,
+    });
+}
+
+fn update_regexp_legacy_statics_lazy(
+    i: &mut Interp,
+    re: &Rc<crate::regex::Regex>,
+    whole: (usize, usize),
+    search_start: usize,
+    text: &Rc<crate::regex::ReText>,
+    input: &crate::lstr::LStr,
+) {
+    let ctor = match i.extra_protos.get("%RegExpCtor%") {
+        Some(c) => c.clone(),
+        None => return,
+    };
+    if let Some(prev) = &i.regexp_last {
+        if !Rc::ptr_eq(&prev.ctor, &ctor) {
+            flush_regexp_legacy(i);
+        }
+    }
+    if let Some(previous) = i
+        .regexp_last
+        .as_mut()
+        .filter(|previous| Rc::ptr_eq(&previous.ctor, &ctor))
+    {
+        previous.input = input.clone();
+        previous.text = text.clone();
+        previous.caps.clear();
+        previous.caps.push(Some(whole));
+        previous.ngroups = re.ngroups;
+        previous.lazy_captures = Some((re.clone(), search_start));
+        return;
+    }
+    i.regexp_last = Some(crate::interpreter::RegexpLastMatch {
+        ctor,
+        input: input.clone(),
+        text: text.clone(),
+        caps: vec![Some(whole)],
+        ngroups: re.ngroups,
+        lazy_captures: Some((re.clone(), search_start)),
     });
 }
 
 /// Materialize the pending legacy-statics match (if any) into its constructor's hidden props.
 /// Called by the `RegExp.$1`/`lastMatch`/… accessors before they read.
 pub(super) fn flush_regexp_legacy(i: &mut Interp) {
-    let Some(m) = i.regexp_last.take() else {
+    let Some(mut m) = i.regexp_last.take() else {
         return;
     };
+    if let Some((re, start)) = m.lazy_captures.take() {
+        if let Some(captures) = re.exec_text_shared(&m.text, start) {
+            m.caps.clear();
+            m.caps.extend_from_slice(&captures);
+        }
+    }
     let (caps, text, ctor) = (&m.caps, &m.text, &m.ctor);
     let put = |k: &'static str, v: String| {
         ctor.borrow_mut()
@@ -2292,12 +2725,16 @@ fn is_constructor_value(v: &Value) -> bool {
 /// Install the `get [Symbol.species]` accessor (returns the receiver `this`) on a constructor.
 fn install_species(it: &Interp, ctor: &Gc) {
     if let Some(key) = well_known_key(it, "species") {
-        let getter = it.make_native("get [Symbol.species]", 0, |_i, this, _| Ok(this));
+        let getter = it.make_native("get [Symbol.species]", 0, nf_species_getter);
         ctor.borrow_mut().props.insert(
             key,
             Property::accessor_prop(Some(Value::Obj(getter)), None, false, true),
         );
     }
+}
+
+fn nf_species_getter(_i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, Value> {
+    Ok(this)
 }
 
 /// The internal property key for a well-known `Symbol.<name>`.
@@ -8088,6 +8525,24 @@ pub(crate) fn nf_char_code_at(
     })
 }
 
+/// `String.prototype.charAt` (named so the JIT call IC can prove and tag its exact identity).
+pub(crate) fn nf_char_at(
+    i: &mut crate::interpreter::Interp,
+    this: Value,
+    args: &[Value],
+) -> Result<Value, Value> {
+    let s = this_string(i, &this)?;
+    let n = ab(i.to_number(&arg(args, 0)))?;
+    let idx = if n.is_nan() { 0.0 } else { n.trunc() };
+    if idx < 0.0 || !idx.is_finite() {
+        return Ok(Value::str(""));
+    }
+    Ok(match i.unit_at(&s, idx as usize) {
+        Some(u) => Value::Str(crate::jstr::unit_lstr(u)),
+        None => Value::str(""),
+    })
+}
+
 fn this_string(i: &mut Interp, this: &Value) -> Result<crate::lstr::LStr, Value> {
     match this {
         Value::Str(s) => Ok(s.clone()),
@@ -8150,6 +8605,180 @@ fn create_html(
     Ok(Value::from_string(format!("{p}>{s}</{tag}>")))
 }
 
+pub(crate) fn nf_string_replace(
+    i: &mut Interp,
+    this: Value,
+    args: &[Value],
+) -> Result<Value, Value> {
+    if matches!(this, Value::Undefined | Value::Null) {
+        return Err(i.make_error(
+            "TypeError",
+            "String.prototype.replace called on null or undefined",
+        ));
+    }
+    // An object search value with a @@replace method handles the operation.
+    let search = arg(args, 0);
+    if matches!(search, Value::Obj(_)) {
+        if let Some(key) = well_known_key(i, "replace") {
+            let replacer = ab(i.get_member(&search, &key))?;
+            if !matches!(replacer, Value::Undefined | Value::Null) {
+                if !replacer.is_callable() {
+                    return Err(i.make_error("TypeError", "@@replace is not callable"));
+                }
+                return ab(i.call(replacer, search.clone(), &[this.clone(), arg(args, 1)]));
+            }
+        }
+    }
+    let s = this_string(i, &this)?.to_string();
+    let pat = ab(i.to_string(&arg(args, 0)))?;
+    let repl = prep_repl(i, &arg(args, 1))?;
+    match s.find(pat.as_ref()) {
+        None => Ok(Value::from_string(s)),
+        Some(pos) => {
+            let matched = &s[pos..pos + pat.len()];
+            let rep = string_replacement(i, &repl, matched, &s, pos)?;
+            Ok(Value::from_string(format!(
+                "{}{}{}",
+                &s[..pos],
+                rep,
+                &s[pos + pat.len()..]
+            )))
+        }
+    }
+}
+
+pub(crate) fn nf_string_match(i: &mut Interp, this: Value, a: &[Value]) -> Result<Value, Value> {
+    // RequireObjectCoercible(this), then dispatch to an Object regexp's @@match.
+    if matches!(this, Value::Undefined | Value::Null) {
+        return Err(i.make_error(
+            "TypeError",
+            "String.prototype.match called on null or undefined",
+        ));
+    }
+    let regexp = arg(a, 0);
+    if matches!(regexp, Value::Obj(_)) {
+        if let Some(key) = well_known_key(i, "match") {
+            let matcher = ab(i.get_member(&regexp, &key))?;
+            if !matches!(matcher, Value::Undefined | Value::Null) {
+                if !matcher.is_callable() {
+                    return Err(i.make_error("TypeError", "@@match is not callable"));
+                }
+                return ab(i.call(matcher, regexp.clone(), std::slice::from_ref(&this)));
+            }
+        }
+    }
+    // Otherwise build a RegExp from the argument and invoke its @@match.
+    let s = this_string(i, &this)?;
+    let pattern = if matches!(regexp, Value::Undefined) {
+        String::new()
+    } else {
+        ab(i.to_string(&regexp))?.to_string()
+    };
+    let rx = ab(i.make_regexp(&pattern, ""))?;
+    let key = well_known_key(i, "match").unwrap();
+    let matcher = ab(i.get_member(&rx, &key))?;
+    ab(i.call(matcher, rx, &[Value::Str(s)]))
+}
+
+pub(crate) fn nf_string_split(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
+    // RequireObjectCoercible(this), then dispatch to an Object separator's @@split.
+    if matches!(this, Value::Undefined | Value::Null) {
+        return Err(i.make_error(
+            "TypeError",
+            "String.prototype.split called on null or undefined",
+        ));
+    }
+    let separator = arg(args, 0);
+    if matches!(separator, Value::Obj(_)) {
+        if let Some(key) = well_known_key(i, "split") {
+            let splitter = ab(i.get_member(&separator, &key))?;
+            if !matches!(splitter, Value::Undefined | Value::Null) {
+                if !splitter.is_callable() {
+                    return Err(i.make_error("TypeError", "@@split is not callable"));
+                }
+                return ab(i.call(splitter, separator.clone(), &[this.clone(), arg(args, 1)]));
+            }
+        }
+    }
+    let s = this_string(i, &this)?;
+    if s.len() > MAX_ARRAY_OP_LEN {
+        return Err(i.make_error("RangeError", "string too large to split in this engine"));
+    }
+    // `limit` (ToUint32) caps the number of pieces; 0 → empty result — but ToString of the
+    // separator is observable BEFORE the zero-limit shortcut.
+    let limit = match arg(args, 1) {
+        Value::Undefined => u32::MAX as usize,
+        v => {
+            let n = ab(i.to_number(&v))?;
+            (if n.is_finite() { n as i64 as u32 } else { 0 }) as usize
+        }
+    };
+    let is_live_regexp =
+        matches!(&arg(args, 0), Value::Obj(o) if i.regexps.contains_key(&(Rc::as_ptr(o) as usize)));
+    let sep_str: Option<Rc<str>> = match &arg(args, 0) {
+        Value::Undefined => None,
+        _ if is_live_regexp => None,
+        v => Some(ab(i.to_string(v))?.into()),
+    };
+    if limit == 0 {
+        return Ok(i.make_array(Vec::new()));
+    }
+    // Regex separator: split on each match (group captures are inserted between pieces).
+    if let Value::Obj(o) = &arg(args, 0) {
+        if i.regexps.contains_key(&(Rc::as_ptr(o) as usize)) {
+            let re = i.regexps[&(Rc::as_ptr(o) as usize)].clone();
+            let text = i.re_text(re.unicode, &s);
+            let mut parts = Vec::new();
+            let mut last = 0;
+            'outer: for caps in regex_find_all(&re, &text) {
+                let (a, b) = caps[0].unwrap();
+                // Skip a zero-width match at the very start or end of the string.
+                if a == b && (b == 0 || a >= text.len()) {
+                    continue;
+                }
+                parts.push(Value::from_string(text.slice(last, a)));
+                if parts.len() >= limit {
+                    break;
+                }
+                for g in 1..=re.ngroups {
+                    parts.push(match caps[g] {
+                        Some((x, y)) => Value::from_string(text.slice(x, y)),
+                        None => Value::Undefined,
+                    });
+                    if parts.len() >= limit {
+                        break 'outer;
+                    }
+                }
+                last = b;
+            }
+            if parts.len() < limit {
+                parts.push(Value::from_string(text.slice(last, text.len())));
+            }
+            parts.truncate(limit);
+            return Ok(i.make_array(parts));
+        }
+    }
+    match sep_str {
+        None => Ok(i.make_array(vec![Value::Str(s)])),
+        Some(sep) => {
+            // Splitting on "" yields one piece per UTF-16 code unit (a surrogate pair
+            // becomes its two lone halves).
+            let mut parts: Vec<Value> = if sep.is_empty() {
+                crate::jstr::units(&s)
+                    .into_iter()
+                    .map(|u| Value::Str(crate::jstr::unit_lstr(u)))
+                    .collect()
+            } else {
+                s.split(sep.as_ref())
+                    .map(|p| Value::from_string(p.to_string()))
+                    .collect()
+            };
+            parts.truncate(limit);
+            Ok(i.make_array(parts))
+        }
+    }
+}
+
 fn install_string(it: &mut Interp) {
     let sp = it.string_proto.clone();
     // String.prototype[@@iterator]: a lazy String Iterator over the receiver, by code point.
@@ -8167,18 +8796,7 @@ fn install_string(it: &mut Interp) {
     }
     it.def_method(&sp, "toString", 0, |i, this, _| string_this_value(i, &this));
     it.def_method(&sp, "valueOf", 0, |i, this, _| string_this_value(i, &this));
-    it.def_method(&sp, "charAt", 1, |i, this, args| {
-        let s = this_string(i, &this)?;
-        let n = ab(i.to_number(&arg(args, 0)))?;
-        let idx = if n.is_nan() { 0.0 } else { n.trunc() };
-        if idx < 0.0 || !idx.is_finite() {
-            return Ok(Value::str(""));
-        }
-        Ok(match i.unit_at(&s, idx as usize) {
-            Some(u) => Value::from_string(crate::jstr::unit_str(u)),
-            None => Value::str(""),
-        })
-    });
+    it.def_method(&sp, "charAt", 1, nf_char_at);
     it.def_method(&sp, "charCodeAt", 1, nf_char_code_at);
     it.def_method(&sp, "indexOf", 1, |i, this, args| {
         let s = this_string(i, &this)?;
@@ -8465,103 +9083,7 @@ fn install_string(it: &mut Interp) {
             crate::jstr::canonicalize(&out).unwrap_or(out),
         ))
     });
-    it.def_method(&sp, "split", 2, |i, this, args| {
-        // RequireObjectCoercible(this), then dispatch to an Object separator's @@split.
-        if matches!(this, Value::Undefined | Value::Null) {
-            return Err(i.make_error(
-                "TypeError",
-                "String.prototype.split called on null or undefined",
-            ));
-        }
-        let separator = arg(args, 0);
-        if matches!(separator, Value::Obj(_)) {
-            if let Some(key) = well_known_key(i, "split") {
-                let splitter = ab(i.get_member(&separator, &key))?;
-                if !matches!(splitter, Value::Undefined | Value::Null) {
-                    if !splitter.is_callable() {
-                        return Err(i.make_error("TypeError", "@@split is not callable"));
-                    }
-                    return ab(i.call(splitter, separator.clone(), &[this.clone(), arg(args, 1)]));
-                }
-            }
-        }
-        let s = this_string(i, &this)?;
-        if s.len() > MAX_ARRAY_OP_LEN {
-            return Err(i.make_error("RangeError", "string too large to split in this engine"));
-        }
-        // `limit` (ToUint32) caps the number of pieces; 0 → empty result — but ToString of the
-        // separator is observable BEFORE the zero-limit shortcut.
-        let limit = match arg(args, 1) {
-            Value::Undefined => u32::MAX as usize,
-            v => {
-                let n = ab(i.to_number(&v))?;
-                (if n.is_finite() { n as i64 as u32 } else { 0 }) as usize
-            }
-        };
-        let is_live_regexp = matches!(&arg(args, 0), Value::Obj(o) if i.regexps.contains_key(&(Rc::as_ptr(o) as usize)));
-        let sep_str: Option<Rc<str>> = match &arg(args, 0) {
-            Value::Undefined => None,
-            _ if is_live_regexp => None,
-            v => Some(ab(i.to_string(v))?.into()),
-        };
-        if limit == 0 {
-            return Ok(i.make_array(Vec::new()));
-        }
-        // Regex separator: split on each match (group captures are inserted between pieces).
-        if let Value::Obj(o) = &arg(args, 0) {
-            if i.regexps.contains_key(&(Rc::as_ptr(o) as usize)) {
-                let re = i.regexps[&(Rc::as_ptr(o) as usize)].clone();
-                let text = i.re_text(re.unicode, &s);
-                let mut parts = Vec::new();
-                let mut last = 0;
-                'outer: for caps in regex_find_all(&re, &text) {
-                    let (a, b) = caps[0].unwrap();
-                    // Skip a zero-width match at the very start or end of the string.
-                    if a == b && (b == 0 || a >= text.len()) {
-                        continue;
-                    }
-                    parts.push(Value::from_string(text.slice(last, a)));
-                    if parts.len() >= limit {
-                        break;
-                    }
-                    for g in 1..=re.ngroups {
-                        parts.push(match caps[g] {
-                            Some((x, y)) => Value::from_string(text.slice(x, y)),
-                            None => Value::Undefined,
-                        });
-                        if parts.len() >= limit {
-                            break 'outer;
-                        }
-                    }
-                    last = b;
-                }
-                if parts.len() < limit {
-                    parts.push(Value::from_string(text.slice(last, text.len())));
-                }
-                parts.truncate(limit);
-                return Ok(i.make_array(parts));
-            }
-        }
-        match sep_str {
-            None => Ok(i.make_array(vec![Value::Str(s)])),
-            Some(sep) => {
-                // Splitting on "" yields one piece per UTF-16 code unit (a surrogate pair
-                // becomes its two lone halves).
-                let mut parts: Vec<Value> = if sep.is_empty() {
-                    crate::jstr::units(&s)
-                        .into_iter()
-                        .map(|u| Value::from_string(crate::jstr::unit_str(u)))
-                        .collect()
-                } else {
-                    s.split(sep.as_ref())
-                        .map(|p| Value::from_string(p.to_string()))
-                        .collect()
-                };
-                parts.truncate(limit);
-                Ok(i.make_array(parts))
-            }
-        }
-    });
+    it.def_method(&sp, "split", 2, nf_string_split);
     it.def_method(&sp, "at", 1, |i, this, args| {
         let s = this_string(i, &this)?;
         let len = i.str_len(&s) as i64;
@@ -8573,7 +9095,7 @@ fn install_string(it: &mut Interp) {
             Value::Undefined
         } else {
             match i.unit_at(&s, idx as usize) {
-                Some(u) => Value::from_string(crate::jstr::unit_str(u)),
+                Some(u) => Value::Str(crate::jstr::unit_lstr(u)),
                 None => Value::Undefined,
             }
         })
@@ -8625,38 +9147,7 @@ fn install_string(it: &mut Interp) {
     it.def_method(&sp, "padEnd", 1, |i, this, args| {
         string_pad(i, this, args, false)
     });
-    it.def_method(&sp, "match", 1, |i, this, a| {
-        // RequireObjectCoercible(this), then dispatch to an Object regexp's @@match.
-        if matches!(this, Value::Undefined | Value::Null) {
-            return Err(i.make_error(
-                "TypeError",
-                "String.prototype.match called on null or undefined",
-            ));
-        }
-        let regexp = arg(a, 0);
-        if matches!(regexp, Value::Obj(_)) {
-            if let Some(key) = well_known_key(i, "match") {
-                let matcher = ab(i.get_member(&regexp, &key))?;
-                if !matches!(matcher, Value::Undefined | Value::Null) {
-                    if !matcher.is_callable() {
-                        return Err(i.make_error("TypeError", "@@match is not callable"));
-                    }
-                    return ab(i.call(matcher, regexp.clone(), std::slice::from_ref(&this)));
-                }
-            }
-        }
-        // Otherwise build a RegExp from the argument and invoke its @@match.
-        let s = this_string(i, &this)?;
-        let pattern = if matches!(regexp, Value::Undefined) {
-            String::new()
-        } else {
-            ab(i.to_string(&regexp))?.to_string()
-        };
-        let rx = ab(i.make_regexp(&pattern, ""))?;
-        let key = well_known_key(i, "match").unwrap();
-        let matcher = ab(i.get_member(&rx, &key))?;
-        ab(i.call(matcher, rx, &[Value::Str(s)]))
-    });
+    it.def_method(&sp, "match", 1, nf_string_match);
     it.def_method(&sp, "search", 1, |i, this, a| {
         // RequireObjectCoercible(this), then dispatch to an Object regexp's @@search.
         if matches!(this, Value::Undefined | Value::Null) {
@@ -8738,46 +9229,7 @@ fn install_string(it: &mut Interp) {
         let matcher = ab(i.get_member(&rx, &key))?;
         ab(i.call(matcher, rx, &[Value::Str(s)]))
     });
-    it.def_method(&sp, "replace", 2, |i, this, args| {
-        if matches!(this, Value::Undefined | Value::Null) {
-            return Err(i.make_error(
-                "TypeError",
-                "String.prototype.replace called on null or undefined",
-            ));
-        }
-        // An *object* search value with a `@@replace` method (any RegExp, subclass, or custom)
-        // handles it. A primitive search value never routes here (it has no own `@@replace`, and
-        // consulting the prototype's would be observable), so it takes the string path below.
-        let search = arg(args, 0);
-        if matches!(search, Value::Obj(_)) {
-            if let Some(key) = well_known_key(i, "replace") {
-                let replacer = ab(i.get_member(&search, &key))?;
-                if !matches!(replacer, Value::Undefined | Value::Null) {
-                    if !replacer.is_callable() {
-                        return Err(i.make_error("TypeError", "@@replace is not callable"));
-                    }
-                    return ab(i.call(replacer, search.clone(), &[this.clone(), arg(args, 1)]));
-                }
-            }
-        }
-        let s = this_string(i, &this)?.to_string();
-        let pat = ab(i.to_string(&arg(args, 0)))?;
-        // A non-callable replaceValue is ToString'd BEFORE the search (even when nothing matches).
-        let repl = prep_repl(i, &arg(args, 1))?;
-        match s.find(pat.as_ref()) {
-            None => Ok(Value::from_string(s)),
-            Some(pos) => {
-                let matched = &s[pos..pos + pat.len()];
-                let rep = string_replacement(i, &repl, matched, &s, pos)?;
-                Ok(Value::from_string(format!(
-                    "{}{}{}",
-                    &s[..pos],
-                    rep,
-                    &s[pos + pat.len()..]
-                )))
-            }
-        }
-    });
+    it.def_method(&sp, "replace", 2, nf_string_replace);
     it.def_method(&sp, "replaceAll", 2, |i, this, args| {
         // RequireObjectCoercible(this) — but keep the raw receiver O for @@replace, which runs
         // BEFORE ToString(this).
@@ -8981,12 +9433,7 @@ fn box_primitive(i: &mut Interp, v: Value) -> Value {
         for (idx, u) in units.iter().enumerate() {
             b.props.insert(
                 idx.to_string().as_str(),
-                Property::data(
-                    Value::from_string(crate::jstr::unit_str(*u)),
-                    false,
-                    true,
-                    false,
-                ),
+                Property::data(Value::Str(crate::jstr::unit_lstr(*u)), false, true, false),
             );
         }
         b.props.insert(
