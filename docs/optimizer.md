@@ -1970,3 +1970,103 @@ All 48 timing runs and validation records are preserved in `ascii-substring-*` a
 unapplied candidate uses guarded direct Array Iterator state access, preserving reentrant
 length-getter mutations and exact fallback ordering. Result construction, branding changes,
 and the pre-existing keys-iterator element-fetch behavior are outside that candidate.
+
+### Guarded Array Iterator state experiment (2026-09-07)
+
+The current Djot profile attributes 512/4623 samples (11.08% inclusive) to
+Array Iterator `next()`. Its immediate property-read, property-write and result
+construction paths account for 181, 109 and 109 samples respectively; these
+counts do not identify which individual internal state reads dominate.
+
+`builtins/array_iterator.rs` extracts the existing implementation and adds a
+pure own-data snapshot for ordinary, `ic_plain` receivers with numeric index
+and kind fields. It preserves the existing own-kind brand check and falls back
+before any observable operation when the snapshot is ineligible. The target is
+moved out of the snapshot without a second reference-count increment. Target
+length reads, numeric coercions, typed-array length checks, element reads and
+result construction retain their original ordering.
+
+After the length getter and result allocation, the index write checks the live
+own property again. Only a writable data property whose old value is numeric
+is overwritten directly. A getter that replaces the descriptor, deletes the
+property, changes writability or installs an object value causes only the
+pending generic write to run; state reads and length getters are never replayed.
+Clearing an exhausted target stays generic. The existing keys-mode element Get
+and support for forged internal-slot-style receivers are preserved, rather than
+changed as part of this performance experiment. Realm setup selects the baseline
+implementation when `LUMEN_NO_ARRAY_ITERATOR_STATE` is set, with no hot getenv.
+
+Seven colocated tests run across Interp, Bytecode and JIT, asserting actual
+snapshot, direct-write and late-fallback counters. They cover ordinary values,
+exhaustion, coercion ordering, reentrant length getters, GC after descriptor and
+owner changes, proxy targets/receivers, readonly/deleted indices and inherited
+setters, plus detached and resized typed-array views. The same seven tests pass
+with the optimization disabled. A forged-receiver readonly case exposed an
+existing native strictness difference: Interp returns normally while Bytecode
+and JIT throw from the strict caller, identically in both implementations. The
+test preserves this baseline; the optimization does not resolve that separate
+correctness issue.
+
+Validation passes 724 unit and 34 integration tests, 122 targeted iterator
+conformance tests and 1,996 differential agreements with four budget skips.
+Formatting and the new module's strict structural audit pass. Strict Clippy
+retains the exact pre-existing 86-library/88-library-test error-message multiset.
+The release build predates final test-only fixture edits and formatting; its
+runtime implementation is unchanged. Measured source, executable hashes and
+validation logs are archived under `array-iterator-state-*` and
+`lumen-array-iterator-state-*` in the external optimizer directory.
+
+Thirty-six sequential, output-verified runs compare the same executable with state
+access disabled/enabled, Node and Bun across three rotated rounds. No own builds,
+tests or profiling overlap timings. Medians (lower is better):
+
+| Workload | Baseline | State enabled | Node | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| IteratorValues (µs / 10k visits) | 2200 | 1620 | 6.3 | 10.24 |
+| IteratorKeys (µs / 10k visits) | 2205.88 | 1600 | 6.3 | 8.96 |
+| IteratorEntries (µs / 10k visits) | 3058.82 | 2441.18 | 30 | 29.7436 |
+| PairDestructure (µs / 10k visits) | 9900 | 8000 | 15.8824 | 21.1765 |
+| Djot (ms) | 3948 | 3865 | 232 | 147 |
+| DeltaBlue (ms) | 8848 | 8791 | 203 | 306 |
+
+The four iterator kernels improve 19.2–27.5% by median, with every paired run
+faster. Djot improves 2.10%, with pairs 3952→3884, 3923→3778 and 3948→3865 ms
+(1.72–3.70% less time). This is a repeated application gain in the measured
+session. DeltaBlue changes -0.64% by median, with mixed pairs (-1.47%, +0.45%,
+-0.64%); it is not presented as a reliable application improvement. The parser
+still takes 16.66× Node and 26.29× Bun time. The much larger iterator-kernel gaps
+are measurements of these particular checked loops, not overall engine ratios;
+eliminating temporary iterator/result objects in compiled code remains a separate
+structural opportunity.
+
+Twelve additional rotated classic v8-v7 runs verify all nine scores. Medians
+(higher is better):
+
+| Benchmark | Baseline | State enabled | Node | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| Richards | 23509 | 23670 | 65644 | 71960 |
+| DeltaBlue | 3699 | 3762 | 152746 | 109610 |
+| Crypto | 23915 | 23840 | 91517 | 120153 |
+| RayTrace | 6492 | 6393 | 137490 | 305245 |
+| EarleyBoyer | 3629 | 3650 | 147525 | 157029 |
+| RegExp | 1646 | 1633 | 22752 | 30548 |
+| Splay | 10252 | 10349 | 80138 | 93582 |
+| NavierStokes | 37729 | 38139 | 70864 | 70342 |
+| Score (version 7) | 8558 | 8664 | 83509 | 98519 |
+
+The composite increases 1.24% by median, with mixed pairs (-0.02%, +2.62%,
++1.24%). The second baseline run has notably lower Splay and NavierStokes
+scores; CPU snapshots are retained but do not establish the cause. Richards,
+classic DeltaBlue, EarleyBoyer and Splay have higher scores in all paired runs.
+Crypto (-0.31%), RayTrace (-1.52%) and RegExp (-0.79%) have lower medians but
+mixed paired directions. These results do not establish a consistent overall
+suite gain. The change is retained for the repeated parser and iterator-kernel
+improvements, with these counter-regressions and variability recorded.
+Composite score ratios remain 9.64× Node and 11.37× Bun, far outside the goal.
+
+All 48 timing runs are archived. The next prepared element-read candidate is
+unapplied; it reuses the existing checked dense-element helper after callbacks.
+A larger separate design specializes the existing flat array-destructuring
+opcode to avoid transient iterator/results entirely when intrinsic-method,
+dense-data and iterator-close guards prove that no user callback is bypassed.
+Neither follow-up is included in the measured implementation.

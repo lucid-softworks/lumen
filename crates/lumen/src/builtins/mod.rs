@@ -9,6 +9,7 @@ use std::rc::Rc;
 
 // Per-object modules split out of this file (behavior-preserving). Shared helpers remain here and
 // are reachable from each submodule via `use super::*`.
+mod array_iterator;
 mod atomics;
 pub(crate) mod collection_data;
 mod collections;
@@ -6452,7 +6453,12 @@ fn install_iterator(it: &mut Interp) {
     // is %IteratorPrototype%), so getPrototypeOf(getPrototypeOf(arrIter)) lands on %IteratorPrototype%.
     let arr_iter_proto = Object::new(it.extra_protos.get("%IteratorPrototype%").cloned());
     set_to_string_tag(it, &arr_iter_proto, "Array Iterator");
-    it.def_method(&arr_iter_proto, "next", 0, array_iter_next);
+    let array_next: NativeFn = if std::env::var_os("LUMEN_NO_ARRAY_ITERATOR_STATE").is_some() {
+        array_iterator::baseline
+    } else {
+        array_iterator::fast
+    };
+    it.def_method(&arr_iter_proto, "next", 0, array_next);
     it.extra_protos
         .insert("%ArrayIteratorPrototype%", arr_iter_proto);
 
@@ -8073,68 +8079,6 @@ pub(crate) fn async_gen_return_reject(
 }
 pub(crate) fn async_iterator_key(i: &Interp) -> Option<Rc<str>> {
     well_known_key(i, "asyncIterator")
-}
-
-fn array_iter_next(i: &mut Interp, this: Value, _args: &[Value]) -> Result<Value, Value> {
-    // Brand check: the receiver must carry the Array Iterator internal slots.
-    if !matches!(&this, Value::Obj(o) if o.borrow().props.contains("__ai_kind")) {
-        return Err(i.make_error(
-            "TypeError",
-            "Array Iterator next called on an incompatible receiver",
-        ));
-    }
-    let target = ab(i.get_member(&this, "__ai_target"))?;
-    // An exhausted iterator clears its target so it stays done even if the source later grows.
-    if matches!(target, Value::Undefined) {
-        let result = i.new_object();
-        set_data(&result, "value", Value::Undefined);
-        set_data(&result, "done", Value::Bool(true));
-        return Ok(Value::Obj(result));
-    }
-    let idx_v = ab(i.get_member(&this, "__ai_index"))?;
-    let idx = ab(i.to_number(&idx_v))? as usize;
-    let kind_v = ab(i.get_member(&this, "__ai_kind"))?;
-    let kind = ab(i.to_number(&kind_v))? as u8;
-    // A TypedArray target re-derives its length each step; an out-of-bounds (detached/shrunk-past)
-    // view throws TypeError.
-    let len = if let Some(info) = map_ptr(&target).and_then(|p| i.typed_arrays.get(&p).copied()) {
-        match i.ta_len(&info) {
-            Some(l) => l,
-            None => return Err(i.make_error("TypeError", "TypedArray is out of bounds")),
-        }
-    } else {
-        match &target {
-            // LengthOfArrayLike through [[Get]], so a proxy target's traps are honored.
-            Value::Obj(_) => {
-                let lv = ab(i.get_member(&target, "length"))?;
-                let n = ab(i.to_number(&lv))?;
-                if n.is_nan() || n <= 0.0 {
-                    0
-                } else {
-                    n.min(9007199254740991.0) as usize
-                }
-            }
-            Value::Str(s) => crate::jstr::unit_len(s),
-            _ => 0,
-        }
-    };
-    let result = i.new_object();
-    if idx >= len {
-        ab(i.set_member(&this, "__ai_target", Value::Undefined))?;
-        set_data(&result, "value", Value::Undefined);
-        set_data(&result, "done", Value::Bool(true));
-        return Ok(Value::Obj(result));
-    }
-    ab(i.set_member(&this, "__ai_index", Value::Num((idx + 1) as f64)))?;
-    let elem = ab(i.get_member(&target, &idx.to_string()))?;
-    let value = match kind {
-        1 => Value::Num(idx as f64),
-        2 => i.make_array(vec![Value::Num(idx as f64), elem]),
-        _ => elem,
-    };
-    set_data(&result, "value", value);
-    set_data(&result, "done", Value::Bool(false));
-    Ok(Value::Obj(result))
 }
 
 fn norm_index(n: f64, len: i64) -> i64 {
