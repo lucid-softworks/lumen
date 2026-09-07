@@ -490,3 +490,24 @@ The external optimizer directory holds `compare-collection-brands.py`,
 813/813 collection conformance cases, and 1996 differential agreements with four budget
 skips. Formatting and strict structure audits pass; strict Clippy retains the existing
 86/88 diagnostics, none in the modified collection modules.
+
+### Property-storage migration preparation
+
+A fresh Djot sample taken after one second of process CPU time shows cycle collection,
+value cleanup, property access and allocation ahead of arithmetic or native-call dispatch.
+An earlier sample caught dyld startup and is not evidence about engine execution. The
+valid profile is `djot-after-collections-running.sample` in the external optimizer directory;
+its run still verified all 3160000 output characters.
+
+Property storage has been extracted from value.rs into modules for map construction,
+access/reflection, mutation, dense elements, numeric mirrors, buffer ownership and shapes.
+All 51 moved method bodies are unchanged. The public Props facade and probed JIT layout
+remain intact. All 633 unit and 34 integration tests pass, formatting and strict module
+audits pass, and strict Clippy's diagnostic titles/counts match the existing 86/88 baseline
+(some diagnostics now point to the extracted files).
+
+This structural commit does not claim a speedup. The next coordinated change replaces
+per-object `(Rc<str>, Property)` entries with shared property-name layouts and contiguous
+Property slots, including the native key-probe and creation-cache paths. Reserved constructor
+names must stay invisible until their values are initialized; deletion and divergent
+constructor paths must detach shared names without affecting another object.
