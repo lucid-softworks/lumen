@@ -1008,3 +1008,33 @@ gain and one enabled outlier at 313 us; Djot is flat. DeltaBlue remains roughly 
 `LUMEN_JIT_NO_INLINE_METHOD=1` disables the bypass. The external optimizer directory retains
 `inline-method-{results,summary,metadata}.json`, the comparison driver/workload and
 `lumen-inline-method`. No builds or tests overlapped these timings.
+
+### Current full-suite comparison after retained changes
+
+Three rotated classic V8 version 7 runs on September 7, 2026 use retained commit `24cfb1b`,
+Node 24.18.0 and Bun 1.3.14. Scores are higher-is-better; each cell is the median of three
+runs. This snapshot includes the numeric CFG/register/input work and method-owner bypass,
+and excludes the rejected forwarded-call cache.
+
+| Benchmark | Lumen | Node | Bun |
+| --- | ---: | ---: | ---: |
+| Richards | 23488 | 65591 | 72563 |
+| DeltaBlue | 3551 | 154200 | 108400 |
+| Crypto | 23812 | 91784 | 119825 |
+| RayTrace | 6290 | 135788 | 302582 |
+| EarleyBoyer | 3623 | 146866 | 155680 |
+| RegExp | 1641 | 22319 | 30548 |
+| Splay | 10203 | 77653 | 95467 |
+| NavierStokes | 37766 | 68789 | 60190 |
+| Composite | 8558 | 82895 | 97052 |
+
+The composite remains 9.69x below Node and 11.34x below Bun. Lumen's three scores were
+8558, 8559 and 8544; Node ranged 79457–83305 and Bun 95813–99039. NavierStokes is within
+2x both engines, but the overall goal remains unmet. This is a current comparison, not an
+attribution of aggregate improvement against older binaries measured under different host
+conditions. The same-binary DeltaBlue comparison above establishes the latest 5.2% gain.
+
+All nine runs exited successfully with all eight benchmark scores. No Lumen builds, tests
+or profiling runs overlapped the timings. The external optimizer directory retains
+`current-v8-{results,summary,metadata}.json` (including host CPU snapshots),
+`compare-current-v8.py` and the exact `lumen-current-v8` executable.
