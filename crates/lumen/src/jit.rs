@@ -58,6 +58,11 @@ mod local_load;
     target_arch = "aarch64",
     any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
+mod local_store;
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 mod numeric_cfg;
 
 use std::rc::Rc;
@@ -2794,47 +2799,19 @@ pub fn compile(
                 local_load::emit(&mut a, *slot, pc, layout, last_uses.contains(pc), l_unwind);
             }
             Op::StoreLocal(slot) if fast & 16 != 0 && (*slot as u32) * 16 + 16 < 4096 => {
-                let off = *slot as u32 * 16;
-                let slow = a.new_label();
-                let done = a.new_label();
-                a.ldrb_imm(9, 22, off);
-                if rc_ok {
-                    let drop_old = a.new_label();
-                    a.cmp_imm_w(9, 5);
-                    a.b_cond(C_EQ, drop_old);
-                    let mv = a.new_label();
-                    a.cmp_imm_w(9, 6);
-                    a.b_cond(C_LO, mv);
-                    a.ldr_imm(10, 22, off + 8);
-                    a.ldur(9, 10, rc_strong);
-                    a.cmp_imm_x(9, 1);
-                    a.b_cond(C_LS, drop_old);
-                    a.sub_imm(9, 9, 1);
-                    a.stur(9, 10, rc_strong);
-                    a.b(mv);
-                    // Last references and BigInts need a real destructor, but StoreLocal itself
-                    // cannot throw. Drop only the old slot through the tiny dedicated helper,
-                    // then keep the actual stack-to-slot move in generated code.
-                    a.bind(drop_old);
-                    a.mov(0, 19);
-                    a.movz(1, 0, 0);
-                    a.add_imm(2, 22, off);
-                    a.ldr_imm(16, 21, (H_DROP_AT * 8) as u32);
-                    a.blr(16);
-                    a.bind(mv);
-                } else {
-                    a.cmp_imm_w(9, 4);
-                    a.b_cond(C_HI, slow);
+                let continuation = (fast & 8 != 0
+                    && local_store::can_forward(
+                        ops,
+                        pc,
+                        last_uses.contains(pc + 1),
+                        targeted[pc + 1],
+                    ))
+                .then(|| pc_labels.get(pc + 2).copied())
+                .flatten();
+                if continuation.is_some() {
+                    targeted[pc + 2] = true;
                 }
-                a.ldur(9, 20, -16);
-                a.ldur(10, 20, -8);
-                a.str_imm(9, 22, off);
-                a.str_imm(10, 22, off + 8);
-                a.sub_imm(20, 20, 16);
-                a.b(done);
-                a.bind(slow);
-                emit_exec(&mut a, pc as u32, l_unwind);
-                a.bind(done);
+                local_store::emit(&mut a, *slot, pc, layout, l_unwind, continuation);
             }
             Op::UpdateLocal(slot, kind) if fast & 32 != 0 && (*slot as u32) * 16 + 8 < 4096 => {
                 let off = *slot as u32 * 16;

@@ -1038,3 +1038,28 @@ All nine runs exited successfully with all eight benchmark scores. No Lumen buil
 or profiling runs overlapped the timings. The external optimizer directory retains
 `current-v8-{results,summary,metadata}.json` (including host CPU snapshots),
 `compare-current-v8.py` and the exact `lumen-current-v8` executable.
+
+### Forwarding adjacent last-use stores and loads
+
+Mapped `Plan.execute` already moves its last-use receiver out of the local slot, including
+after inline expansion. The remaining adjacent `StoreLocal; LoadLocal` pair now retains the
+new owner on the operand stack when existing liveness proves the load is a last use. The
+old slot owner is still destroyed correctly, internal Empty retains the original TDZ path,
+and independently targeted loads are excluded. The continuation is explicitly targeted.
+Store lowering now lives in `jit/local_store.rs`.
+
+All 671 unit and 34 integration tests pass, including old object/BigInt destruction,
+reference payloads, captures, handlers and TDZ cases. Conformance remains 21001/21003,
+differential testing 1996 agreements/four budget skips, and Clippy the same 86/88 baseline.
+Formatting and the strict new-module audit pass.
+
+Three rotated same-binary comparisons were flat on numeric/object transfer kernels
+(52.22 and 52.00 us per 10000 transfers with either mode) and Djot (3915→3931 ms).
+DeltaBlue improved in each pair: 9838→9408, 9343→9247, 9295→9130 ms. Its median reduction
+is a modest 1.0%; the first pair also shows larger host variation. This is incremental
+application progress, not a general throughput breakthrough. Current Node/Bun medians for
+DeltaBlue were 200/316 ms, so the overall goal remains far away.
+
+`LUMEN_JIT_NO_STORE_LOAD_FORWARD=1` disables the forwarding. The external optimizer directory
+retains `store-forward-{results,summary,metadata}.json`, its driver/workload and
+`lumen-store-forward`. No builds or tests overlapped these timings.
