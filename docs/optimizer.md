@@ -2276,3 +2276,89 @@ relaxation. Older pre-mixed-loop profiles do not establish the current dominant
 CPU mechanism. Existing counters establish sustained native backedges, while
 source inspection suggests redundant wide-Value shadow traffic; their actual
 runtime share must be established before a register-home implementation.
+
+### Fresh Delta native-region attribution (2026-09-08)
+
+A diagnostic build from f9a1bfe captures exact mixed-loop entry/body/exit ranges.
+Four labels bracket the sections without emitting instructions. The assembler
+resolves their byte offsets after conditional-branch relaxation. A focused test
+forces an imm19 branch expansion, checks the shifted boundaries, and verifies
+that mapped and unmapped builds emit identical words. The diagnostic changes
+are archived externally and the exact original source hashes were restored;
+none of this instrumentation is retained in the production tree.
+
+`profile-delta-iterator-step.py` runs the assertion-preserving standalone Delta
+workload for 20,000 repetitions using the separate diagnostic binary. It samples
+six seconds after 1.1 seconds of process CPU, captures same-process final code
+words, maps and counters, then waits for verified completion. Engine and sample
+both exit zero. Printed elapsed time is not a benchmark: mixed-loop counters,
+mapping and region diagnostics are enabled. Binary SHA-256 is
+`aa8992e06d671cb788afbc2f7dbf0e044da412dcb29e66b37c699f103e90f8bc`.
+
+Independent accounting finds one main-thread root and 5,139 exclusive samples.
+All 3,600 anonymous JIT samples map uniquely; 93 allocation records have no
+reused or overlapping ranges. The exact disjoint attribution is:
+
+| Location | Exclusive samples | Whole sample |
+| --- | ---: | ---: |
+| Mixed-loop body | 1462 | 28.45% |
+| Other generated code | 2138 | 41.60% |
+| Native helpers | 1539 | 29.95% |
+
+The `i|c|(inline this)|(inline this)` chunk has 1,464 samples, of which 1,462
+are in its mixed body. No sampled instruction lands in the marked entry/exit
+sections; this does not imply those sections have zero cost. Counters record
+2,199,987 entries, 202,451,451 backward jumps, 2,199,986 normal PC134 exits and
+one PC118 exit. Frequent fallback is not supported as this run's main problem.
+
+GC has 130 direct gc_collect samples (2.53%) and 388 samples under its ancestry
+(7.55%, including the direct samples); these numbers must not be added. Native
+exclusive categories include allocator routines 250, destruction routines 250,
+GC scanning symbols 187, hashing 67 and intrinsic helpers 107. Constructor or
+intrinsic ancestry also contains descendant JavaScript execution and is not an
+allocation-CPU measure.
+
+`analyze-delta-native-traffic.py` extracts the exact 30,351 final words for the
+matched allocation, checks the following map record, assembles those words and
+disassembles them with otool. The mixed body spans byte offsets 420..42512 and
+contains 10,523 instructions. Direct x23 addressing identifies shadow memory in
+this body. Static and sampled-position categories are:
+
+| Instruction category | Static instructions | Body sample positions |
+| --- | ---: | ---: |
+| Shadow loads | 201 | 250 |
+| Shadow stores | 144 | 43 |
+| Other memory loads | 2985 | 872 |
+| Other memory stores | 4 | 0 |
+| Branches | 3289 | 107 |
+| Other instructions | 3900 | 190 |
+
+Sampled instruction positions are not stall attribution or a removable-cost
+estimate. Static counts include cold alternative branches. Nevertheless, the
+large non-shadow load/guard footprint changes the next investigation: arithmetic
+register homes alone do not address most sampled body positions. The next proof
+to investigate is reuse of invariant object, array and prototype facts inside
+the existing no-helper, numeric-write-only region. Numeric values can still
+change through aliases; shape identity alone does not prove per-instance
+attributes; neither may be cached without stronger proof. Register allocation
+remains relevant but should follow measured probe/guard attribution rather than
+an assumption that wide shadow copies dominate the entire loop.
+
+Independent inspection of pointer setup and probe templates attributes 292 body
+samples to object exotic/plain/shape checks and 204 to entry length/accessor
+checks: together 33.9% of body samples. Prototype-link loads account for another
+40 samples and packed property value loads for 44. These counts identify sampled
+instructions, not their latency or a guaranteed optimization benefit.
+
+The bounded next candidate is reusing proofs for the same receiver and stable
+object chains within one native-region invocation. The admitted numeric-only
+stores preserve object edges, descriptors, prototype links and array layout.
+Varying receivers must retain per-instance checks, and possibly aliasing writes
+require numeric payloads to reload. Every exit discards the proofs; reentry must
+validate them again. The external `mixed-loop-invariant-guards-design.md` records
+the proposed analysis and correctness checks; it is not yet implemented.
+
+Raw workload, sample, maps, summary, code words/disassembly and traffic JSON are
+archived under `delta-iterator-step-profile*` and `delta-native-*`; diagnostic
+source, tests and binary are in `mixed-native-ranges-candidate`. This is new
+profiling evidence, not an additional speedup or achievement of the Node/Bun goal.
