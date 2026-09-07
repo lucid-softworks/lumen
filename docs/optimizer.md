@@ -113,3 +113,21 @@ claimed from switch support alone.
 Validation: 605 unit tests, 17 integration tests, and all 111 switch conformance tests
 passed. Strict Clippy remains at its existing 86/88 diagnostics, with none in the new
 module. The module passes the strict structure audit.
+
+## Compiled enumeration
+
+`for…in` loops with uncaptured `let`/`const` identifier heads now compile. Key snapshots
+use the interpreter's shared namespace/prototype enumeration implementation; stepping
+rechecks property presence to skip deleted keys. Hidden frame slots retain the base,
+private key snapshot and cursor. No user array iterator is invoked. Captured loop heads
+retain their per-iteration environments through the interpreter. SSA regions explicitly
+decline the new cursor-writing operation until that local effect is modeled.
+
+This completes the two compilation dependencies for Djot's main renderer. Three-round
+medians were 5587 ms before and 5182 ms after (about 7% less time), versus Node 227 ms
+and Bun 143 ms. The parser entry still falls back because of a captured default parameter.
+
+Validation: 606 unit tests, 21 integration tests and 20438/20439 language conformance
+tests passed. The sole conformance failure is the previously reproduced dynamic import
+case. Formatting/structure checks pass; strict Clippy remains at the same existing
+86/88 errors, with no diagnostics in the new modules.

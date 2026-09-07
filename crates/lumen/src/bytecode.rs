@@ -17,6 +17,7 @@
 //! immediately). Selectable via the `LUMEN_TIER` / `LUMEN_TIER_THRESHOLD` env vars, the CLI's
 //! `--tier`, or `Engine::set_tier`.
 
+mod for_in;
 mod switch;
 mod this_binding;
 
@@ -466,6 +467,10 @@ pub enum Op {
     /// `for…of` prologue: pops the iterable, pushes the iterator object then its `next` method
     /// (GetIterator with the sync hint, via the interpreter's own helper).
     GetIter,
+    /// Snapshot for-in keys with the interpreter's enumeration rules.
+    ForInKeys,
+    /// Step a private key snapshot, skipping deleted properties. Base, keys, cursor slots.
+    ForInStepL(u16, u16, u16),
     /// One `for…of` step against the iterator/next stored in the two slots: pushes the yielded
     /// value (or `undefined` at exhaustion) then a has-value bool — a following `JumpIfFalse`
     /// exits the loop, so the branch reuses existing machinery in both tiers. A `next`/`done`/
@@ -3798,12 +3803,20 @@ impl Compiler {
                 self.patch(jmp_after);
                 Ok(())
             }
+            Stmt::ForInOf {
+                decl: Some(kind @ (DeclKind::Let | DeclKind::Const)),
+                left: Pattern::Ident(name),
+                right,
+                of: false,
+                is_await: false,
+                body,
+            } => self.for_in_statement(*kind, name, right, body),
             // `for (x of it)`: the iterator and its `next` live in hidden slots; each step is
             // IterStepL + JumpIfFalse (existing branch machinery in both tiers); the body runs
             // under a per-iteration handler whose pad closes the iterator in throw mode and
             // rethrows. Exhaustion closes nothing (spec); break/return close via
-            // `emit_exit_cleanup` / the Return arm. for-in, `for await`, destructuring bindings
-            // and captured loop variables stay on the tree-walker.
+            // `emit_exit_cleanup` / the Return arm. Other for-in heads, `for await`, and
+            // captured loop variables stay on the tree-walker.
             Stmt::ForInOf {
                 decl,
                 left,
@@ -5796,6 +5809,17 @@ fn run_vm(
                 let s = i.to_string(&v)?;
                 stack.push(Value::Str(s));
             }
+            Op::ForInKeys => {
+                let base = pop!();
+                let keys = i.for_in_keys(&base)?;
+                stack.push(i.make_array(keys));
+            }
+            Op::ForInStepL(base, keys, cursor) => {
+                let value = for_in::step(i, slots, base, keys, cursor)?;
+                let more = value.is_some();
+                stack.push(value.unwrap_or(Value::Undefined));
+                stack.push(Value::Bool(more));
+            }
             Op::GetIter => {
                 let v = pop!();
                 let (it, nx) = i.get_iterator(&v)?;
@@ -6885,6 +6909,8 @@ impl Chunk {
             Op::CallSpread(argc) => (*argc as usize + 1, 1),
             Op::CallSpreadThis(argc) => (*argc as usize + 2, 1),
             Op::ToStr => (1, 1),
+            Op::ForInKeys => (1, 1),
+            Op::ForInStepL(..) => (0, 2),
             Op::GetIter => (1, 2),
             Op::IterStepL(..) => (0, 2),
             Op::IterCloseL(_) => (0, 0),
@@ -6993,6 +7019,7 @@ pub(crate) unsafe extern "C" fn jit_exec(
             | Op::SetElemLocalDrop(_)
             | Op::ToPropKeyLocal(_)
             | Op::IterStepL(..)
+            | Op::ForInStepL(..)
             | Op::IterCloseL(_)
             | Op::IterAbortL(_)
             | Op::ResetSlots(..)
@@ -9606,6 +9633,17 @@ unsafe fn jit_exec_inner(
             let v = pop!();
             let s = i.to_string(&v)?;
             push!(Value::Str(s));
+        }
+        Op::ForInKeys => {
+            let base = pop!();
+            let keys = i.for_in_keys(&base)?;
+            push!(i.make_array(keys));
+        }
+        Op::ForInStepL(base, keys, cursor) => {
+            let value = for_in::step(i, slots, base, keys, cursor)?;
+            let more = value.is_some();
+            push!(value.unwrap_or(Value::Undefined));
+            push!(Value::Bool(more));
         }
         Op::GetIter => {
             let v = pop!();

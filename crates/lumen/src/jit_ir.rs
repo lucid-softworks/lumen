@@ -209,6 +209,7 @@ pub(crate) enum IrError {
     NoLoop,
     TooLarge,
     Handler,
+    UnmodeledLocalEffect { pc: usize },
     IrreducibleEntry { block: BlockId },
     BadLocal { pc: usize, slot: usize },
     StackUnderflow { pc: usize },
@@ -282,6 +283,12 @@ impl RegionIr {
             // Until exceptional SSA exists, even a syntactically outside try region is kept on
             // the baseline tier.  This is intentionally conservative and easy to relax later.
             return Err(IrError::Handler);
+        }
+
+        if let Some(pc) = ops.iter().position(|op| matches!(op, Op::ForInStepL(..))) {
+            // This helper mutates a hidden cursor; keep it out of SSA regions until that
+            // local effect has a representation. Baseline compiled enumeration stays valid.
+            return Err(IrError::UnmodeledLocalEffect { pc });
         }
 
         let mut values = Vec::new();
