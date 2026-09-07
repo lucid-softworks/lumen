@@ -63,7 +63,6 @@ impl<'a> Branches<'a> {
         no: usize,
         next: Option<usize>,
     ) {
-        a.fcmp(24, 25);
         if self.fallthrough && yes > source && no > source {
             // Forward edges cannot require a continuation poll. Branch directly to the
             // non-adjacent successor, leaving the physically next block as fallthrough.

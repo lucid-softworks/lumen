@@ -39,6 +39,12 @@ pub(super) struct Plan {
     pub exits: Vec<usize>,
 }
 
+impl Plan {
+    pub(super) fn home(&self, slot: u16) -> u32 {
+        16 + self.locals.iter().position(|s| *s == slot).unwrap() as u32
+    }
+}
+
 pub(super) fn build(chunk: &Chunk, cfg: &Cfg, head: usize) -> Option<Plan> {
     if !cfg.handler_roots().is_empty() || cfg.linear_loop_latch(chunk.jit_ops(), head).is_some() {
         return None;

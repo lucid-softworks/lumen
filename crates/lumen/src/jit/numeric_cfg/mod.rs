@@ -3,6 +3,7 @@ mod arrays;
 mod branches;
 mod emit;
 mod plan;
+mod values;
 use super::asm::Asm;
 use crate::{bytecode::Chunk, jit_ir::Cfg};
 

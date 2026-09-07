@@ -861,3 +861,40 @@ recurrences rather than assuming branch count is the limiting cost.
 `LUMEN_JIT_NO_CFG_FALLTHROUGH=1` preserves the previous edge layout for comparison. The
 external optimizer directory retains `cfg-fallthrough-{results,summary,metadata}.json`, its
 comparison driver and `lumen-cfg-fallthrough`. No builds or tests overlapped these timings.
+
+### Numeric operand register allocation
+
+Numeric CFG operands now borrow local register homes instead of copying each read onto a
+fixed register stack. Temporary registers are reused when their values die. Before a local
+is overwritten, any live reads of its old value are preserved together; duplicate values
+can share a register until a write requires separation. Numeric definitions followed
+immediately by a local store are coalesced into that destination. Array guards still precede
+result writes, and side exits reconstruct the actual live register mapping.
+
+Two more all-tier tests cover nested assignments, shared expression values, pre/post updates,
+coalesced reads and guard failure with borrowed operands. All 658 unit and 34 integration
+tests pass, with the same 21001/21003 conformance, 1996-agreement/four-skip differential and
+86/88 Clippy baselines. Formatting and the strict module audit pass. The full debug checks
+used `CARGO_INCREMENTAL=0` after sampling showed long incremental-cache hard-link waits on
+the external build disk; release compiler settings were unchanged.
+
+Three rotated same-binary comparisons produced these medians (microseconds per 10000
+iterations for the first four rows):
+
+| Workload | Fixed registers | Allocated registers | Node 24.18.0 | Bun 1.3.14 |
+| --- | ---: | ---: | ---: | ---: |
+| Branched numeric | 17.8 | 10.2 | 7.30 | 5.60 |
+| Nested numeric | 17.8 | 9.33 | 4.32 | 5.30 |
+| Branched array reads | 17.8 | 9.07 | 8.93 | 7.60 |
+| Nested array reads | 17.8 | 9.33 | 7.33 | 7.73 |
+| Djot, milliseconds | 4313 | 4280 | 243 | 243 |
+| DeltaBlue, milliseconds | 10375 | 10188 | 205 | 378 |
+
+All four kernels improve in every pair, reducing time by 43–49%. Three are within 2x both
+other engines; nested numeric remains 2.16x Node. Applications are essentially flat with
+mixed pair directions, so the broader engine goal is still unmet. The classic suite was not
+rerun for this allocator change. No Lumen builds or tests overlapped these measurements.
+
+`LUMEN_JIT_NO_CFG_REGALLOC=1` selects the previous fixed-register emitter in the same binary.
+The external optimizer directory retains `cfg-regalloc-{results,summary,metadata}.json`,
+the comparison driver and `lumen-cfg-regalloc`.

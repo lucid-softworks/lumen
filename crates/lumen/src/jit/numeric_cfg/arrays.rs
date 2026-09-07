@@ -43,7 +43,7 @@ pub(super) fn preamble(a: &mut asm::Asm, plan: &Plan, layout: &JitLayout, fail: 
     }
 }
 
-pub(super) fn read(a: &mut asm::Asm, plan: &Plan, slot: u16, key: u32, fail: usize) {
+pub(super) fn read(a: &mut asm::Asm, plan: &Plan, slot: u16, key: u32, result: u32, fail: usize) {
     let (data, len) = registers(plan, slot);
     a.fcvtzu_w_d(9, key);
     a.ucvtf_d_w(0, 9);
@@ -51,7 +51,7 @@ pub(super) fn read(a: &mut asm::Asm, plan: &Plan, slot: u16, key: u32, fail: usi
     a.b_cond(C_NE, fail); // Exact uint32 only; -0 correctly addresses element zero.
     a.cmp_reg_x(9, len);
     a.b_cond(C_HS, fail);
-    a.ldr_d_lsl3(key, data, 9);
+    a.ldr_d_lsl3(result, data, 9);
 }
 
 #[cfg(test)]
