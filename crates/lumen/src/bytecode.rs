@@ -18,6 +18,7 @@
 //! `--tier`, or `Engine::set_tier`.
 
 mod activation;
+pub(crate) mod collection_insert;
 pub(crate) mod collection_lookup;
 mod for_in;
 mod inline_frames;
@@ -289,7 +290,7 @@ pub const INTRINSIC_REGEXP_EXEC_DISCARD: u8 = 9;
 pub const INTRINSIC_STRING_REPLACE_DISCARD: u8 = 10;
 pub const INTRINSIC_STRING_SPLIT_DISCARD: u8 = 11;
 pub const INTRINSIC_CHAR_AT: u8 = 12;
-// IDs 13..=15 belong to builtins::collection_lookup and its dedicated consuming helper.
+// IDs 13..=17 belong to collection lookup/insertion and their dedicated consuming helpers.
 
 impl CallIc {
     pub const EMPTY: CallIc = CallIc {
@@ -8541,7 +8542,7 @@ unsafe fn jit_call_inner(
                                     {
                                         INTRINSIC_STRING_SPLIT_DISCARD
                                     }
-                                    p => crate::builtins::collection_lookup::intrinsic(p),
+                                    p => crate::builtins::collection_intrinsic(p),
                                 },
                             });
                         }

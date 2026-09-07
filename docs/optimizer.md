@@ -407,3 +407,41 @@ all key categories, live updates/deletions, aliasing, method replacement, receiv
 and foreign-realm errors. Map/Set/WeakMap/WeakSet conformance passes 813/813. Differential
 testing has 1996 agreements and four budget skips. Formatting and strict structure audits
 pass; strict Clippy retains the existing 86/88 diagnostics, with none in the new modules.
+
+### Consuming collection insertion
+
+Map.set and Set.add now have named native implementations and exact-identity JIT helpers
+at their ordinary arities. After the existing depth check and GC poll, the helpers move
+key/value operands into storage and return the original receiver owner. Errors consume
+the same operands without double drops. Brand checks still inspect the live marker and
+backing slot; foreign-realm calls retain their ordinary checked path. Set canonicalizes
+negative zero on both sides of its stored pair, while Map preserves the value's sign.
+
+The storage insertion path also uses a single hash-table entry probe. Existing hash
+collisions still traverse a SameValueZero chain, updates keep their insertion position,
+and new entries append after the old collision head. This avoids a separate find followed
+by another index insertion probe.
+
+Three rotated comparisons against `6bb1663` produced these medians (microseconds per
+10000-entry invocation):
+
+| Workload | Before | After | Node | Bun |
+|---|---:|---:|---:|---:|
+| Map build | 560 | 386.7 | 192 | 117.5 |
+| Map lookup | 250 | 244 | 32.8 | 30.8 |
+| Set build | 560 | 406.7 | 142.9 | 106.7 |
+| Set lookup | 232 | 224 | 26 | 28.8 |
+
+Map/Set construction time falls about 31/27 percent; lookup times are essentially flat.
+The verified Djot parser remains flat at 4587 to 4612 ms (Node/Bun 225/144), as does
+DeltaBlue at 9783 to 9751 ms (198/320). All benchmark output checks pass. Construction
+is still about 2.0–2.8 times slower than Node and 3.3–3.8 than Bun; the broader goal is
+still unfulfilled. The external optimizer directory contains `compare-collection-inserts.py`,
+`collection-inserts-results.json` and `collection-inserts-summary.json`.
+
+Validation: 629 unit and 34 integration tests pass, including both native helper counters,
+ownership/aliasing, negative zero, iterator order, missing arguments, method replacement,
+brand failures and foreign-realm errors. Collection conformance passes 813/813 and
+differential testing has 1996 agreements with four budget skips. Formatting and strict
+module audits pass. Strict Clippy retains the existing 86/88 diagnostics, none in the
+new modules or modified collection storage.

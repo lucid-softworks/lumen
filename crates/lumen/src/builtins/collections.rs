@@ -6,6 +6,7 @@ use crate::interpreter::Interp;
 use crate::value::{Object, Value};
 use std::rc::Rc;
 
+pub(crate) mod insert;
 mod iteration;
 pub(crate) mod lookup;
 mod set_methods;
@@ -112,5 +113,14 @@ fn canonicalize_map_key(k: Value) -> Value {
     match k {
         Value::Num(n) if n == 0.0 && n.is_sign_negative() => Value::Num(0.0),
         other => other,
+    }
+}
+
+pub(crate) fn intrinsic(native: usize) -> u8 {
+    let read = lookup::intrinsic(native);
+    if read != 0 {
+        read
+    } else {
+        insert::intrinsic(native)
     }
 }

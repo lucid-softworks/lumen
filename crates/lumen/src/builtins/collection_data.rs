@@ -72,17 +72,30 @@ impl CollectionData {
             other => other,
         };
         let hash = key_hash(&key);
-        if let Some(slot) = self.find(&key, hash) {
-            self.entries[slot].pair.as_mut().unwrap().1 = value;
-        } else {
-            let slot = self.entries.len();
-            let next = self.index.insert(hash, slot).unwrap_or(NO_SLOT);
-            self.entries.push(Entry {
-                pair: Some((key, value)),
-                next,
-            });
-            self.live_len += 1;
-        }
+        let next = match self.index.entry(hash) {
+            std::collections::hash_map::Entry::Occupied(mut head) => {
+                let mut slot = *head.get();
+                while slot != NO_SLOT {
+                    let entry = &mut self.entries[slot];
+                    let pair = entry.pair.as_mut().unwrap();
+                    if same_value_zero(&pair.0, &key) {
+                        pair.1 = value;
+                        return;
+                    }
+                    slot = entry.next;
+                }
+                head.insert(self.entries.len())
+            }
+            std::collections::hash_map::Entry::Vacant(head) => {
+                head.insert(self.entries.len());
+                NO_SLOT
+            }
+        };
+        self.entries.push(Entry {
+            pair: Some((key, value)),
+            next,
+        });
+        self.live_len += 1;
     }
 
     pub(crate) fn remove(&mut self, key: &Value) -> bool {

@@ -33,6 +33,11 @@ mod captured;
     target_arch = "aarch64",
     any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
+mod collection_insert;
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 mod collection_lookup;
 #[cfg(all(
     target_arch = "aarch64",
@@ -420,6 +425,8 @@ pub(crate) fn helper_table() -> [usize; N_HELPERS] {
         crate::bytecode::jit_make_regexp as *const () as usize,
         crate::bytecode::jit_load_cached_name as *const () as usize,
         crate::bytecode::collection_lookup::read as *const () as usize,
+        crate::bytecode::collection_insert::map_set as *const () as usize,
+        crate::bytecode::collection_insert::set_add as *const () as usize,
     ]
 }
 
@@ -586,7 +593,9 @@ unsafe extern "C" fn jit_scheduler_trace_fail(stage: usize) {
 }
 pub const H_LOAD_CACHED_NAME: usize = 26;
 pub const H_COLLECTION_LOOKUP: usize = 27;
-pub const N_HELPERS: usize = 28;
+pub const H_COLLECTION_MAP_SET: usize = 28;
+pub const H_COLLECTION_SET_ADD: usize = 29;
+pub const N_HELPERS: usize = 30;
 
 /// ARM64 condition codes used by the inline templates.
 #[cfg(all(
@@ -3084,6 +3093,7 @@ pub fn compile(
                             let no_intr = a.new_label();
                             a.ldrb_imm(9, 12, 96); // ic.intrinsic (offset compile-asserted)
                             collection_lookup::emit(&mut a, pc, done, l_unwind);
+                            collection_insert::emit(&mut a, pc, 1, done, l_unwind);
                             a.cmp_imm_w(9, crate::bytecode::INTRINSIC_CHAR_AT as u32);
                             a.b_cond(C_EQ, char_at);
                             a.cmp_imm_w(9, crate::bytecode::INTRINSIC_CHAR_CODE_AT as u32);
@@ -3325,6 +3335,7 @@ pub fn compile(
                                 matches!(ops.get(pc + 1), Some(Op::Pop)).then(|| a.new_label());
                             let no_intr = a.new_label();
                             a.ldrb_imm(9, 12, 96);
+                            collection_insert::emit(&mut a, pc, 2, done, l_unwind);
                             a.cmp_imm_w(9, crate::bytecode::INTRINSIC_STRING_SLICE as u32);
                             a.b_cond(C_EQ, slice);
                             a.cmp_imm_w(9, crate::bytecode::INTRINSIC_OBJECT_HAS_OWN as u32);

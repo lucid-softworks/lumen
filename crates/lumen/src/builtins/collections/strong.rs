@@ -68,21 +68,9 @@ pub(super) fn install_map_like(
     it.extra_protos.insert(name, proto.clone());
 
     let adder: NativeFn = if is_set {
-        |i, this, a| {
-            let ptr = coll_ptr_kind(i, &this, Some("Set"))?;
-            let key = canonicalize_map_key(arg(a, 0));
-            let e = i.map_data.entry(ptr).or_default();
-            e.insert(key.clone(), key);
-            Ok(this)
-        }
+        super::insert::set_add
     } else {
-        |i, this, a| {
-            let ptr = coll_ptr_kind(i, &this, Some("Map"))?;
-            let (key, val) = (canonicalize_map_key(arg(a, 0)), arg(a, 1));
-            let e = i.map_data.entry(ptr).or_default();
-            e.insert(key, val);
-            Ok(this)
-        }
+        super::insert::map_set
     };
     it.def_method(
         &proto,
