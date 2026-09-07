@@ -60,10 +60,25 @@ pub(super) fn emit_read(
         }
         _ => unreachable!("preflighted read"),
     };
+    publish(a, object_only, outoff, fail);
+    true
+}
+
+/// Reuse a live data-entry proof in x15, but always reload the current payload.
+/// Only own-property and method entries qualify; dense elements use other storage.
+pub(super) fn emit_proven_entry(a: &mut Asm, layout: &JitLayout, op: Op, outoff: u32, fail: usize) {
+    debug_assert!(matches!(
+        op,
+        Op::GetProp(..) | Op::GetPropThis(..) | Op::GetPropLocal(..) | Op::GetMethod(..)
+    ));
+    a.ldur(13, 15, layout.entry_value as i32);
+    publish(a, matches!(op, Op::GetMethod(..)), outoff, fail);
+}
+
+fn publish(a: &mut Asm, object_only: bool, outoff: u32, fail: usize) {
     decode(a, object_only, fail);
     a.str_imm(12, 23, outoff);
     a.str_imm(13, 23, outoff + 8);
-    true
 }
 
 /// Packed input x13 becomes wide tag x12/payload x13 without cloning.

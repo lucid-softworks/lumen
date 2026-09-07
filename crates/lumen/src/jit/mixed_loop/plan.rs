@@ -11,6 +11,7 @@ pub(super) struct Plan {
     pub exits: Vec<usize>,
     pub slots: usize,
     pub depth: usize,
+    pub read_proofs: Vec<usize>,
 }
 
 impl Plan {
@@ -21,7 +22,12 @@ impl Plan {
         self.stack(self.depth)
     }
     pub fn frame_bytes(&self) -> u32 {
-        self.control() + 32
+        // At most 16 locals, 8 operands and 32 proof pairs: <= 928 bytes,
+        // aligned to 16 and within the assembler's unshifted imm12 allocation.
+        self.control() + 32 + self.read_proofs.len() as u32 * 16
+    }
+    pub fn proof_offset(&self, index: usize) -> u32 {
+        self.control() + 16 + index as u32 * 16
     }
 }
 
@@ -72,12 +78,28 @@ pub(super) fn build(chunk: &Chunk, cfg: &Cfg, head: usize) -> Option<Plan> {
     if !backedge || exits.is_empty() || exits.iter().any(|&pc| pc >= chunk.jit_ops().len()) {
         return None;
     }
+    let pcs: Vec<_> = pcs.into_iter().collect();
+    let read_proofs = if std::env::var_os("LUMEN_JIT_NO_MIXED_READ_PROOFS").is_none()
+        && pcs
+            .iter()
+            .all(|&pc| super::read_proofs::preserves_entries(chunk.jit_ops()[pc]))
+    {
+        super::invariants::analyze(chunk, &ir, &pcs)
+            .sites()
+            .iter()
+            .take(32)
+            .map(|site| site.pc)
+            .collect()
+    } else {
+        Vec::new()
+    };
     Some(Plan {
         head,
-        pcs: pcs.into_iter().collect(),
+        pcs,
         exits: exits.into_iter().collect(),
         slots,
         depth: cfg.max_settled_stack(),
+        read_proofs,
     })
 }
 

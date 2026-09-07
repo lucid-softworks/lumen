@@ -1,5 +1,5 @@
 //! Native loop control with borrowed wide locals; every exit publishes complete VM owners.
-use super::{compare_branch, control, operations, plan::Plan, shadow, stats::Stats};
+use super::{compare_branch, control, operations, plan::Plan, read_proofs, shadow, stats::Stats};
 use crate::{
     bytecode::{Chunk, Op},
     jit::{asm::Asm, local_exit},
@@ -93,6 +93,7 @@ fn initialize_frame(a: &mut Asm, plan: &Plan) {
         shadow::copy(a, 22, slot as u32 * 16, slot as u32 * 16);
     }
     a.movz(24, 1024, 0);
+    read_proofs::initialize(a, plan);
     #[cfg(test)]
     {
         a.str_imm(31, 23, plan.control());
@@ -169,7 +170,7 @@ fn emit_step(
             layout,
         ),
         _ => {
-            operations::emit(a, chunk, plan, layout, op, depth, fail);
+            operations::emit(a, chunk, plan, layout, (pc, op), depth, fail);
             a.b(destination(pc + 1));
         }
     }

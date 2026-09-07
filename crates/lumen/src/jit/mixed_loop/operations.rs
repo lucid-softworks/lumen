@@ -1,5 +1,5 @@
 //! Helper-free operations over shadow locals and operands.
-use super::{numeric, plan::Plan, probes, shadow};
+use super::{numeric, plan::Plan, read_proofs, shadow};
 use crate::{
     bytecode::{Chunk, Op},
     jit::{
@@ -29,7 +29,7 @@ pub(super) fn emit(
     chunk: &Chunk,
     plan: &Plan,
     layout: &JitLayout,
-    op: Op,
+    (pc, op): (usize, Op),
     depth: usize,
     fail: usize,
 ) {
@@ -68,7 +68,7 @@ pub(super) fn emit(
         | Op::GetPropThis(..)
         | Op::GetMethod(..)
         | Op::GetElem
-        | Op::GetElemLocal(_) => read(a, chunk, plan, layout, op, depth, fail),
+        | Op::GetElemLocal(_) => read(a, chunk, plan, layout, (pc, op), depth, fail),
         Op::SetProp(..)
         | Op::SetPropDrop(..)
         | Op::SetPropThisDrop(..)
@@ -110,7 +110,7 @@ fn read(
     chunk: &Chunk,
     plan: &Plan,
     layout: &JitLayout,
-    op: Op,
+    (pc, op): (usize, Op),
     depth: usize,
     fail: usize,
 ) {
@@ -145,7 +145,7 @@ fn read(
         }
         _ => unreachable!("read opcode"),
     };
-    assert!(probes::emit_read(a, layout, chunk, op, out, fail));
+    read_proofs::emit(a, layout, chunk, plan, (pc, op), out, fail);
 }
 
 fn write(

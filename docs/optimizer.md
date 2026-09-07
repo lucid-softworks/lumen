@@ -2362,3 +2362,99 @@ Raw workload, sample, maps, summary, code words/disassembly and traffic JSON are
 archived under `delta-iterator-step-profile*` and `delta-native-*`; diagnostic
 source, tests and binary are in `mixed-native-ranges-candidate`. This is new
 profiling evidence, not an additional speedup or achievement of the Node/Bun goal.
+
+### Invocation-local property-entry proofs (2026-09-08)
+
+The next candidate addresses repeated own-property and method validation within
+the existing mixed native loop. A conservative SSA provenance pass identifies
+reads from `this`, unchanged entry locals and conditional Object-valued property
+chains. Copies preserve identity; non-header phi parameters qualify only when
+every admitted incoming identity agrees. Varying array elements do not become
+invariant receivers. This analysis selects profitable sites; it never substitutes
+for runtime receiver identity or the initial live descriptor/prototype checks.
+
+Up to 32 selected read sites receive borrowed `(receiver, entry address)` pairs
+after the existing native shadow/control area. Every region invocation clears
+the receiver words. A first read or receiver mismatch runs the existing full
+probe and publishes the pair only after all guards succeed. A receiver match
+reuses the validated entry address, reloads its current packed payload and keeps
+the existing Number/Object decode guards. Numeric values are never memoized.
+Method inlining still executes its original target guard. Dense-element probes
+are unchanged.
+
+This relies on the region's helper-free effect contract: admitted heap writes
+only replace an existing ordinary Number with a Number. They cannot change entry
+storage, descriptors, prototypes, object edges or array layout. A separate
+explicit opcode effect whitelist disables all proofs if future supported effects
+have not opted into that stronger contract. Original physical owners retain the
+borrowed graph. Every normal, guard or budget exit discards the proof area;
+publication still clones only live shadow locals and operands before releasing
+displaced owners. The maximum frame is 928 bytes, including all 32 proof pairs.
+
+`LUMEN_JIT_NO_MIXED_READ_PROOFS=1` disables selection and extra frame allocation
+for same-binary comparisons. Release code has no new execution counters. Tests
+use a hit counter to prove execution, including a bound that requires all 32
+cells to be used across a 1,100-iteration budget crossing. Five analysis tests
+cover equivalent and conflicting identities, mutable roots, method outputs and
+the site cap. Five runtime tests cover numeric aliases, differing receivers,
+readonly data reads, descriptor/getter and object-graph changes with GC,
+array resizing, method/prototype replacement, exact fallback effects and the
+maximum frame. They pass across all tiers and with the feature disabled.
+
+Validation passes 748 unit and 34 integration tests. The broad conformance run
+passes 21,047/21,049 with the same lexical-arguments and dynamic-import failures;
+differential testing agrees on 1,996 cases with four budget skips. Formatting and
+the strict module audit pass. Clippy's error-message multiset exactly matches
+the existing 86-library/88-library-test baseline; it is not a clean Clippy run.
+
+The same release binary (`db194412a2dd351716dad42662ccf76e7434519b6cd921c78379d9e4c7c1c9d1`)
+completed 48 sequential, verified timings in three rotated rounds. The first
+36 compare proof reuse off/on with Node 24.18.0 and Bun on the existing kernels,
+10,000-parse Djot workload and 5,000-iteration standalone Delta workload:
+
+| Workload (lower is better) | Off median | On median | Time change | Paired time changes |
+| --- | ---: | ---: | ---: | --- |
+| ObjectArray, µs / 20,000 visits | 237.5 | 228 | -4.00% | -0.87%, -4.00%, -9.02% |
+| PolymorphicMethods, µs / 20,000 visits | 305 | 290 | -4.92% | -5.00%, -4.92%, -4.92% |
+| Djot, ms | 3493 | 3509 | +0.46% | +0.18%, +0.29%, +0.77% |
+| DeltaBlue, ms | 8817 | 8320 | -5.64% | -6.02%, -9.99%, -5.40% |
+
+Every kernel and standalone Delta pair improves. Every parser pair is slower;
+no parser gain is claimed. Twelve additional classic-suite runs give these
+medians (scores are higher-is-better):
+
+| Benchmark | Off | On | Node | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| Richards | 23568 | 23412 | 65994 | 72913 |
+| DeltaBlue | 3782 | 3947 | 154187 | 111085 |
+| Crypto | 24008 | 24067 | 92037 | 120066 |
+| RayTrace | 6438 | 6505 | 136750 | 307169 |
+| EarleyBoyer | 3641 | 3605 | 146883 | 159394 |
+| RegExp | 1642 | 1655 | 22547 | 30973 |
+| Splay | 10325 | 10390 | 80749 | 96355 |
+| NavierStokes | 38321 | 38655 | 70935 | 72122 |
+| Score (version 7) | 8682 | 8750 | 83617 | 100229 |
+
+Classic Delta improves 4.36%, with all three pairs improving 4.34–4.56%.
+Richards declines 0.66%, with all pairs declining 0.59–0.66%. The composite
+median improves 0.78%, but pairs are mixed (-0.31%, +0.98%, +0.48%); this is not
+a consistent overall-suite gain. Other nonzero score directions are mixed,
+including EarleyBoyer's 0.99% median decline. The candidate is retained for
+repeatable standalone and classic Delta gains, with these counter-results
+preserved. Current composite score ratios remain 9.56× Node / 11.45× Bun, and
+parser time ratios remain 15.39× / 24.37×. The within-2× goal is not achieved.
+
+After every timing process finished, a separate assertion-preserving diagnostic
+enabled mixed-loop counters and region logging in the same binary. Delta emits
+one 113-op native plan with nine proof sites, 549,987 entries and 50,651,451
+backward jumps; exits are 549,986 at PC134 and one at PC118. Djot emits **zero
+mixed-loop plans**. Thus direct proof-cache execution or frame initialization
+does not explain the observed parser difference. The timing difference remains
+recorded, without an unsupported causal attribution. Diagnostic elapsed times
+are not benchmark evidence.
+
+Both schedules, strict outputs, medians and executable/driver/workload hashes
+were independently audited. Source, timing rows, summaries, diagnostic logs and
+validation are archived under `mixed-read-proofs-*` and `lumen-mixed-read-proofs-*`
+in the external optimizer directory. The follow-up dense-element layout design
+is still only a proposal; its small static load savings are not a measured gain.

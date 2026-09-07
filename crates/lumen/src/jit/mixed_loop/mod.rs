@@ -4,10 +4,12 @@ mod control;
 #[cfg(test)]
 mod control_tests;
 mod emit;
+mod invariants;
 mod numeric;
 mod operations;
 mod plan;
 mod probes;
+mod read_proofs;
 #[cfg(test)]
 mod regression_tests;
 mod shadow;
@@ -62,9 +64,10 @@ pub(super) fn try_emit(
     }
     if std::env::var_os("LUMEN_JIT_REGIONLOG").is_some() {
         eprintln!(
-            "[jit-region] head {pc}: mixed shadow loop ({} ops, {} locals)",
+            "[jit-region] head {pc}: mixed shadow loop ({} ops, {} locals, {} read proofs)",
             plan.pcs.len(),
-            plan.slots
+            plan.slots,
+            plan.read_proofs.len()
         );
     }
     emit::emit(a, chunk, cfg, &plan, layout, baseline);
