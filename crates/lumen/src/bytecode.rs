@@ -18,6 +18,7 @@
 //! `--tier`, or `Engine::set_tier`.
 
 mod for_in;
+mod parameters;
 mod switch;
 mod this_binding;
 
@@ -2077,7 +2078,7 @@ fn compile_inner(
     // Parameters: plain identifiers only, one positional slot each (a sloppy duplicate name
     // resolves to the later parameter, matching the env behavior where the later insert wins).
     // A captured parameter keeps its positional slot (dead) but homes in the activation env.
-    let mut defaulted: Vec<(u16, &Expr)> = Vec::new();
+    let mut defaulted: Vec<(u16, &Expr, Option<u32>)> = Vec::new();
     for (k, p) in func.params.iter().enumerate() {
         if p.rest {
             log_bail("params", "rest parameter");
@@ -2088,10 +2089,10 @@ fn compile_inner(
             return None;
         };
         if let Some(d) = &p.default {
-            // Lowerable defaults: an uncaptured identifier parameter whose default expression
-            // can't observe this-or-later parameters (see `default_expr_safe`).
-            if captured.contains(name) {
-                log_bail("params", "captured defaulted parameter");
+            // Captured defaults need a bounded initialization proof; uncaptured defaults
+            // retain the existing expression-safety check below.
+            if captured.contains(name) && !parameters::captured_default_safe(func, name, d) {
+                log_bail("params", "unsafe captured defaulted parameter");
                 return None;
             }
             let banned: std::collections::HashSet<&str> = func.params[k..]
@@ -2101,11 +2102,12 @@ fn compile_inner(
                     _ => None,
                 })
                 .collect();
-            if !default_expr_safe(d, &banned) {
+            if !parameters::default_expr_safe(d, &banned) {
                 log_bail("params", "unsafe default expression");
                 return None;
             }
-            defaulted.push((k as u16, d));
+            let cap = captured.contains(name).then(|| c.name_idx(name));
+            defaulted.push((k as u16, d, cap));
         }
         let slot = c.fresh_slot(name);
         if captured.contains(name) {
@@ -2119,14 +2121,8 @@ fn compile_inner(
     c.n_params = func.params.len();
     // Parameter defaults fill missing/undefined arguments before anything else runs (spec
     // order: parameter binding precedes var/function hoisting).
-    for (slot, d) in defaulted {
-        c.emit(Op::LoadLocal(slot));
-        c.emit(Op::Undef);
-        c.emit(Op::StrictEq);
-        let jf = c.emit(Op::JumpIfFalse(0));
-        c.expr(d).ok()?;
-        c.emit(Op::StoreLocal(slot));
-        c.patch(jf);
+    for (slot, d, cap) in defaulted {
+        c.parameter_default(slot, d, cap).ok()?;
     }
     // Function-scoped `var`s and hoisted function declarations from the shared hoist plan.
     for op in crate::interpreter::collect_hoist_ops(&func.body, func.is_strict, &[]) {
@@ -2604,59 +2600,6 @@ fn log_bail(what: &str, detail: &str) {
 /// Compilation bail: the construct is outside the v0 subset.
 struct Bail;
 type CResult = Result<(), Bail>;
-
-/// Whether a parameter default is in the compiler's lowerable subset: no reference to any
-/// *banned* name (this parameter itself or a later one — the spec's param-scope TDZ would throw
-/// where slots would read a seeded `undefined`), and no nested function/class (whose capture
-/// analysis of a *parameter expression* scope the slot model doesn't carry). Whitelist
-/// recursion: unknown constructs answer false (the function stays on the tree-walker).
-fn default_expr_safe(e: &Expr, banned: &std::collections::HashSet<&str>) -> bool {
-    match e {
-        Expr::Num(_)
-        | Expr::BigInt(_)
-        | Expr::Str(_)
-        | Expr::Bool(_)
-        | Expr::Null
-        | Expr::Undefined
-        | Expr::This
-        | Expr::Regex { .. } => true,
-        Expr::Ident(n) => !banned.contains(n.as_str()),
-        Expr::Paren(x) | Expr::ToStr(x) | Expr::Unary { arg: x, .. } => {
-            default_expr_safe(x, banned)
-        }
-        Expr::Update { arg, .. } => default_expr_safe(arg, banned),
-        Expr::Binary { left, right, .. } | Expr::Logical { left, right, .. } => {
-            default_expr_safe(left, banned) && default_expr_safe(right, banned)
-        }
-        Expr::Cond { test, cons, alt } => {
-            default_expr_safe(test, banned)
-                && default_expr_safe(cons, banned)
-                && default_expr_safe(alt, banned)
-        }
-        Expr::Member { obj, .. } => default_expr_safe(obj, banned),
-        Expr::Index { obj, index, .. } => {
-            default_expr_safe(obj, banned) && default_expr_safe(index, banned)
-        }
-        Expr::Call { callee, args, .. } | Expr::New { callee, args } => {
-            default_expr_safe(callee, banned)
-                && args.iter().all(|a| match a {
-                    ArrayElem::Item(x) | ArrayElem::Spread(x) => default_expr_safe(x, banned),
-                    ArrayElem::Hole => true,
-                })
-        }
-        Expr::Array(elems) => elems.iter().all(|a| match a {
-            ArrayElem::Item(x) | ArrayElem::Spread(x) => default_expr_safe(x, banned),
-            ArrayElem::Hole => true,
-        }),
-        Expr::Object(props) => props.iter().all(|p| match p {
-            PropDef::KeyValue { key, value } => {
-                !matches!(key, PropKey::Computed(_)) && default_expr_safe(value, banned)
-            }
-            _ => false,
-        }),
-        _ => false,
-    }
-}
 
 /// Whether `e` provably cannot reassign the local `name` (for fused element ops, which defer the
 /// base-slot read past this expression's evaluation). Whitelist recursion: any variant not

@@ -131,3 +131,19 @@ Validation: 606 unit tests, 21 integration tests and 20438/20439 language confor
 tests passed. The sole conformance failure is the previously reproduced dynamic import
 case. Formatting/structure checks pass; strict Clippy remains at the same existing
 86/88 errors, with no diagnostics in the new modules.
+
+## Captured literal defaults
+
+Captured parameters can now use primitive literals or empty object/array defaults. The
+initializer writes the captured binding only for an absent/undefined argument. Defaults
+with effects or parameter-scope dependencies, and same-name hoisted-function conflicts,
+remain on the interpreter. Existing uncaptured-default analysis moved into
+`bytecode/parameters.rs` alongside the new initialization path.
+
+The parser entry still encounters constant computed keys in its handler object, so this
+step alone measured flat (5451 ms before, 5470 ms after). Those static keys are the next
+compilation dependency.
+
+Validation: 608 unit tests, 24 integration tests and the same 20438/20439 language
+conformance tests passed. The remaining failure and strict-Clippy baseline are unchanged.
+The new module passes strict structure checks.
