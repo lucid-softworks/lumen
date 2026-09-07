@@ -97,3 +97,19 @@ Validation: 604 unit tests and 13 public-boundary integration tests passed. The 
 20438/20439 language conformance tests passed, with only the previously reproduced
 dynamic-import failure. Strict Clippy still reports the existing 86/88 errors outside
 these modules. The new modules pass strict structure checks.
+
+## Case-block lexical declarations
+
+Switch lowering now creates the case block's shared lexical scope after evaluating the
+discriminant, initializes every case's `let`/`const` to TDZ before testing cases, and
+preserves fallthrough, default placement and outer-loop control flow. The lowering is
+extracted into `bytecode/switch.rs`.
+
+This removes one renderer compilation blocker, but Djot's renderer still contains an
+unsupported `for…in` loop. Its three-round median stayed flat (5541 ms before, 5546 ms
+after). Compiled enumeration is the next coverage dependency; no renderer speedup is
+claimed from switch support alone.
+
+Validation: 605 unit tests, 17 integration tests, and all 111 switch conformance tests
+passed. Strict Clippy remains at its existing 86/88 diagnostics, with none in the new
+module. The module passes the strict structure audit.

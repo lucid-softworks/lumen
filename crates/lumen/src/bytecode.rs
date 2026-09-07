@@ -17,6 +17,7 @@
 //! immediately). Selectable via the `LUMEN_TIER` / `LUMEN_TIER_THRESHOLD` env vars, the CLI's
 //! `--tier`, or `Engine::set_tier`.
 
+mod switch;
 mod this_binding;
 
 use std::rc::Rc;
@@ -3747,78 +3748,7 @@ impl Compiler {
             // so fall-through is just falling through. Any lexical/class/function declaration
             // directly in a case body bails — the oracle gives all cases one shared block scope
             // whose TDZ interleavings slots don't model.
-            Stmt::Switch { disc, cases } => {
-                for case in cases {
-                    for s in &case.body {
-                        match s {
-                            Stmt::VarDecl {
-                                kind:
-                                    DeclKind::Let
-                                    | DeclKind::Const
-                                    | DeclKind::Using
-                                    | DeclKind::AwaitUsing,
-                                ..
-                            }
-                            | Stmt::ClassDecl(_)
-                            | Stmt::FuncDecl(_) => return Err(Bail),
-                            _ => {}
-                        }
-                    }
-                }
-                self.expr(disc)?;
-                let tmp = self.fresh_slot("%switch%");
-                self.emit(Op::StoreLocal(tmp));
-                // Phase 1: the test chain. Each match jumps to its (not yet emitted) body.
-                let mut body_jumps: Vec<(usize, usize)> = Vec::new();
-                for (ci, case) in cases.iter().enumerate() {
-                    if let Some(test) = &case.test {
-                        self.emit(Op::LoadLocal(tmp));
-                        self.expr(test)?;
-                        self.emit(Op::StrictEq);
-                        let jf = self.emit(Op::JumpIfFalse(0));
-                        let jb = self.emit(Op::Jump(0));
-                        body_jumps.push((ci, jb));
-                        self.patch(jf);
-                    }
-                }
-                let jdefault = self.emit(Op::Jump(0));
-                self.loops.push(LoopCtx {
-                    labels: std::mem::take(&mut self.pending_labels),
-                    is_switch: true,
-                    ..LoopCtx::default()
-                });
-                // Phase 2: bodies, contiguous and in source order.
-                let mut body_starts = vec![0usize; cases.len()];
-                let mut r = Ok(());
-                'bodies: for (ci, case) in cases.iter().enumerate() {
-                    body_starts[ci] = self.ops.len();
-                    for s in &case.body {
-                        r = self.stmt(s);
-                        if r.is_err() {
-                            break 'bodies;
-                        }
-                    }
-                }
-                let ctx = self.loops.pop().unwrap();
-                r?;
-                for (ci, at) in body_jumps {
-                    match &mut self.ops[at] {
-                        Op::Jump(t) => *t = body_starts[ci] as u32,
-                        _ => unreachable!(),
-                    }
-                }
-                match cases.iter().position(|c| c.test.is_none()) {
-                    Some(di) => match &mut self.ops[jdefault] {
-                        Op::Jump(t) => *t = body_starts[di] as u32,
-                        _ => unreachable!(),
-                    },
-                    None => self.patch(jdefault),
-                }
-                for b in ctx.breaks {
-                    self.patch(b);
-                }
-                Ok(())
-            }
+            Stmt::Switch { disc, cases } => self.switch_statement(disc, cases),
             // `try { ... } catch (e?) { ... }` — no `finally` (bails), catch param an ident or none.
             // On a throw in the try region the VM unwinds to `catch_pc` with the exception pushed.
             Stmt::Try {
