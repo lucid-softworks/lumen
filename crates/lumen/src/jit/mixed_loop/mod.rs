@@ -1,4 +1,5 @@
 //! Borrowed shadow-state loops with precise publication after numeric heap effects.
+mod compare_branch;
 mod control;
 #[cfg(test)]
 mod control_tests;

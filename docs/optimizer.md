@@ -1777,3 +1777,104 @@ establish a useful speedup. No hardware cause is inferred from code size alone. 
 experiment is rejected; the prepared full classic comparison is not run because these
 results already fail the retention case. Comparison/branch fusion remains a separate next
 candidate and does not depend on this experiment.
+
+### Numeric comparison/branch fusion in native shadow loops (2026-09-07)
+
+This candidate fuses a numeric comparison immediately followed by JumpIfFalse, bypassing
+wide Boolean materialization and the subsequent generic truthiness dispatch. Selection
+requires both operations in the admitted plan and the same CFG block, a forward conditional
+edge, and consistent comparison/branch/successor stack depths. Independent branch targets
+are CFG leaders, so the same-block test conservatively preserves any separately produced
+Boolean input. Both original operand cells remain intact until numeric guards succeed;
+a failure resumes at the comparison PC after publishing all prior writes and live operands.
+Success branches directly using the established floating-point condition codes. Logical
+successor depth discards both operands; popped shadow copies remain non-owning.
+
+The original baseline code and label bindings remain present. The consumed private branch
+label has no independent native predecessor. No fallthrough experiment changes are included.
+`LUMEN_JIT_NO_MIXED_LOOP_COMPARE=1` restores the separate comparison/branch emission while
+keeping the mixed-loop backend enabled. Emission control is split into a bounded step helper
+so the entrypoint retains region construction and exact exit publication responsibilities.
+
+All 714 unit and 34 integration tests pass. Fourteen focused mixed-loop tests include actual
+successful fusion, all eight comparisons with NaN/signed zero/infinities, a real ternary CFG
+whose independently targeted branch is rejected, and nonnumeric coercion after an earlier
+heap write. The coercion test requires an actual fused numeric-guard failure, rather than
+allowing property-read fallback alone to satisfy coverage. Formatting and strict structural
+checks pass; Clippy matches the existing 86/88 diagnostic multiset exactly.
+
+A fresh instrumented DeltaBlue run preserves the prior 549,987 entries, 50,651,451 native
+backedges and normal/PC118 exit counts. Its plan-function allocation changes from 122,092 to
+121,404 bytes with diagnostics enabled in both maps. This is coverage/code-size evidence,
+not a speed claim. Comparison timings and the retention decision follow below.
+
+The rebuilt conformance runner passes 21,001/21,003 selected tests with the same two known
+failures; the rebuilt differential fuzzer reports 1,996 agreements and four budget skips.
+Thirty-six result-verified timing runs use three rotated rounds of the same binary with
+fusion disabled/enabled, Node v24.18.0 and Bun. Diagnostics and inherited `LUMEN_*` variables
+are disabled; only the original-emission mode adds the comparison-disable flag. No own
+builds, tests or profiling overlap timing runs. External artifacts use `mixed-compare-*`.
+
+| Workload (lower is better) | Separate operations | Fused | Node | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| ObjectArray, microseconds / 20k visits | 260 | 235 | 26.4 | 20.8 |
+| PolymorphicMethods, microseconds / 20k visits | 320 | 305 | 78.46 | 30.4 |
+| Djot, milliseconds | 3920 | 3925 | 227 | 144 |
+| DeltaBlue, milliseconds | 8921 | 8763 | 195 | 310 |
+
+ObjectArray time decreases 9.62% by median, PolymorphicMethods 4.69% and DeltaBlue 1.77%,
+with every pair faster. DeltaBlue pairs are 8921→8744, 8865→8777 and 8977→8763.
+Djot changes +0.13% with mixed pairs and remains effectively flat, at 17.3× Node and
+27.3× Bun in this session. These are incremental comparisons to the existing shadow-loop
+backend, not a combined claim including the rejected fallthrough experiment. The full
+suite/parser objective remains unfulfilled; parser-specific work is still required.
+
+A separate 12-run, three-round classic v8-v7 comparison completes with every score verified.
+Its `mixed-compare-classic-*` artifacts preserve raw results and CPU snapshots. Median
+scores (higher is better):
+
+| Benchmark | Separate operations | Fused | Node | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| Richards | 23628 | 23452 | 65556 | 72606 |
+| DeltaBlue | 3712 | 3712 | 154366 | 109511 |
+| Crypto | 23989 | 24025 | 91785 | 119663 |
+| RayTrace | 6400 | 6307 | 136750 | 303099 |
+| EarleyBoyer | 3635 | 3620 | 148383 | 156821 |
+| RegExp | 1649 | 1638 | 22797 | 30366 |
+| Splay | 10309 | 10292 | 80627 | 95475 |
+| NavierStokes | 38139 | 38397 | 70787 | 71309 |
+| Score (version 7) | 8663 | 8626 | 83721 | 98987 |
+
+The composite decreases 0.43% by median, with pairs changing -0.84%, -2.82% and +0.70%.
+Every workload has mixed paired directions; the middle enabled run includes a 12.16%
+EarleyBoyer regression and a 4.09% Crypto regression. The medians must not hide those results,
+nor do the CPU snapshots establish a particular cause. No broad suite speedup is claimed.
+Fusion is retained for its repeated kernel improvements and standalone DeltaBlue reduction,
+with the full-suite result recorded as a limitation. Remaining composite gaps are 9.71× Node
+and 11.48× Bun. The measured binary SHA-256 is
+`edf061d7b7ca0d4354f1896fa74e7a5ac836e3aacd39ea14d1c74900516dd112`;
+`mixed-compare-measured-source.zip` includes new source files, and
+`mixed-compare-validation.json` records validation logs and executable hashes.
+
+This goal turn completes 84 verified timing runs: 36 for rejected fallthrough, then 36
+application/kernel and 12 classic runs for comparison fusion. The next native-loop candidate
+is conservative block-local shadow-tag knowledge, preserved externally and not applied.
+A separate parser-specific substring candidate is also prepared, not applied.
+
+After all timing runs finish, a fresh six-second Djot sample on the same build verifies
+40,000 parse/render outputs (12,640,000 HTML characters). The instrumented timing is invalid
+for performance comparison. Artifacts are `djot-mixed-compare.sample`, the associated
+profile maps/stdout/metadata and `profile-mixed-compare-djot.py`. No mixed-loop statistics
+records are emitted for this workload, consistent with the loop extension not reaching its
+parser work. This fresh profile, rather than the earlier archived sample alone, informs the
+next allocation/string investigation.
+
+The fresh profile contains 4,623 main-thread samples. Exclusive named top-of-stack counts
+include Value destruction 206, GC collection 175, property lookup 117, prototype-chain
+lookup 101, object construction 68, regex matching 34 and regexp_exec 24. Free/custom
+allocation/tiny-allocation symbols contribute 102/83/44 samples respectively; memcmp 135
+and memmove 84 cannot safely be assigned specifically to strings. Named UTF-16 conversion
+routines have only eight and five samples. Inlining, anonymous native code and the sample
+report's five-hit threshold limit attribution. The ASCII substring candidate is a bounded
+experiment, not an established major bottleneck. Regex result-object materialization and
+ownership traffic remain stronger architectural hypotheses requiring caller attribution.
