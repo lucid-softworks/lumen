@@ -164,3 +164,26 @@ Validation: 609 unit tests and 26 integration tests passed, as did 1996 differen
 fuzzer cases (four budget skips). Language conformance remains 20438/20439, with the
 existing dynamic-import failure. Formatting and strict structure checks pass; strict
 Clippy remains at its existing 86/88 diagnostics outside the new module.
+
+## Rejected forwarded-call cache experiment
+
+A lazy target cache behind `Function.prototype.call` reused the existing guarded call
+entry, including realm/epoch validation and weak identity pins. Target mutation, fresh
+closures, overrides, proxies, strict receivers, recursion and throw-ownership tests
+passed across all tiers. However, three-round medians stayed flat on Djot (4986 to
+4998 ms) and regressed on DeltaBlue (9734 to 9917 ms). The implementation was removed;
+the experiment patch and raw measurements remain in the external benchmark directory.
+
+## Rejected automatic-GC cache-retention experiment
+
+Keeping the bounded allocator cache warm after automatic collections, while retaining
+pressure relief for explicit host collections, did not improve these workloads. Three
+rotated rounds measured Djot at 5009 to 4988 ms and DeltaBlue at 9745 to 9759 ms. Median
+maximum resident sizes were approximately 74 MiB and 49 MiB for both revisions. This
+change was removed too; allocation-cache flushing is not the material bottleneck here.
+
+An initial inlining-budget probe also regressed: raising the source budget from 320 to
+4096 operations and the callee limit from 96 to 512 changed DeltaBlue from 9725 to
+10775 ms and Djot from 4979 to 5152 ms. Delaying that wider recompile to 1000 calls
+did not help. These are single-round rejection probes, not performance claims; defaults
+remain unchanged. The next experiment targets forwarded-call elimination explicitly.
