@@ -365,3 +365,45 @@ clear remaining gap; the indexed storage fixed scaling without closing constant 
 The complete report, commands, source hashes, versions and every raw sample are in
 `/Volumes/XEX-VM/codex-builds/lumen-engine-comparison-virtual-frames/`. The runner is
 `run.py`; `results.json`, `summary.json` and `report.md` contain the measurements.
+
+### Guarded collection reads
+
+The collection lookup profile put receiver checks, value cleanup and native call dispatch
+ahead of hash-table lookup. Map.get, Map.has and Set.has now share named implementations
+that borrow their keys and resolve the backing table once. Exact builtin call-IC hits with
+one argument use a dedicated consuming helper, preserving the active-realm guard, depth
+limit, GC polling, virtual-frame location and exception cleanup. The helper clones a read
+result before releasing its operands, since the result can alias the key or receiver.
+It still checks the live writable `__ck` marker; method replacement, proxies, incompatible
+receivers and foreign-realm errors retain their checked behavior.
+
+An initial implementation routed these reads through the shared intrinsic helper. That
+version regressed Map/Set lookup medians from 360/340 to 385/365 microseconds and was
+replaced. The smaller dedicated helper avoids unrelated intrinsic dispatch, dynamic
+operand cleanup and constructor-state transitions. Collection reads never enter JS or
+coerce their keys, so those transitions are unobservable here.
+
+Three rotated comparisons against `eaf0e46` measured these medians (microseconds per
+10000-entry invocation, lower is better):
+
+| Workload | Before | After | Node | Bun |
+|---|---:|---:|---:|---:|
+| Map build | 570 | 570 | 192 | 118.8 |
+| Map lookup | 366.7 | 248 | 33.2 | 31.6 |
+| Set build | 560 | 560 | 148.6 | 108 |
+| Set lookup | 333.3 | 228 | 26.4 | 26 |
+
+Lookup time falls about 32%; throughput rises about 46–48%. Djot remains flat at
+4624 to 4637 ms, versus Node/Bun 229/144 ms. DeltaBlue remains flat at 9778 to 9807 ms,
+versus 207/310 ms. All benchmark output checks pass. The remaining lookup gap is about
+7.5–8.8 times; this change does not close the engine-wide or parser gap.
+
+The external optimizer directory contains `compare-collection-read-helper.py`,
+`collection-read-helper-results.json` and `collection-read-helper-summary.json`.
+The rejected shared-helper measurements are in `collection-intrinsics-results.json`.
+
+Validation: 626 unit and 34 integration tests pass, including warmed native-path counters,
+all key categories, live updates/deletions, aliasing, method replacement, receiver brands
+and foreign-realm errors. Map/Set/WeakMap/WeakSet conformance passes 813/813. Differential
+testing has 1996 agreements and four budget skips. Formatting and strict structure audits
+pass; strict Clippy retains the existing 86/88 diagnostics, with none in the new modules.

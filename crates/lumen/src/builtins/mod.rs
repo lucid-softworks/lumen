@@ -12,6 +12,7 @@ use std::rc::Rc;
 mod atomics;
 pub(crate) mod collection_data;
 mod collections;
+pub(crate) use collections::lookup as collection_lookup;
 mod dataview;
 mod date;
 mod disposable;

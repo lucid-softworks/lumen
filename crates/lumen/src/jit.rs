@@ -33,6 +33,11 @@ mod captured;
     target_arch = "aarch64",
     any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
+mod collection_lookup;
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 mod inline_frames;
 #[cfg(all(
     target_arch = "aarch64",
@@ -414,6 +419,7 @@ pub(crate) fn helper_table() -> [usize; N_HELPERS] {
         crate::bytecode::jit_strict_eq as *const () as usize,
         crate::bytecode::jit_make_regexp as *const () as usize,
         crate::bytecode::jit_load_cached_name as *const () as usize,
+        crate::bytecode::collection_lookup::read as *const () as usize,
     ]
 }
 
@@ -579,7 +585,8 @@ unsafe extern "C" fn jit_scheduler_trace_fail(stage: usize) {
     }
 }
 pub const H_LOAD_CACHED_NAME: usize = 26;
-pub const N_HELPERS: usize = 27;
+pub const H_COLLECTION_LOOKUP: usize = 27;
+pub const N_HELPERS: usize = 28;
 
 /// ARM64 condition codes used by the inline templates.
 #[cfg(all(
@@ -3076,6 +3083,7 @@ pub fn compile(
                             let array_push = array_intrinsics_on.then(|| a.new_label());
                             let no_intr = a.new_label();
                             a.ldrb_imm(9, 12, 96); // ic.intrinsic (offset compile-asserted)
+                            collection_lookup::emit(&mut a, pc, done, l_unwind);
                             a.cmp_imm_w(9, crate::bytecode::INTRINSIC_CHAR_AT as u32);
                             a.b_cond(C_EQ, char_at);
                             a.cmp_imm_w(9, crate::bytecode::INTRINSIC_CHAR_CODE_AT as u32);

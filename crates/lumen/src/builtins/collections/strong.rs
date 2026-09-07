@@ -91,38 +91,12 @@ pub(super) fn install_map_like(
         adder,
     );
     if !is_set {
-        it.def_method(&proto, "get", 1, |i, this, a| {
-            let ptr = coll_ptr_kind(i, &this, Some("Map"))?;
-            let key = arg(a, 0);
-            Ok(i.map_data
-                .get(&ptr)
-                .and_then(|e| e.lookup(&key).cloned())
-                .unwrap_or(Value::Undefined))
-        });
+        it.def_method(&proto, "get", 1, super::lookup::map_get);
     }
-    // has/delete are shared but brand-check the exact kind via kind-specific fn pointers.
     let has_fn: NativeFn = if is_set {
-        |i, this, a| {
-            let ptr = coll_ptr_kind(i, &this, Some("Set"))?;
-            let key = arg(a, 0);
-            Ok(Value::Bool(
-                i.map_data
-                    .get(&ptr)
-                    .map(|e| e.contains(&key))
-                    .unwrap_or(false),
-            ))
-        }
+        super::lookup::set_has
     } else {
-        |i, this, a| {
-            let ptr = coll_ptr_kind(i, &this, Some("Map"))?;
-            let key = arg(a, 0);
-            Ok(Value::Bool(
-                i.map_data
-                    .get(&ptr)
-                    .map(|e| e.contains(&key))
-                    .unwrap_or(false),
-            ))
-        }
+        super::lookup::map_has
     };
     it.def_method(&proto, "has", 1, has_fn);
     // Delete marks the matching entry with a tombstone (keeping its slot) so a concurrent forEach /

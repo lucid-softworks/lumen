@@ -7,6 +7,7 @@ use crate::value::{Object, Value};
 use std::rc::Rc;
 
 mod iteration;
+pub(crate) mod lookup;
 mod set_methods;
 mod strong;
 mod weak;
