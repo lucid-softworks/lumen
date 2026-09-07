@@ -952,3 +952,26 @@ have mixed pair directions, with visible host timing variation. This is retained
 collector refactor, not an established speed gain. No builds or tests overlapped timings.
 The external optimizer directory retains `gc-edges-{results,summary,metadata}.json`, the
 comparison driver, `lumen-gc-edges` and the fresh `djot-cfg-inputs.sample`.
+
+### Rejected forwarded-call cache experiment
+
+A mapped DeltaBlue profile attributed 72.3% of exclusive samples to generated code, with
+32.3% in the chunk consistent with `Plan.execute`. Property/method-read templates account
+for roughly 31% overall. All anonymous addresses matched unique emitted ranges. The external
+`delta-mapped.{maps,sample,out,summary.json}` and `profile-mapped-delta.py` preserve the
+same-process mapping; fused operations and shared tails remain coarse attributions.
+
+A separate experiment added a lazy identity cache for `Function.prototype.call` targets,
+reusing existing call-cache lifetime, epoch, realm and ownership checks. All 668 unit and
+34 integration tests passed, with unchanged conformance, differential and Clippy baselines.
+However, three rotated comparisons consistently regressed focused calls: 460 to 630 us and
+470 to 650 us per 10000 forwarded calls. DeltaBlue was flat (9875 to 9870 ms), and Djot's
+4033 to 3971 ms medians had mixed pair directions and host variation. Node/Bun can optimize
+these simple forwarded-call kernels much further (roughly 2.4–3 us).
+
+The cache-hit assembly adds a 304-byte frame, a 104-byte cache-entry copy, inline accounting
+and a separate committed-call layer while preserving the original activation setup. Those
+costs plausibly outweigh the skipped guards for simple targets. The experiment is removed;
+there is no production forwarded-cache module or flag. Its source archive, executable,
+comparison driver and `forwarded-cache-{results,summary,metadata}.json` remain in the external
+optimizer directory. No builds or tests overlapped its timings.
