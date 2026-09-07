@@ -181,7 +181,7 @@ impl Props {
             .packed_ref()
             .into_iter()
             .flat_map(|p| p.iter())
-            .filter(|p| !matches!(p.value(), Value::Empty))
+            .filter(|p| !p.is_empty())
             .chain(self.entries.iter().map(|(_, p)| p))
     }
 

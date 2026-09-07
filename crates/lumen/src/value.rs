@@ -1284,6 +1284,7 @@ impl Property {
     }
 }
 
+pub(crate) mod gc_edges;
 mod props;
 pub use props::Props;
 pub(crate) use props::{

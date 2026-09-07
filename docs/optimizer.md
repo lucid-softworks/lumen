@@ -931,3 +931,24 @@ builds or tests overlapped the timings; the classic suite was not rerun for this
 `LUMEN_JIT_NO_CFG_INPUTS=1` disables this extension. The external optimizer directory
 retains `cfg-inputs-{results,summary,metadata}.json`, `compare-cfg-inputs.py`, the verified
 workloads and `lumen-cfg-inputs`.
+
+### Object-edge scanning
+
+A fresh Djot sample still showed collection and property ownership work among the larger
+native costs. Heap edge enumeration now lives in `value/gc_edges.rs`, where packed object
+tags are checked directly. Scalar properties are no longer widened and cloned merely to
+reject them as graph edges, and packed-array hole filtering uses the empty tag directly.
+Every physical object reference remains counted, including duplicate value/getter/setter
+owners; the source borrow is released before following self references.
+
+All 665 unit and 34 integration tests pass. New tests cover duplicate edge ownership,
+self references, non-object payloads, and accessor storage without an accessor flag.
+Clippy matches the existing 86/88 baseline, and formatting and the strict new-module audit
+pass. This change does not alter JavaScript execution or collector root selection.
+
+Three alternating application comparisons are effectively flat: Djot medians are
+3980 ms before and 4008 ms after; DeltaBlue 9835 ms before and 9875 ms after. Both workloads
+have mixed pair directions, with visible host timing variation. This is retained as a small
+collector refactor, not an established speed gain. No builds or tests overlapped timings.
+The external optimizer directory retains `gc-edges-{results,summary,metadata}.json`, the
+comparison driver, `lumen-gc-edges` and the fresh `djot-cfg-inputs.sample`.

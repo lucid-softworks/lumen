@@ -4328,40 +4328,6 @@ impl Interp {
         t
     }
 
-    /// Append object references held directly by `o` into a reusable scratch vector. The source
-    /// borrow is released before callers follow the collected edges, which remains essential for
-    /// self-referential objects; reusing the allocation avoids one fresh Vec per object per GC
-    /// pass.
-    fn obj_refs_into(o: &Gc, refs: &mut Vec<Gc>) {
-        refs.clear();
-        let b = o.borrow();
-        if let Some(p) = &b.proto {
-            refs.push(p.clone());
-        }
-        for prop in b.props.values() {
-            if let Value::Obj(p) = prop.value() {
-                refs.push(p);
-            }
-            if let Some(Value::Obj(p)) = prop.getter() {
-                refs.push(p.clone());
-            }
-            if let Some(Value::Obj(p)) = prop.setter() {
-                refs.push(p.clone());
-            }
-        }
-        if let Callable::Bound(bound) = &b.call {
-            refs.push(bound.target.clone());
-            if let Value::Obj(p) = &bound.this {
-                refs.push(p.clone());
-            }
-            for a in &bound.args {
-                if let Value::Obj(p) = a {
-                    refs.push(p.clone());
-                }
-            }
-        }
-    }
-
     /// Refcount-based cycle collector. An object whose `Rc::strong_count` exceeds the references it
     /// receives from other heap objects has an *external* holder — the Rust stack, a scope, the
     /// global, or a side table — so it (and everything it reaches) is live. Everything else is
@@ -4406,7 +4372,7 @@ impl Interp {
         let mut object_refs = Vec::new();
         let mut scope_refs = Vec::new();
         for o in &live {
-            Self::obj_refs_into(o, &mut object_refs);
+            crate::value::gc_edges::object_refs_into(o, &mut object_refs);
             for p in object_refs.drain(..) {
                 let pb = p.borrow();
                 pb.gc_internal.set(pb.gc_internal.get() + 1);
@@ -4503,7 +4469,7 @@ impl Interp {
         // Mark everything reachable from the roots, across both node types.
         loop {
             if let Some(o) = stack.pop() {
-                Self::obj_refs_into(&o, &mut object_refs);
+                crate::value::gc_edges::object_refs_into(&o, &mut object_refs);
                 for p in object_refs.drain(..) {
                     if !p.borrow().gc_mark.get() {
                         p.borrow().gc_mark.set(true);
