@@ -209,3 +209,37 @@ for forwarding, guard misses, constructor behavior and warmed caller reflection.
 general optimizer must preserve or reconstruct inlined frames at observable operations;
 identity guards alone do not make frame elimination semantics-preserving. The external
 benchmark directory retains the experiment patch, source and measurements.
+
+## Shared compiled activation layouts
+
+Compiled closures now share an immutable name-to-slot layout and allocate a contiguous
+array of binding values for each activation. Parameters, lexical bindings, lexical
+`this` and hoisted functions initialize slots directly. Structural map changes promote
+the activation to the dynamic representation and invalidate cached entry addresses.
+Zero generation is reserved for pristine layouts and is never reused after wrap.
+
+ARM64 captured loads/stores/initialization can use the activation's binding-array base
+and a compile-time offset. The generated path checks the scope generation and borrow
+state, preserves TDZ and reference ownership, and falls back after structural mutation
+or for BigInt operations. Ordinary call frames remain present.
+
+The work is split across `interpreter/bindings.rs`, `interpreter/bindings/layout.rs`,
+`bytecode/activation.rs` and `jit/captured.rs`. A callback test promotes a live compiled
+activation's map and verifies subsequent captured reads/writes use the new storage.
+
+The immutable-layout-only stage measured flat on Djot (5016 to 5019 ms) and approximately
+flat on DeltaBlue (9965 to 9832 ms). With native captured access, three rotated rounds
+measured Djot at 4985 to 4983 ms and DeltaBlue at 9799 to 9788 ms. No application-level
+speedup is claimed. Node/Bun medians were 232/147 ms for Djot and 197/317 ms for DeltaBlue.
+
+A separate verified closure diagnostic (100000 activations, ten reads per activation)
+used 3.30 billion retired instructions versus 3.68 billion before, with maximum resident
+size approximately 76 versus 110 MiB. This was one diagnostic run during unrelated build
+activity, so its wall-clock timing is not used as a performance claim. Shared layouts
+also enable caching deeper lexical lookup paths across fresh activations; the current
+name cache only handles direct and one-parent binding resolutions.
+
+Validation: 613 unit tests, 34 integration tests and 1996 differential cases passed
+(four fuzzer budget skips). Language conformance remains 20438/20439 with the existing
+dynamic-import failure. Strict Clippy remains at the existing 86/88 diagnostics, with
+none in the new modules. Formatting and strict module-structure checks pass.

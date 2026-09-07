@@ -28,6 +28,11 @@
     target_arch = "aarch64",
     any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
+mod captured;
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 mod local_load;
 
 use std::rc::Rc;
@@ -341,6 +346,9 @@ pub struct JitCtx {
     pub opstat_enabled: bool,
     pub callstat_enabled: bool,
     pub inline_recompile_at: u32,
+    /// Binding-array base owned by this activation, valid only while scope generation is zero.
+    /// Shared-context callees have no captured locals and leave this field untouched.
+    pub captured_base: *mut crate::interpreter::Binding,
 }
 
 impl JitCtx {
@@ -2327,6 +2335,35 @@ pub fn compile(
                     &mut a,
                     layout,
                     chunk.jit_name_cache_ptr(*cache),
+                    pc as u32,
+                    l_unwind,
+                );
+            }
+            Op::LoadCap(name)
+                if fast & 8192 != 0
+                    && load_name_inlinable(layout)
+                    && layout.binding_init.abs_diff(layout.binding_value) < 256
+                    && chunk.jit_capture_offset(*name).is_some() =>
+            {
+                captured::load(
+                    &mut a,
+                    layout,
+                    chunk.jit_capture_offset(*name).unwrap(),
+                    pc as u32,
+                    l_unwind,
+                );
+            }
+            Op::StoreCap(name) | Op::StoreCapInit(name)
+                if fast & 8192 != 0
+                    && load_name_inlinable(layout)
+                    && layout.binding_init.abs_diff(layout.binding_value) < 256
+                    && chunk.jit_capture_offset(*name).is_some() =>
+            {
+                captured::store(
+                    &mut a,
+                    layout,
+                    chunk.jit_capture_offset(*name).unwrap(),
+                    matches!(op, Op::StoreCapInit(_)),
                     pc as u32,
                     l_unwind,
                 );
@@ -21966,6 +22003,7 @@ pub fn run(
         global_body: jit_global_body(i, code),
         genv: Rc::as_ptr(&i.global_env) as usize,
         env_parent_raw,
+        captured_base: chunk.jit_capture_base(&env),
         opstat_enabled: crate::bytecode::jit_opstat_enabled(),
         callstat_enabled: crate::bytecode::jit_callstat_enabled(),
         inline_recompile_at: crate::bytecode::inline_recompile_at(),
@@ -22360,6 +22398,7 @@ unsafe fn run_moved_inner(
         global_body: jit_global_body(i, code),
         genv: Rc::as_ptr(&i.global_env) as usize,
         env_parent_raw,
+        captured_base: chunk.jit_capture_base(&env),
         opstat_enabled: crate::bytecode::jit_opstat_enabled(),
         callstat_enabled: crate::bytecode::jit_callstat_enabled(),
         inline_recompile_at: crate::bytecode::inline_recompile_at(),

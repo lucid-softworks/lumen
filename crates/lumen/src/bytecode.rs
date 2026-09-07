@@ -17,6 +17,7 @@
 //! immediately). Selectable via the `LUMEN_TIER` / `LUMEN_TIER_THRESHOLD` env vars, the CLI's
 //! `--tier`, or `Engine::set_tier`.
 
+mod activation;
 mod for_in;
 mod object_literal;
 mod parameters;
@@ -678,6 +679,7 @@ pub struct Chunk {
     /// Captured bindings to seed into a fresh activation env at entry; empty = no activation
     /// needed (closures, if any, capture the definition env directly).
     cap_inits: Vec<CapInit>,
+    activation_layout: Option<activation::ActivationLayout>,
     /// An inner arrow chain reads the outer `this`: the activation carries a `this` binding.
     env_this: bool,
     /// One inline-cache slot per property-access op (`GetProp`/`SetProp`/`SetPropDrop`/`GetMethod`),
@@ -940,93 +942,10 @@ impl Chunk {
     /// captured — closures then capture the definition env directly, which resolves identically
     /// because none of their free names are outer locals.
     fn make_run_env(&self, i: &Interp, env: &Env, this_val: &Value, args: &[Value]) -> Env {
-        if !self.makes_env() {
-            return env.clone();
+        match &self.activation_layout {
+            Some(layout) => layout.make_env(self, i, env, this_val, args),
+            None => env.clone(),
         }
-        let act = crate::interpreter::new_var_scope_with_capacity(
-            Some(env.clone()),
-            self.cap_inits.len() + usize::from(self.env_this),
-        );
-        // Function-declaration closures capture the activation itself, so they are created after
-        // the borrow below is released.
-        let mut fns: Vec<(u16, Rc<str>)> = Vec::new();
-        {
-            let mut b = act.borrow_mut();
-            for ci in &self.cap_inits {
-                match ci {
-                    CapInit::Param(k, name) => {
-                        b.vars.insert(
-                            name.clone(),
-                            crate::interpreter::Binding {
-                                value: args.get(*k as usize).cloned().unwrap_or(Value::Undefined),
-                                mutable: true,
-                                strict_immutable: false,
-                                initialized: true,
-                                import_ref: None,
-                                deletable: false,
-                            },
-                        );
-                    }
-                    CapInit::Var(name) => {
-                        if !b.vars.contains_key(&**name) {
-                            b.vars.insert(
-                                name.clone(),
-                                crate::interpreter::Binding {
-                                    value: Value::Undefined,
-                                    mutable: true,
-                                    strict_immutable: false,
-                                    initialized: true,
-                                    import_ref: None,
-                                    deletable: false,
-                                },
-                            );
-                        }
-                    }
-                    CapInit::Fn(fidx, name) => fns.push((*fidx, name.clone())),
-                    CapInit::Lexical(name, is_const) => {
-                        b.vars.insert(
-                            name.clone(),
-                            crate::interpreter::Binding {
-                                value: Value::Undefined,
-                                mutable: !is_const,
-                                strict_immutable: *is_const,
-                                initialized: false,
-                                import_ref: None,
-                                deletable: false,
-                            },
-                        );
-                    }
-                }
-            }
-            if self.env_this {
-                b.vars.insert(
-                    "this",
-                    crate::interpreter::Binding {
-                        value: this_val.clone(),
-                        mutable: false,
-                        strict_immutable: true,
-                        initialized: true,
-                        import_ref: None,
-                        deletable: false,
-                    },
-                );
-            }
-        }
-        for (fidx, name) in fns {
-            let v = i.make_function(self.funcs[fidx as usize].clone(), act.clone());
-            act.borrow_mut().vars.insert(
-                name.to_string(),
-                crate::interpreter::Binding {
-                    value: v,
-                    mutable: true,
-                    strict_immutable: false,
-                    initialized: true,
-                    import_ref: None,
-                    deletable: false,
-                },
-            );
-        }
-        act
     }
 }
 
@@ -2239,6 +2158,7 @@ fn compile_inner(
     });
     let cap_cache_len = c.names.len();
     let op_count = c.ops.len();
+    let activation_layout = activation::ActivationLayout::new(&c.cap_inits, c.env_this, &c.names);
     Some(Rc::new(Chunk {
         ops: c.ops,
         consts: c.consts,
@@ -2253,6 +2173,7 @@ fn compile_inner(
         forwarded_capacity_hint: std::cell::Cell::new(0),
         funcs: c.funcs,
         cap_inits: c.cap_inits,
+        activation_layout,
         env_this: c.env_this,
         obj_maps: (0..c.obj_maps)
             .map(|_| std::cell::OnceCell::new())
@@ -6326,8 +6247,14 @@ impl Chunk {
         let (binding, generation) = {
             let mut b = env.borrow_mut();
             let generation = b.vars.generation();
-            let binding = b.vars.get_mut(name).expect("captured binding missing")
-                as *mut crate::interpreter::Binding;
+            let binding = match self
+                .activation_layout
+                .as_ref()
+                .and_then(|layout| layout.binding_mut(&mut b.vars, index))
+            {
+                Some(binding) => binding,
+                None => b.vars.get_mut(name).expect("captured binding missing"),
+            } as *mut crate::interpreter::Binding;
             (binding, generation)
         };
         self.cap_caches[index].set(NameIc {

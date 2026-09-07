@@ -4,7 +4,10 @@
 //! Control flow uses [`Abrupt`] threaded through `Result`: expressions can only ever raise
 //! `Throw`, while statements additionally produce `Return`/`Break`/`Continue` completions.
 
+mod bindings;
 mod this_binding;
+pub(crate) use bindings::BindingLayout;
+pub use bindings::VarMap;
 
 use crate::ast::*;
 use crate::value::*;
@@ -271,194 +274,6 @@ impl Default for RegexpDependencyCache {
     }
 }
 
-/// One scope's binding map, wrapping the raw hash map so every *structural* mutation — anything
-/// that can move entries or change what a name resolves to (insert, remove, clear) — bumps a
-/// generation counter. The bytecode tier's per-site name caches hold a raw `&Binding` pointer
-/// plus the generation they resolved it at (see `bytecode::NameIc`): a matching generation
-/// proves the map hasn't changed shape since, so the pointer is still valid *and* still the
-/// right resolution. In-place binding writes (`get_mut`) intentionally don't bump — they can't
-/// move entries, and a cache read-through observes the new value, which is exactly correct.
-/// Reads pass through via `Deref`; mutations only exist as the inherent methods below, so a new
-/// mutation site can't forget the bump (it won't compile).
-pub struct VarMap {
-    map: VarStorage,
-    generation: std::cell::Cell<u32>,
-}
-
-const SMALL_VAR_MAP_CAPACITY: usize = 8;
-
-enum VarStorage {
-    Small(Vec<(std::rc::Rc<str>, Binding)>),
-    Large(crate::fasthash::FastMap<std::rc::Rc<str>, Binding>),
-}
-
-impl Default for VarMap {
-    fn default() -> Self {
-        Self {
-            map: VarStorage::Small(Vec::new()),
-            generation: std::cell::Cell::new(0),
-        }
-    }
-}
-
-pub enum VarIter<'a> {
-    Small(std::slice::Iter<'a, (std::rc::Rc<str>, Binding)>),
-    Large(std::collections::hash_map::Iter<'a, std::rc::Rc<str>, Binding>),
-}
-
-impl<'a> Iterator for VarIter<'a> {
-    type Item = (&'a std::rc::Rc<str>, &'a Binding);
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            VarIter::Small(iter) => iter.next().map(|(name, binding)| (name, binding)),
-            VarIter::Large(iter) => iter.next(),
-        }
-    }
-}
-
-pub enum VarKeys<'a> {
-    Small(std::slice::Iter<'a, (std::rc::Rc<str>, Binding)>),
-    Large(std::collections::hash_map::Keys<'a, std::rc::Rc<str>, Binding>),
-}
-
-impl<'a> Iterator for VarKeys<'a> {
-    type Item = &'a std::rc::Rc<str>;
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            VarKeys::Small(iter) => iter.next().map(|(name, _)| name),
-            VarKeys::Large(iter) => iter.next(),
-        }
-    }
-}
-
-pub enum VarValues<'a> {
-    Small(std::slice::Iter<'a, (std::rc::Rc<str>, Binding)>),
-    Large(std::collections::hash_map::Values<'a, std::rc::Rc<str>, Binding>),
-}
-
-impl<'a> Iterator for VarValues<'a> {
-    type Item = &'a Binding;
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            VarValues::Small(iter) => iter.next().map(|(_, binding)| binding),
-            VarValues::Large(iter) => iter.next(),
-        }
-    }
-}
-
-impl VarMap {
-    pub(crate) fn with_capacity(capacity: usize) -> VarMap {
-        VarMap {
-            map: if capacity <= SMALL_VAR_MAP_CAPACITY {
-                VarStorage::Small(Vec::with_capacity(capacity))
-            } else {
-                VarStorage::Large(crate::fasthash::FastMap::with_capacity_and_hasher(
-                    capacity,
-                    Default::default(),
-                ))
-            },
-            generation: std::cell::Cell::new(0),
-        }
-    }
-
-    /// The structural generation (name-cache validation token).
-    #[inline]
-    pub(crate) fn generation(&self) -> u32 {
-        self.generation.get()
-    }
-    #[inline]
-    fn bump(&self) {
-        self.generation.set(self.generation.get().wrapping_add(1));
-    }
-    pub fn insert(&mut self, k: impl Into<std::rc::Rc<str>>, v: Binding) -> Option<Binding> {
-        self.bump();
-        let k = k.into();
-        match &mut self.map {
-            VarStorage::Small(entries) => {
-                if let Some((_, old)) = entries.iter_mut().find(|(name, _)| **name == *k) {
-                    return Some(std::mem::replace(old, v));
-                }
-                if entries.len() < SMALL_VAR_MAP_CAPACITY {
-                    entries.push((k, v));
-                    return None;
-                }
-                let mut large = crate::fasthash::FastMap::with_capacity_and_hasher(
-                    entries.len() + 1,
-                    Default::default(),
-                );
-                for (name, binding) in std::mem::take(entries) {
-                    large.insert(name, binding);
-                }
-                let old = large.insert(k, v);
-                self.map = VarStorage::Large(large);
-                old
-            }
-            VarStorage::Large(entries) => entries.insert(k, v),
-        }
-    }
-    pub fn remove(&mut self, k: &str) -> Option<Binding> {
-        self.bump();
-        match &mut self.map {
-            VarStorage::Small(entries) => entries
-                .iter()
-                .position(|(name, _)| &**name == k)
-                .map(|index| entries.swap_remove(index).1),
-            VarStorage::Large(entries) => entries.remove(k),
-        }
-    }
-    pub fn clear(&mut self) {
-        self.bump();
-        match &mut self.map {
-            VarStorage::Small(entries) => entries.clear(),
-            VarStorage::Large(entries) => entries.clear(),
-        }
-    }
-    /// In-place binding write: entries don't move, so the generation stays (see the type docs).
-    pub fn get_mut(&mut self, k: &str) -> Option<&mut Binding> {
-        match &mut self.map {
-            VarStorage::Small(entries) => entries
-                .iter_mut()
-                .find(|(name, _)| &**name == k)
-                .map(|(_, binding)| binding),
-            VarStorage::Large(entries) => entries.get_mut(k),
-        }
-    }
-    pub fn get(&self, k: &str) -> Option<&Binding> {
-        match &self.map {
-            VarStorage::Small(entries) => entries
-                .iter()
-                .find(|(name, _)| &**name == k)
-                .map(|(_, binding)| binding),
-            VarStorage::Large(entries) => entries.get(k),
-        }
-    }
-    pub fn contains_key(&self, k: &str) -> bool {
-        self.get(k).is_some()
-    }
-    pub fn iter(&self) -> VarIter<'_> {
-        match &self.map {
-            VarStorage::Small(entries) => VarIter::Small(entries.iter()),
-            VarStorage::Large(entries) => VarIter::Large(entries.iter()),
-        }
-    }
-    pub fn keys(&self) -> VarKeys<'_> {
-        match &self.map {
-            VarStorage::Small(entries) => VarKeys::Small(entries.iter()),
-            VarStorage::Large(entries) => VarKeys::Large(entries.keys()),
-        }
-    }
-    pub fn values(&self) -> VarValues<'_> {
-        match &self.map {
-            VarStorage::Small(entries) => VarValues::Small(entries.iter()),
-            VarStorage::Large(entries) => VarValues::Large(entries.values()),
-        }
-    }
-    /// Byte offset of the generation counter within a `VarMap` (for the JIT's inline template).
-    pub(crate) fn generation_offset() -> usize {
-        std::mem::offset_of!(VarMap, generation)
-    }
-}
-
 pub struct Scope {
     pub vars: VarMap,
     pub parent: Option<Env>,
@@ -598,9 +413,13 @@ pub fn new_var_scope(parent: Option<Env>) -> Env {
 }
 
 pub(crate) fn new_var_scope_with_capacity(parent: Option<Env>, capacity: usize) -> Env {
+    new_var_scope_with_bindings(parent, VarMap::with_capacity(capacity))
+}
+
+pub(crate) fn new_var_scope_with_bindings(parent: Option<Env>, vars: VarMap) -> Env {
     let under_with = parent.as_ref().is_some_and(|p| p.borrow().under_with);
     let e = Rc::new(RefCell::new(Scope {
-        vars: VarMap::with_capacity(capacity),
+        vars,
         parent,
         with_obj: None,
         under_with,
