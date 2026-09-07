@@ -1,6 +1,9 @@
 //! Insertion-ordered collection storage. The index owns only slot numbers, never JS values.
 //! Deleted slots remain in place so live iterators and forEach can observe later appends.
 
+mod dense;
+use dense::DenseIndex;
+
 use super::same_value_zero;
 use crate::fasthash::{FastMap, FxHasher};
 use crate::value::Value;
@@ -43,6 +46,7 @@ pub(crate) struct CollectionData {
     base: usize,
     // Hash collisions are resolved with SameValueZero, not hash equality alone.
     index: FastMap<u64, usize>,
+    dense: DenseIndex,
     live_len: usize,
 }
 
@@ -90,6 +94,14 @@ impl CollectionData {
     }
 
     pub(crate) fn lookup(&self, key: &Value) -> Option<&Value> {
+        if matches!(key, Value::Num(_)) {
+            if let Some(slot) = self.dense.lookup(key) {
+                return Some(&self.entries[slot].pair.as_ref().unwrap().1);
+            }
+            if self.index.is_empty() {
+                return None;
+            }
+        }
         self.find(key, key_hash(key))
             .map(|slot| &self.entries[slot].pair.as_ref().unwrap().1)
     }
@@ -103,6 +115,26 @@ impl CollectionData {
             Value::Num(n) if n == 0.0 && n.is_sign_negative() => Value::Num(0.0),
             other => other,
         };
+        if let Some(index) = self.dense.candidate(&key, self.entries.len()) {
+            // A formerly sparse integer can still live in the hash index after the direct
+            // frontier grows past it. A direct miss never proves that such a key is absent.
+            let found = self.dense.get(index).or_else(|| {
+                (!self.index.is_empty())
+                    .then(|| self.find(&key, key_hash(&key)))
+                    .flatten()
+            });
+            if let Some(slot) = found {
+                self.entries[slot].pair.as_mut().unwrap().1 = value;
+            } else {
+                self.dense.insert(index, self.entries.len());
+                self.entries.push(Entry {
+                    pair: Some((key, value)),
+                    next: NO_SLOT,
+                });
+                self.live_len += 1;
+            }
+            return;
+        }
         let hash = key_hash(&key);
         let next = match self.index.entry(hash) {
             std::collections::hash_map::Entry::Occupied(mut head) => {
@@ -131,6 +163,11 @@ impl CollectionData {
     }
 
     pub(crate) fn remove(&mut self, key: &Value) -> bool {
+        if let Some(slot) = self.dense.remove(key) {
+            self.entries[slot].pair = None;
+            self.live_len -= 1;
+            return true;
+        }
         let hash = key_hash(key);
         let Some(&head) = self.index.get(&hash) else {
             return false;
@@ -164,9 +201,15 @@ impl CollectionData {
         if removed && self.entries.len() > self.live_len.saturating_mul(2) {
             self.entries.retain(|entry| entry.pair.is_some());
             self.index.clear();
+            self.dense.clear();
             for (slot, entry) in self.entries.iter_mut().enumerate() {
-                let hash = key_hash(&entry.pair.as_ref().unwrap().0);
-                entry.next = self.index.insert(hash, slot).unwrap_or(NO_SLOT);
+                let key = &entry.pair.as_ref().unwrap().0;
+                if let Some(index) = self.dense.candidate(key, slot) {
+                    self.dense.insert(index, slot);
+                    entry.next = NO_SLOT;
+                } else {
+                    entry.next = self.index.insert(key_hash(key), slot).unwrap_or(NO_SLOT);
+                }
             }
         }
         removed
@@ -177,6 +220,7 @@ impl CollectionData {
         self.base += self.entries.len();
         self.entries.clear();
         self.index.clear();
+        self.dense.clear();
         self.live_len = 0;
     }
 }

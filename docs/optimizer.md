@@ -604,3 +604,54 @@ The external optimizer directory retains `base-constructors-{results,summary,met
 `base-constructors-collections-repeat.json` and the release binary. The sibling
 `lumen-engine-comparison-base-constructors` directory contains the full-suite driver, workload,
 raw runs, binary/source hashes and medians.
+
+### Bounded integer collection index
+
+Map and Set storage now has an optional direct index for nearby nonnegative integer keys
+below 65536. It stores insertion-list slot numbers, not JavaScript values, and grows only
+near its current frontier. Sparse, fractional, negative, large and non-numeric keys retain
+the hash index. The absent index adds one pointer; allocated slot storage is capped at
+256 KiB. Non-numeric reads go directly to the existing hash lookup.
+
+Both indexes refer to the same ordered entries, preserving iteration, deletion/reinsertion,
+clear and value ownership. A direct-index miss still checks the hash index: an integer first
+inserted sparsely can remain hashed after the direct frontier grows past it. Updates cannot
+create duplicate keys. Compaction rebuilds both indexes, and SameValueZero still merges
+signed zero and NaN without merging numeric keys with strings, booleans or BigInts.
+
+Validation passes all 642 unit and 34 integration tests, all 813 Map/Set/WeakMap/WeakSet
+conformance cases with first-call JIT enabled, and 1996 differential programs across all
+three tiers (four resource-budget skips). Formatting and strict module checks pass; strict
+Clippy matches the existing 86 library / 88 library-test diagnostics with no additions.
+
+An initial dispatch checked the optional index for every key. The final dispatch checks
+the key type first. Three rotated before/after repeats for string, object and fractional
+keys put median construction changes between -1.6% and +3.2%, and lookup changes between
+-3.3% and +4.2%. Large outliers occurred in both builds and remain in the raw samples.
+These results do not establish a non-integer speedup.
+
+Final three-round rotated release medians, microseconds per 10000-operation invocation
+(lower is better):
+
+| Integer-key workload | Before | Direct index | Node 24.18.0 | Bun 1.3.14 |
+| --- | ---: | ---: | ---: | ---: |
+| Map construction | 346.7 | 194.3 | 183.3 | 124.0 |
+| Map lookup | 208.0 | 160.0 | 32.8 | 32.0 |
+| Set construction | 380.0 | 200.0 | 154.0 | 112.5 |
+| Set lookup | 177.1 | 135.6 | 26.0 | 28.0 |
+
+Construction time falls 44.0% for Map and 47.4% for Set; lookup time falls 23.1% and
+23.5%, respectively. These two construction workloads are within 2x of both other engines.
+Lookup remains approximately 5x behind, so this is not parity across collection operations.
+
+The same comparison measured Djot at 4077 to 4122 ms and DeltaBlue at 9775 to 9852 ms,
+approximately 1% changes rather than application gains. Node/Bun measured 235/146 ms for
+Djot and 196/320 ms for DeltaBlue. Every application run verifies its result. An earlier
+comparison had large parser outliers in both builds; its raw samples are also retained.
+The classic suite has not been rerun for this collection-only change; its latest composite
+gap remains the previously measured 9.7x/11.6x. The overall performance goal remains unmet.
+
+The external optimizer directory contains `dense-collections-{results,summary,metadata}.json`,
+the corresponding `dense-collections-other-keys` results and summary, drivers and workload
+hashes, and `lumen-dense-collections`. Files prefixed `dense-collections-initial` retain the
+earlier dispatch experiment and noisy comparison; they are not the final measurement.
