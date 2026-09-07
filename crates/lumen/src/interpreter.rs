@@ -1158,7 +1158,8 @@ pub struct Interp {
     >,
     /// Backing store for Map/Set/WeakMap/WeakSet instances (ordered entries), keyed by the object's
     /// pointer — the engine analogue of an internal `[[MapData]]` slot.
-    pub(crate) map_data: crate::fasthash::FastMap<usize, Vec<(Value, Value)>>,
+    pub(crate) map_data:
+        crate::fasthash::FastMap<usize, crate::builtins::collection_data::CollectionData>,
     /// Prototypes for builtins created after `new()` (Map/Set/Date/...), looked up by name so their
     /// native constructors can stamp the right `[[Prototype]]`.
     pub(crate) extra_protos: crate::fasthash::FastMap<&'static str, Gc>,

@@ -191,6 +191,10 @@ cargo run --release -p lumen-difftest -- --count 2000
 
 ## Benchmarks
 
+For warm Map/Set build and lookup scaling at 100, 1,000, and 10,000 keys, run
+`cargo bench -p lumen --bench collections`. Functions are defined once and reused
+across samples; the small invocation expression still passes through `Engine::eval`.
+
 ```sh
 scripts/run-v8bench.sh      # classic V8 suite (v8-v7) on lumen; downloads on first run
 scripts/bench-compare.sh    # same suite on node + bun + lumen, as a markdown table
