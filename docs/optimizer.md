@@ -511,3 +511,41 @@ per-object `(Rc<str>, Property)` entries with shared property-name layouts and c
 Property slots, including the native key-probe and creation-cache paths. Reserved constructor
 names must stay invisible until their values are initialized; deletion and divergent
 constructor paths must detach shared names without affecting another object.
+
+### Rejected shared-name storage experiment
+
+A coordinated experiment replaced each 32-byte `(Rc<str>, Property)` entry with a
+16-byte Property slot and a shared name vector. Literal templates, constructor hints,
+array length names, RegExp result suffixes and iterator-result templates could share
+names. Reserved constructor names were invisible until their value slots were initialized;
+deletion and divergent insertion detached the name vector. Native key checks followed
+the separate name vector, and native creation wrote only a value slot after checking the
+reserved name. An execution counter verified that native creation remained active.
+
+Correctness checks passed 640 unit and 34 integration tests, including new coverage for
+reserved-field visibility, descriptor/value isolation, deletion and larger constructor
+layouts. Strict Clippy matched the existing 86/88 diagnostic baseline, and module/format
+checks passed. Conformance and differential runs were deferred pending the performance
+result; these experiments are not retained in production.
+
+The storage rewrite regressed the verified Djot parser in every paired run of the first two
+comparisons. A final five-round rotated control compared the original engine, the isolated
+iterator-result template change, and the complete rewrite. Median milliseconds:
+
+| Workload | Original | Iterator template only | Complete rewrite |
+| --- | ---: | ---: | ---: |
+| Djot, 10000 verified parse/render iterations | 4731 | 4734 | 4993 |
+| DeltaBlue, 5000 verified iterations | 9801 | 9876 | 10221 |
+
+The complete rewrite was 5.5% slower on Djot and 4.3% slower on DeltaBlue; iterator templates
+alone were flat on Djot. Smaller slots did not establish an application benefit. Both
+experiments were removed. The external optimizer directory retains the complete source
+snapshot (`shared-layouts-experiment.zip`, including untracked modules), patch, three
+experimental binaries, the iterator-only control patch, valid profile and raw results.
+`layout-control-metadata.json` records binary and workload hashes; `layout-control-results.json`
+and `layout-control-summary.json` contain all five final rounds.
+
+The next profile-driven target is the blanket exclusion of class constructors from compiled
+execution. Base-class field initialization already occurs before the body in
+`run_constructor_on`; derived constructors still require their special this/return handling.
+This needs explicit eligibility and correctness checks before any performance claim.
