@@ -721,3 +721,27 @@ post-fix Djot run was also slower at 4545 ms. These measurements do not establis
 The fix is retained for correct write behavior, with the small observed parser cost recorded
 for follow-up. The external optimizer directory retains `write-strictness-{results,summary,
 metadata}.json`, the reproduction scripts and `lumen-write-strictness`.
+
+### Rejected strictness-independent leaf inlining experiment
+
+A closed opcode whitelist allowed local-value leaf functions to inline across a strictness
+difference. It admitted strict equality, truthiness and control flow while excluding calls,
+coercion, property access, free names and receiver reads. Existing activation/arguments guards
+remained in force. Tests verified actual native inlining in both directions, callee identity
+changes and lexical TDZ error frames. All 651 unit and 34 integration tests passed, as did
+the existing conformance and differential baselines; Clippy added no diagnostics.
+
+The same executable supported an environment switch to disable the new eligibility rule.
+Three rotated enabled/disabled comparisons reduced a 10000-iteration predicate loop from
+433.3 to 333.3 microseconds (23.1%), but Djot medians were 4210/4260 ms and DeltaBlue medians
+10232/10323 ms. Five additional Djot pairs measured 4667/4906 ms, with mixed pair directions
+and substantial timing variation. Neither comparison established an application benefit.
+The experiment was removed from production; its microbenchmark result does not establish
+progress toward application parity.
+
+`inline-neutral-experiment.zip` includes both changed source files, including the new module.
+The external optimizer directory also retains the binary, patch, source/workload hashes,
+three-round results, five-pair Djot repeat and diagnostics showing getEol's new inline.
+The prior validated production executable was restored. Further work should address general
+loop execution: the existing register-resident loop planner explicitly admits linear loops,
+while its separate branch-region paths recognize specific instruction patterns.
