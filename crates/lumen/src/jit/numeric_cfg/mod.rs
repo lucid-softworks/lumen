@@ -1,4 +1,5 @@
 //! Register-resident numeric loops with general forward branches and multiple backedges.
+mod arrays;
 mod emit;
 mod plan;
 use super::asm::Asm;
@@ -8,6 +9,7 @@ pub(super) fn try_emit(
     a: &mut Asm,
     chunk: &Chunk,
     cfg: &Cfg,
+    layout: &crate::value::JitLayout,
     head: usize,
     labels: &[usize],
     targeted: &mut [bool],
@@ -18,7 +20,12 @@ pub(super) fn try_emit(
     let Some(plan) = plan::build(chunk, cfg, head) else {
         return false;
     };
-    let plain = emit::emit(a, &plan, labels);
+    if !plan.receivers.is_empty()
+        && (!arrays::supported(layout) || std::env::var_os("LUMEN_JIT_NO_NUMERIC_ARRAYS").is_some())
+    {
+        return false;
+    }
+    let plain = emit::emit(a, &plan, layout, labels);
     a.bind(plain);
     for block in &plan.blocks {
         for flag in &mut targeted[block.start..block.end] {
@@ -36,13 +43,25 @@ pub(super) fn try_emit(
 }
 
 #[cfg(test)]
-thread_local! { static ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+thread_local! {
+    static ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static BAILS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 #[cfg(test)]
 fn record_entry(a: &mut Asm) {
     // Engine/Chunk are Rc-based and cannot move between threads. This code and its TLS cell
     // therefore share a lifetime and thread; the counter introduces no shared-memory race.
-    let ptr = ENTRIES.with(|entries| entries.as_ptr() as usize);
+    record_counter(a, ENTRIES.with(|entries| entries.as_ptr() as usize));
+}
+
+#[cfg(test)]
+fn record_bail(a: &mut Asm) {
+    record_counter(a, BAILS.with(|bails| bails.as_ptr() as usize));
+}
+
+#[cfg(test)]
+fn record_counter(a: &mut Asm, ptr: usize) {
     a.mov_imm64(9, ptr as u64);
     a.ldr_imm(10, 9, 0);
     a.add_imm(10, 10, 1);

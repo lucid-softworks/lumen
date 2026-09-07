@@ -6,6 +6,10 @@ use crate::jit_ir::{Cfg, RegionIr};
 pub(super) enum Step {
     Constant(u64),
     Load(u16),
+    GetElem {
+        slot: u16,
+        pc: usize,
+    },
     Store(u16),
     Update(u16, UpdKind),
     Arithmetic(u32),
@@ -31,6 +35,7 @@ pub(super) struct Plan {
     pub blocks: Vec<Block>,
     pub locals: Vec<u16>,
     pub dirty: Vec<u16>,
+    pub receivers: Vec<u16>,
     pub exits: Vec<usize>,
 }
 
@@ -48,6 +53,7 @@ pub(super) fn build(chunk: &Chunk, cfg: &Cfg, head: usize) -> Option<Plan> {
         blocks: Vec::new(),
         locals: Vec::new(),
         dirty: Vec::new(),
+        receivers: Vec::new(),
         exits: Vec::new(),
     };
     let mut size = 0;
@@ -69,6 +75,9 @@ pub(super) fn build(chunk: &Chunk, cfg: &Cfg, head: usize) -> Option<Plan> {
         });
     }
     if plan.locals.is_empty() || plan.locals.len() > 8 {
+        return None;
+    }
+    if plan.receivers.len() > 4 || plan.receivers.iter().any(|s| plan.locals.contains(s)) {
         return None;
     }
     for (_, target) in &region.exits {
@@ -115,6 +124,15 @@ fn translate(
             Op::LoadLocal(s) => {
                 local(plan, s, false)?;
                 Step::Load(s)
+            }
+            Op::GetElemLocal(slot) => {
+                if slot as usize * 16 + 8 >= 4096 {
+                    return None;
+                }
+                if !plan.receivers.contains(&slot) {
+                    plan.receivers.push(slot);
+                }
+                Step::GetElem { slot, pc }
             }
             Op::StoreLocal(s) => {
                 local(plan, s, true)?;

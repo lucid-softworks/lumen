@@ -801,3 +801,25 @@ The external optimizer directory retains `numeric-cfg-{results,summary,metadata}
 `compare-numeric-cfg.py`, `numeric-cfg.js` and `lumen-numeric-cfg`. The environment switch
 `LUMEN_JIT_NO_NUMERIC_CFG=1` provides the same-binary control. Guarded array reads and exact
 mid-loop state reconstruction are the next extension.
+
+### Read-only numeric arrays in branch graphs
+
+The general numeric CFG backend now lowers local-receiver element reads. Entry guards
+require a plain object/array with a coherent, hole-free numeric mirror, then pin the buffer
+and length in caller-saved registers. The closed region cannot call helpers, change receiver
+slots or write objects, so the borrowed buffers stay valid. Each read checks an exact uint32
+index and its bounds; negative zero correctly addresses index zero. Other values and exotic,
+holey or accessor-backed receivers keep checked execution.
+
+A failed index guard now reconstructs every live numeric operand and modified local before
+resuming the exact baseline opcode. Three additional all-tier tests cover multiple buffers,
+branches and continuations, fallback after local updates with live operands, fractional and
+nonfinite keys, getters/proxies/typed arrays/holes and receiver reassignment. Test counters
+verify actual optimized entry and mid-loop fallback. All 655 unit and 34 integration tests
+pass; forced-JIT conformance remains 21001/21003, differential testing agrees on 1996 programs
+with four budget skips, and the formatting/module/Clippy baselines match.
+
+An instrumented classic-suite run verified its output and showed the general backend now
+emitting numeric array-comparison loops, including a big-integer comparison kernel. Its
+scores are not timing evidence: the run enabled bytecode/region logging alongside validation.
+`LUMEN_JIT_NO_NUMERIC_ARRAYS=1` independently disables this extension for same-binary controls.

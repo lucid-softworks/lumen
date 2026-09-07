@@ -1943,8 +1943,15 @@ pub fn compile(
                 }
             }
             if !emitted_region {
-                emitted_region =
-                    numeric_cfg::try_emit(&mut a, chunk, &cfg, pc, &pc_labels, &mut targeted);
+                emitted_region = numeric_cfg::try_emit(
+                    &mut a,
+                    chunk,
+                    &cfg,
+                    layout,
+                    pc,
+                    &pc_labels,
+                    &mut targeted,
+                );
             }
             if !emitted_region {
                 if let Some(plan) = plan_loop(chunk, ops, pc, &targeted, layout, fast, &cfg) {

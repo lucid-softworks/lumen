@@ -12,7 +12,12 @@ fn flush(a: &mut Asm, plan: &Plan) {
     }
 }
 
-pub(super) fn emit(a: &mut Asm, plan: &Plan, pc_labels: &[usize]) -> usize {
+pub(super) fn emit(
+    a: &mut Asm,
+    plan: &Plan,
+    layout: &crate::value::JitLayout,
+    pc_labels: &[usize],
+) -> usize {
     let plain = a.new_label();
     let labels: Vec<_> = plan
         .blocks
@@ -28,6 +33,7 @@ pub(super) fn emit(a: &mut Asm, plan: &Plan, pc_labels: &[usize]) -> usize {
     for &slot in &plan.locals {
         a.ldr_d_imm(home(plan, slot), 22, slot as u32 * 16 + 8);
     }
+    super::arrays::preamble(a, plan, layout, plain);
     #[cfg(test)]
     super::record_entry(a);
     a.movz(17, 1024, 0);
@@ -39,12 +45,18 @@ pub(super) fn emit(a: &mut Asm, plan: &Plan, pc_labels: &[usize]) -> usize {
             .unwrap()
             .1
     };
+    let mut guards = Vec::new();
     a.b(label(plan.head));
     for block in &plan.blocks {
         a.bind(label(block.start));
         let mut depth = 0;
         for &step in &block.steps {
             match step {
+                Step::GetElem { slot, pc } => {
+                    let guard = a.new_label();
+                    guards.push((guard, pc, depth));
+                    super::arrays::read(a, plan, slot, 24 + depth - 1, guard);
+                }
                 Step::Compare { condition, yes, no } => {
                     a.fcmp(24, 25);
                     let false_edge = a.new_label();
@@ -65,6 +77,14 @@ pub(super) fn emit(a: &mut Asm, plan: &Plan, pc_labels: &[usize]) -> usize {
     for (pc, exit) in exits {
         a.bind(exit);
         flush(a, plan);
+        a.b(pc_labels[pc]);
+    }
+    for (guard, pc, depth) in guards {
+        a.bind(guard);
+        #[cfg(test)]
+        super::record_bail(a);
+        flush(a, plan);
+        materialize_stack(a, depth);
         a.b(pc_labels[pc]);
     }
     plain
@@ -139,6 +159,15 @@ fn value_step(a: &mut Asm, plan: &Plan, step: Step, depth: &mut u32) {
                 *depth += 1;
             }
         }
-        Step::Compare { .. } | Step::Jump(_) => unreachable!(),
+        Step::GetElem { .. } | Step::Compare { .. } | Step::Jump(_) => unreachable!(),
     }
+}
+
+fn materialize_stack(a: &mut Asm, depth: u32) {
+    a.movz(9, 4, 0);
+    for index in 0..depth {
+        a.str_imm(9, 20, index * 16);
+        a.str_d_imm(24 + index, 20, index * 16 + 8);
+    }
+    a.add_imm(20, 20, depth * 16);
 }
