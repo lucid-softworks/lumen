@@ -18,6 +18,7 @@
 //! `--tier`, or `Engine::set_tier`.
 
 mod activation;
+pub(crate) mod array_destructure;
 pub(crate) mod collection_insert;
 pub(crate) mod collection_lookup;
 mod for_in;
@@ -5175,22 +5176,26 @@ fn run_vm(
             }
             Op::DestructureArr(n) => {
                 let v = pop!();
-                let (it, nx) = i.get_iterator(&v)?;
-                let mut done = false;
-                for _ in 0..n {
-                    if !done {
-                        match i.iterator_step(&it, &nx)? {
-                            Some(x) => {
-                                stack.push(x);
-                                continue;
+                if let Some(values) = array_destructure::try_dense(i, &v, n) {
+                    stack.extend(values);
+                } else {
+                    let (it, nx) = i.get_iterator(&v)?;
+                    let mut done = false;
+                    for _ in 0..n {
+                        if !done {
+                            match i.iterator_step(&it, &nx)? {
+                                Some(x) => {
+                                    stack.push(x);
+                                    continue;
+                                }
+                                None => done = true,
                             }
-                            None => done = true,
                         }
+                        stack.push(Value::Undefined);
                     }
-                    stack.push(Value::Undefined);
-                }
-                if !done {
-                    i.iterator_close_normal(&it)?;
+                    if !done {
+                        i.iterator_close_normal(&it)?;
+                    }
                 }
             }
             Op::DeleteProp(n, strict) => {
@@ -9026,22 +9031,28 @@ unsafe fn jit_exec_inner(
         }
         Op::DestructureArr(n) => {
             let v = pop!();
-            let (it, nx) = i.get_iterator(&v)?;
-            let mut done = false;
-            for _ in 0..n {
-                if !done {
-                    match i.iterator_step(&it, &nx)? {
-                        Some(x) => {
-                            push!(x);
-                            continue;
-                        }
-                        None => done = true,
-                    }
+            if let Some(values) = array_destructure::try_dense(i, &v, n) {
+                for value in values {
+                    push!(value);
                 }
-                push!(Value::Undefined);
-            }
-            if !done {
-                i.iterator_close_normal(&it)?;
+            } else {
+                let (it, nx) = i.get_iterator(&v)?;
+                let mut done = false;
+                for _ in 0..n {
+                    if !done {
+                        match i.iterator_step(&it, &nx)? {
+                            Some(x) => {
+                                push!(x);
+                                continue;
+                            }
+                            None => done = true,
+                        }
+                    }
+                    push!(Value::Undefined);
+                }
+                if !done {
+                    i.iterator_close_normal(&it)?;
+                }
             }
         }
         Op::DeleteProp(n, strict) => {

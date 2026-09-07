@@ -5635,6 +5635,7 @@ fn install_array_rest(it: &mut Interp, ap: &Gc) {
     // `arr[Symbol.iterator]` is `Array.prototype.values`.
     if let Some(sym) = it.iterator_sym.clone() {
         let values_fn = ap.borrow().props.get("values").map(|p| p.value()).unwrap();
+        crate::bytecode::array_destructure::remember_values(it, &values_fn);
         ap.borrow_mut()
             .props
             .insert(Interp::sym_key(&sym), Property::builtin(values_fn));
@@ -6459,6 +6460,7 @@ fn install_iterator(it: &mut Interp) {
         array_iterator::fast
     };
     it.def_method(&arr_iter_proto, "next", 0, array_next);
+    crate::bytecode::array_destructure::remember_next(it, &arr_iter_proto);
     it.extra_protos
         .insert("%ArrayIteratorPrototype%", arr_iter_proto);
 

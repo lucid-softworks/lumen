@@ -2070,3 +2070,110 @@ A larger separate design specializes the existing flat array-destructuring
 opcode to avoid transient iterator/results entirely when intrinsic-method,
 dense-data and iterator-close guards prove that no user callback is bypassed.
 Neither follow-up is included in the measured implementation.
+
+### Bounded ordinary-array destructuring experiment (2026-09-07)
+
+The existing `DestructureArr(n)` opcode already batches flat identifiers and
+elisions whose bindings occupy uncaptured local slots; defaults, nested patterns
+and rest bindings do not use this lowering. Its VM and JIT checked paths normally
+create an iterator, call `next` for each element, read result properties and close
+the iterator unless exhaustion was observed. The new shared
+`bytecode/array_destructure.rs` helper bypasses that protocol for at most 16
+bindings only after a pure preflight proves that no callback will be skipped.
+
+The proof requires an ordinary `ic_plain` array, valid own data length, the exact
+original Array values function at `Symbol.iterator`, the exact original native
+iterator `next`, and present own data elements for the yielded prefix. Ordinary
+prototype walks inspect live descriptors, admit Array.prototype, reject accessors
+and exotic behavior, and conservatively stop after eight objects. Installed
+method identities are retained in the existing rooted, realm-switched
+`extra_protos` map. Comparing against mutable current prototype methods would not
+be sufficient when user code replaces both `values` and `Symbol.iterator`.
+When `n <= length`, including empty patterns and exact-length bindings, the
+iterator prototype chain must prove `return` absent, undefined or null. When
+`n > length`, the original path observes exhaustion and does not close.
+
+After every guard passes, the helper clones outputs while the input remains
+owned, fills exhausted outputs with undefined, and publishes them through the
+existing opcode stack boundary. It creates no JavaScript iterator or result
+objects; the current Rust implementation still allocates a symbol-key String and
+an output Vec. Any guard failure executes the unchanged complete protocol.
+Compiler eligibility, outer for-of handling and callback fallback ordering are
+unchanged. Realm setup omits the retained values identity when
+`LUMEN_NO_ARRAY_DESTRUCTURE` is set; no hot getenv is added.
+
+Six colocated tests run in Interp, Bytecode and JIT and assert exact successful
+fast-path counts in compiled tiers, with zero in Interp or disabled mode. They
+cover empty/short/exact/long patterns, skipped elements versus holes and explicit
+undefined, aliased object outputs surviving GC, custom and accessor iterator
+methods, foreign intrinsics, invalid close results, and element getters that
+change later elements and install return getters/methods during GC. The latter
+checks the exact first-element, second-element, return-getter, return-call and
+binding-body order. All six also pass with the optimization disabled.
+
+Validation passes 730 unit and 34 integration tests. The expanded conformance
+selection passes 21,047/21,049 with the same two known lexical-arguments and
+async import-cycle failures. Differential fuzzing records 1,996 agreements and
+four budget skips. Formatting and the new module's strict structural audit pass;
+strict Clippy retains the exact pre-existing 86-library/88-library-test
+error-message multiset.
+
+A temporary test-only diagnostic executes the complete output-verified Djot
+workload and records 60,000 successful scalar replacements across 10,000 parses.
+This establishes actual parser coverage. The diagnostic's debug configuration
+and timing are not performance results. Its source and log are archived, and the
+exact pre-diagnostic source hash was restored before timing. The measured release
+predates only final test additions/formatting; runtime implementation is unchanged.
+
+Thirty-six sequential verified timings compare the same binary with the
+optimization disabled/enabled, Node and Bun in three rotated rounds. Builds,
+tests and profiling do not overlap timing. Medians (lower is better):
+
+| Workload | Baseline | Dense binding enabled | Node | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| DensePair (µs / 10k bindings) | 5888.89 | 880 | 13.4 | 12.8 |
+| ObjectPair (µs / 10k bindings) | 6000 | 960 | 16.2 | 17.0667 |
+| ShortArray (µs / 10k bindings) | 5555.56 | 680 | 9.86667 | 11.8 |
+| HolePattern (µs / 10k bindings) | 7625 | 930 | 14.6 | 15.4667 |
+| Djot (ms) | 3780 | 3783 | 226 | 142 |
+| DeltaBlue (ms) | 8716 | 8749 | 195 | 306 |
+
+The four binding kernels take 84.0–87.8% less time by median, with all paired
+runs faster. Djot is effectively flat at +0.08% median, with mixed pairs
+3759→3751, 3789→3937 and 3780→3783 ms (-0.21%, +3.91%, +0.08%). DeltaBlue
+changes +0.38%, with pairs +0.96%, +0.94% and -0.33%. No application gain is
+claimed. The parser remains 16.74× Node and 26.64× Bun time. The separate
+60,000-hit diagnostic establishes coverage, not a performance benefit.
+
+Twelve additional rotated classic runs verify all nine scores. Medians (higher
+is better):
+
+| Benchmark | Baseline | Dense binding enabled | Node | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| Richards | 23497 | 23465 | 65775 | 72443 |
+| DeltaBlue | 3749 | 3578 | 154022 | 110153 |
+| Crypto | 24030 | 23983 | 91582 | 120014 |
+| RayTrace | 6412 | 6387 | 134308 | 304949 |
+| EarleyBoyer | 3622 | 3638 | 145810 | 159410 |
+| RegExp | 1624 | 1622 | 22934 | 30882 |
+| Splay | 10325 | 10300 | 80342 | 95524 |
+| NavierStokes | 38211 | 38249 | 71013 | 61141 |
+| Score (version 7) | 8649 | 8602 | 83421 | 97899 |
+
+The composite decreases 0.54% by median, with pairs -4.09%, -0.47% and +0.37%.
+The first enabled run is lower across all eight workloads; the records do not
+establish a cause. RayTrace (-0.39%) and RegExp (-0.12%) have lower median scores
+with all respective paired runs lower. Classic DeltaBlue decreases 4.56% by
+median but has mixed pairs (-8.84%, -4.56%, +2.50%). Other workloads also have
+mixed paired directions. These counter-regressions are retained in the record;
+neither an overall suite gain nor a parser gain is claimed.
+
+The implementation is retained for the repeated 84–88% binding-kernel time
+reduction and its general guarded removal of iterator/result objects, with the
+application and suite limitations above. Composite score ratios remain 9.70×
+Node and 11.38× Bun, well outside the objective. All 48 verified timing runs,
+source ZIP, binary hashes and validation artifacts are archived under
+`array-destructure-*` and `lumen-array-destructure-*` in the optimizer directory.
+The next prepared, unapplied `IterStepL` candidate retains the real iterator
+while avoiding yielded result objects for guarded ordinary-array steps;
+exhaustion and close behavior remain on existing paths.
