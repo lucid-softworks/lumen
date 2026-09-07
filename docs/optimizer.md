@@ -187,3 +187,25 @@ An initial inlining-budget probe also regressed: raising the source budget from 
 10775 ms and Djot from 4979 to 5152 ms. Delaying that wider recompile to 1000 calls
 did not help. These are single-round rejection probes, not performance claims; defaults
 remain unchanged. The next experiment targets forwarded-call elimination explicitly.
+
+## Rejected forwarded-call inlining experiment
+
+Profiling forwarded targets enabled guarded inlining behind both builtin and target
+identity checks. A constructor optimizer trigger and an ownership-preserving stack
+shuffle were also tested; dedicated unit checks proved ordinary calls and fast `new`
+entries reached the optimizer. Language/Function conformance passed 20947/20948 cases
+(the existing dynamic-import failure), and the earlier variant passed the engine suite.
+The stack-shuffle variant passed 612 unit tests and 31 integration tests.
+
+Measured intermediate variants remained essentially flat: forwarded inlining measured
+Djot 4977 to 4922 ms and DeltaBlue 10018 to 9936 ms; adding constructor tiering did not
+produce a material improvement either. More importantly, a subsequent reflection probe
+found a correctness regression: 500 forwarded calls correctly identified their caller
+before the experiment, but only the initial 110 did after inlining. The inlined body
+had lost its observable legacy `function.caller` frame.
+
+All implementation changes from this experiment were removed. Boundary tests remain
+for forwarding, guard misses, constructor behavior and warmed caller reflection. A
+general optimizer must preserve or reconstruct inlined frames at observable operations;
+identity guards alone do not make frame elimination semantics-preserving. The external
+benchmark directory retains the experiment patch, source and measurements.
