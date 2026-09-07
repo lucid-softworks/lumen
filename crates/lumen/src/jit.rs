@@ -408,6 +408,7 @@ pub(crate) fn helper_table() -> [usize; N_HELPERS] {
         crate::bytecode::jit_drop_packed_at as *const () as usize,
         crate::bytecode::jit_strict_eq as *const () as usize,
         crate::bytecode::jit_make_regexp as *const () as usize,
+        crate::bytecode::jit_load_cached_name as *const () as usize,
     ]
 }
 
@@ -572,7 +573,8 @@ unsafe extern "C" fn jit_scheduler_trace_fail(stage: usize) {
         }
     }
 }
-pub const N_HELPERS: usize = 26;
+pub const H_LOAD_CACHED_NAME: usize = 26;
+pub const N_HELPERS: usize = 27;
 
 /// ARM64 condition codes used by the inline templates.
 #[cfg(all(
@@ -2302,7 +2304,7 @@ pub fn compile(
                     layout,
                     chunk.jit_name_cache_ptr(*cache),
                     chunk.jit_name_number(*cache),
-                    pc as u32,
+                    (pc as u32, H_LOAD_CACHED_NAME),
                     l_unwind,
                     false,
                 );
@@ -2313,7 +2315,7 @@ pub fn compile(
                     layout,
                     chunk.jit_name_cache_ptr(*cache),
                     chunk.jit_name_number(*cache),
-                    pc as u32,
+                    (pc as u32, H_LOAD_CACHED_NAME),
                     l_unwind,
                     true,
                 );
@@ -2377,7 +2379,7 @@ pub fn compile(
                     layout,
                     chunk.jit_cap_cache_ptr(*name),
                     None,
-                    pc as u32,
+                    (pc as u32, H_EXEC),
                     l_unwind,
                     false,
                 );
@@ -6611,7 +6613,7 @@ fn emit_load_name_inline(
     layout: &crate::value::JitLayout,
     cache_ptr: usize,
     preferred_number: Option<u64>,
-    pc: u32,
+    (pc, helper): (u32, usize),
     l_unwind: usize,
     // `LoadNameForCall`: the fast path pushes the `this` slot (Undefined — a depth-0 hit can't
     // come through a `with` object) below the value; the slow path runs the full op.
@@ -6722,7 +6724,7 @@ fn emit_load_name_inline(
     a.add_imm(20, 20, 16);
     a.b(done);
     a.bind(slow);
-    emit_exec(a, pc, l_unwind);
+    emit_op_helper(a, helper, pc, l_unwind);
     a.bind(done);
 }
 

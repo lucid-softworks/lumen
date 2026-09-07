@@ -267,3 +267,31 @@ Validation: 616 unit tests, 34 integration tests and 1996 differential cases pas
 has the same existing 86/88 diagnostics and none in the new module. Formatting and
 strict module-structure checks pass. Dedicated tests exercise fresh-layout reuse,
 changed ancestors, shadowing, TDZ, live writes, global getters/deletion and realm guards.
+
+
+### Direct helper for guarded name-path hits
+
+ARM64 free-name cache misses now enter a dedicated guarded-path probe before the
+full bytecode operation dispatcher. A successful probe transfers the cloned value
+directly into the operand stack; call references also receive an undefined receiver.
+A failed probe leaves the operand stack and local representation untouched and runs
+the existing checked helper. BigInts keep Rust's normal clone behavior. Operation
+statistics still include these hits. This is a shorter Rust helper route, not generated
+machine-code validation of the complete scope path.
+
+Three rotated rounds measured Djot medians of 4669 to 4599 ms (about 1.5 percent lower),
+with Node/Bun at 230/151 ms. The first two paired results were 4634 to 4558 and 4669 to
+4599 ms; all engines slowed in the third parser round. DeltaBlue was approximately
+flat at 9729 to 9653 ms (Node/Bun 200/307 ms). Raw results are in
+`direct-name-path-results.json` in the external optimizer artifact directory.
+
+All 617 unit and 34 integration tests passed. A test-only hit counter proves the native
+route was exercised while testing owned values, receivers and getter/deletion changes.
+Language conformance remains 20438/20439, differential testing remains 1996 agreements
+with four budget skips, and strict Clippy retains only the existing 86/88 diagnostics.
+Formatting and the new module's strict structure audit pass.
+
+A separate warmed ordinary-inline caller-reflection probe reproduced an existing
+correctness gap: `target.caller === invoke` succeeded only 110 of 500 calls, already
+on the archived pre-helper binary. Correct frame bookkeeping is required before
+expanding inlining. The probe is archived as `ordinary-inline-caller-probe.js`.

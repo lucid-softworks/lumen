@@ -20,6 +20,7 @@
 mod activation;
 mod for_in;
 mod name_path;
+pub(crate) use name_path::jit::load_cached as jit_load_cached_name;
 mod object_literal;
 mod parameters;
 mod switch;

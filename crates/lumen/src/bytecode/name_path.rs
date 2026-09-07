@@ -5,6 +5,8 @@ use crate::value::{Exotic, Gc, Object, Value};
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
+pub(crate) mod jit;
+
 const MAX_DEPTH: usize = 8;
 
 enum ScopeGuard {
