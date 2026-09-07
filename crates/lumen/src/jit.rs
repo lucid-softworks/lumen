@@ -58,12 +58,22 @@ mod inline_method;
     target_arch = "aarch64",
     any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
+mod local_exit;
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 mod local_load;
 #[cfg(all(
     target_arch = "aarch64",
     any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
 mod local_store;
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+mod mixed_loop;
 #[cfg(all(
     target_arch = "aarch64",
     any(target_os = "macos", target_os = "linux", target_os = "windows")
@@ -1673,6 +1683,15 @@ pub fn compile(
             a.bind(write_fallback_labels[pc]);
             continue;
         }
+        mixed_loop::try_emit(
+            &mut a,
+            chunk,
+            &cfg,
+            pc,
+            &write_fallback_labels,
+            &mut targeted,
+            layout,
+        );
         guarded_write_region::try_emit(
             &mut a,
             chunk,

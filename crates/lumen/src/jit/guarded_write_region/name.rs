@@ -4,13 +4,13 @@ use crate::jit::{asm::Asm, C_NE};
 use crate::value::{JitLayout, PACK_OBJ};
 
 #[derive(Clone, Copy)]
-pub(super) enum Target {
+pub(in crate::jit) enum Target {
     Number(u32),
     Object(u32),
 }
 
 /// Preflight the complete plan before emitting any branch or guard labels.
-pub(super) fn supported(layout: &JitLayout, op: Op, target: Target) -> bool {
+pub(in crate::jit) fn supported(layout: &JitLayout, op: Op, target: Target) -> bool {
     let valid_home = match target {
         Target::Number(register) => (16..32).contains(&register),
         Target::Object(register) => register < 8,
@@ -30,7 +30,7 @@ pub(super) fn supported(layout: &JitLayout, op: Op, target: Target) -> bool {
 /// Returns false without emitting anything for an unsupported opcode/layout/home.
 /// Cache ownership and name association come from this exact chunk's LoadName op;
 /// no cached raw pointer is treated as authoritative without the shared guards.
-pub(super) fn emit(
+pub(in crate::jit) fn emit(
     a: &mut Asm,
     chunk: &Chunk,
     layout: &JitLayout,

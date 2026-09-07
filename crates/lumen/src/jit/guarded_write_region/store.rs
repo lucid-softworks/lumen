@@ -4,7 +4,7 @@ use crate::jit::{asm::Asm, property_probe, C_NE, C_VS};
 use crate::value::{canonical_index, JitLayout, PACK_CANON_NAN};
 
 /// Reject unsupported layouts and element-key writes before any region code is emitted.
-pub(super) fn supported(layout: &JitLayout, name: &str) -> bool {
+pub(in crate::jit) fn supported(layout: &JitLayout, name: &str) -> bool {
     crate::jit::get_prop_inlinable(layout)
         && layout.entry_accessor == layout.entry_value + 8
         && layout.entry_writable < 4096
@@ -13,8 +13,9 @@ pub(super) fn supported(layout: &JitLayout, name: &str) -> bool {
 
 /// The caller supplies a rooted borrowed receiver in x0..x7 and a number in d16..d31.
 /// Clobbers x8..x17, d0 and flags only. Failure precedes every write/owner change.
-/// Success performs one packed Number-to-Number store and must immediately leave the region.
-pub(super) fn emit(
+/// Success performs one packed Number-to-Number store. Any subsequent guard exit must
+/// publish state at its exact original PC; it must not replay this committed write.
+pub(in crate::jit) fn emit(
     a: &mut Asm,
     layout: &JitLayout,
     chunk: &Chunk,

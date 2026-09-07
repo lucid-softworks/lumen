@@ -1,10 +1,10 @@
 //! Guarded acyclic branches with one non-destructive numeric heap write.
 mod emit;
-mod name;
+pub(super) mod name;
 mod plan;
 mod sequence;
 mod sequence_emit;
-mod store;
+pub(super) mod store;
 mod values;
 
 use crate::{

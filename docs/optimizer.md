@@ -1629,3 +1629,117 @@ snapshots. The external `mixed-loop-local-exits.md` design identifies the existi
 materializer as an ownership precedent and requires multiple completed native iterations;
 that broader loop implementation remains future work. The within-2× suite/parser goal is
 still unfulfilled.
+
+### Borrowed shadow frames across object-heavy native loops (2026-09-07)
+
+The next extension keeps a bounded natural-loop CFG in native code while its Object and
+Number locals change. Selection uses the existing CFG/SSA model, supported effects and
+Object uses, without function-name or bytecode-position matching. Up to 16 wide locals,
+eight operand cells, 64 blocks and 256 original operations are admitted. Ordinary named
+Number-to-Number writes, numeric operations, guarded own property reads, ordinary inherited
+method lookup and dense Object elements are supported. Unsupported calls, accessors,
+exotic behavior and values become exact exits into the original baseline code.
+
+The initial implementation uses a borrowed wide-Value shadow frame on the native stack.
+Physical locals, receiver and environment keep the original ownership graph alive while
+native instructions update shadow locals and operands. Native heap writes cannot sever
+Object edges. Every exit clones all live shadow locals and operands, publishes their
+owners, then drops displaced locals. Popped shadow cells are never dropped. This ordering
+handles aliases, swaps, stale last owners, hidden inline locals and pending Object/Number
+operands after prior observable writes. A 1024-backedge budget exits through the original
+baseline path so existing polling remains reachable. Every admitted backwards Jump consumes
+the budget, including nested-loop backedges; backwards conditional branches are excluded.
+HTMLDDA and other non-numeric/non-Boolean conditions take checked baseline truthiness.
+
+Tests exercise actual native backedges, rather than compilation alone: changing Object
+locals; mixed inherited methods; getters and GC after prior writes; dense holes and inherited
+index getters; inherited field accessors; prototype and method replacement; strict read-only
+writes; nested loops with continue/break and budget exits; and cold calls with both a pending
+destination Object and numeric operand. Direct native publication tests check aliases,
+self-assignment, wide tags, stack boundaries and destruction of a displaced ownership graph.
+A polymorphic fixture initially failed to enter because direct root-AST calls do not advance
+the callee's inline-recompilation counter; a compiled caller supplies the required warmup.
+The coverage assertions were preserved.
+
+`LUMEN_JIT_NO_MIXED_LOOP=1` disables only this extension. Optional
+`LUMEN_JIT_MIXED_STATS=1` adds native entry/backedge/exit-PC counters. Instrumented timings
+are invalid for performance comparison. Counter storage intentionally survives TLS teardown
+in diagnostic mode so embedded native pointers cannot dangle; disabled mode allocates no
+counter registry and emits no counter instructions. Backedge counts include the jump that
+exhausts the budget, and are not necessarily outer-loop iteration counts.
+
+A fresh mapped DeltaBlue run selects its main plan loop as 113 admitted operations and
+12 locals. A separate diagnostic run records 549,987 entries, 50,651,451 native backward
+jumps, 549,986 normal exits at PC 134 and one exit at PC 118. This establishes sustained
+execution in the real application; frequent early fallback does not explain the remaining
+overhead. The previously archived opcode map was not used as current coverage evidence.
+
+The external optimizer directory contains `mixed-loop.js`, `compare-mixed-loop.py`,
+`summarize-mixed-loop.py`, their results/metadata/summary, and fresh mapped/statistics logs.
+The verified kernels visit 20,000 distinct objects per batch and perform 600 verified,
+untimed wrapper invocations before calibration to reach the inline tier. Three rotated
+rounds compare the same binary with the extension disabled/enabled, Node v24.18.0 and Bun.
+All inherited `LUMEN_*` variables are removed; only the disabled mode adds its flag.
+No own builds, tests or profiling overlap the timings. All 36 runs complete and validate.
+
+| Workload (lower is better) | Disabled | Enabled | Node | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| ObjectArray, microseconds / 20k visits | 255 | 255 | 26 | 20.4 |
+| PolymorphicMethods, microseconds / 20k visits | 680 | 315 | 78.46 | 30 |
+| Verified Djot, milliseconds | 3864 | 3868 | 226 | 143 |
+| Verified DeltaBlue, milliseconds | 9113 | 8741 | 194 | 299 |
+
+PolymorphicMethods decreases 53.68% by median, with all three pairs improving 52–54%.
+ObjectArray is flat in all pairs. Node's polymorphic kernel is variable (78.46, 22,
+78.46 microseconds), so its median comparison alone is not a stable universal engine ratio.
+DeltaBlue decreases 4.08%; pairs are 9029→8844, 9113→8729 and 9154→8741, all faster.
+Djot changes +0.10% by median with mixed paired changes and is effectively flat.
+Its remaining gap is 17.1× Node and 27.0× Bun in this session. The Bun ratio differs from
+the previous session because Bun's measured median changed; this is not a cumulative Lumen
+regression. The standalone repeated Delta workload remains 45.1× Node and 29.2× Bun.
+
+A separate 12-run rotated classic v8-v7 comparison uses the same measured binary, with all
+nine scores verified per run. Results, CPU snapshots, driver and metadata are saved under
+`mixed-loop-classic-*`. Median scores (higher is better):
+
+| Benchmark | Disabled | Enabled | Node | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| Richards | 23596 | 23478 | 65397 | 72736 |
+| DeltaBlue | 3623 | 3666 | 152038 | 110232 |
+| Crypto | 24025 | 23934 | 91491 | 119913 |
+| RayTrace | 6265 | 6406 | 134826 | 304579 |
+| EarleyBoyer | 3557 | 3640 | 147975 | 155473 |
+| RegExp | 1648 | 1631 | 22684 | 30397 |
+| Splay | 10260 | 10284 | 79535 | 90748 |
+| NavierStokes | 38139 | 37915 | 70271 | 70787 |
+| Score (version 7) | 8597 | 8607 | 83234 | 97449 |
+
+The composite changes +0.12%, with mixed pairs (8637→8596, 8597→8607, 8567→8614),
+and is effectively flat. EarleyBoyer improves 2.33% by median with all pairs higher.
+Richards decreases 0.50%, Crypto 0.38% and NavierStokes 0.59%, with every respective pair
+lower. Other workload directions are mixed; Splay's first pair is 4.51% lower despite its
+slightly higher aggregate median. This is not a universal speedup. The remaining composite
+gap is 9.67× Node and 11.32× Bun; NavierStokes alone meets the 2× comparison in this session,
+which does not establish suite or application parity.
+
+The extension is retained for the repeated standalone DeltaBlue reduction, substantial
+polymorphic-kernel gain and verified precise publication across changing Object locals.
+The full-suite/parser goal remains unfulfilled. Next, remove redundant branches between
+physically adjacent native operations, then measure comparison/branch fusion and conservative
+static shadow-tag knowledge. Register allocation requires a separate exit-materialization
+proof and is not part of this initial shadow-frame implementation.
+
+All 48 measured runs use local binary SHA-256
+`f7d4886db3246758bb4b8b29cb471ae66e9a25657dfcf7e5c50c0b50a905fb7c`.
+`mixed-loop-measured-source.zip` preserves the measured source including new untracked files;
+source hashes in the metadata describe invocation-time workspace state. Subsequent production
+source edits before commit only clarify the already-enforced publication comments.
+
+Final validation passes 711 unit and 34 integration tests, formatting and the strict
+structural audit for all 14 new Rust files. The core backend's conformance run passes
+21,001/21,003 selected tests with the same two pre-existing arrow-arguments/dynamic-import
+failures; differential fuzzing reports 1,996 agreements and four budget skips. Optional
+statistics were added afterward and validated by the final tests and the real diagnostic
+Delta run; the disabled handle emits no instructions. Clippy matches the existing 86
+library/88 library-test diagnostics exactly, including after the statistics addition; it is
+not warning-clean. Logs and binary/source provenance are archived in `mixed-loop-validation.json`.
