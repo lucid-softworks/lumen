@@ -1743,3 +1743,37 @@ statistics were added afterward and validated by the final tests and the real di
 Delta run; the disabled handle emits no instructions. Clippy matches the existing 86
 library/88 library-test diagnostics exactly, including after the statistics addition; it is
 not warning-clean. Logs and binary/source provenance are archived in `mixed-loop-validation.json`.
+
+### Rejected native fallthrough experiment (2026-09-07)
+
+A follow-up removed unconditional branches whose successor is the physically next admitted
+native label. All label bindings, gaps, outlined exits, explicit Jump/JumpIfFalse/InlineGuard
+control and backedge budgeting were preserved. A same-binary flag restored the original
+emission. The tested patch, binary, validation and rotated results are archived externally
+under `fallthrough-*` and `lumen-fallthrough*`; the production emitter is restored.
+
+All 711 unit/34 integration tests pass, including 11 focused native-loop tests; formatting
+and strict structure checks pass. A real diagnostic DeltaBlue run retains exactly the same
+549,987 entries, 50,651,451 backwards jumps and exit-PC counts as the prior implementation.
+With diagnostics enabled in both maps, the full plan-function allocation shrinks from
+122,092 to 121,744 bytes (348 bytes, 87 branches). This includes its retained baseline code;
+original-PC map intervals are not a disassembly of the native prefix.
+
+Thirty-six verified runs compare original branches, fallthrough, Node and Bun in three
+rotated rounds, with diagnostics disabled and no overlapping own builds/tests/profiling.
+Median times:
+
+| Workload | Original branches | Fallthrough | Change |
+| --- | ---: | ---: | ---: |
+| ObjectArray, microseconds / 20k visits | 260 | 265 | +1.92% |
+| PolymorphicMethods, microseconds / 20k visits | 320 | 330 | +3.13% |
+| Djot, milliseconds | 3931 | 3919 | -0.31% |
+| DeltaBlue, milliseconds | 8845 | 8827 | -0.20% |
+
+The polymorphic kernel regresses 320→330 in every pair. ObjectArray regresses in two pairs
+and ties in one. DeltaBlue improves in all pairs, but its median gain is only 0.20%; Djot's
+pairs are mixed, including a 1.98% regression. Fewer emitted branches therefore do not
+establish a useful speedup. No hardware cause is inferred from code size alone. The
+experiment is rejected; the prepared full classic comparison is not run because these
+results already fail the retention case. Comparison/branch fusion remains a separate next
+candidate and does not depend on this experiment.
