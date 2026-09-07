@@ -334,3 +334,34 @@ check. Language plus Function conformance remains 20947/20948 with the existing 
 import failure; differential testing has 1996 agreements and four budget skips. Strict
 Clippy retains the existing 86/88 diagnostics and none in the new modules. Formatting
 and strict module-structure audits pass.
+
+
+### Full engine comparison after virtual frames
+
+At `41ed9b3`, three fresh-process rotated runs on the Apple M4 produced the following
+V8-v7 median scores (higher is better). Every run passed the benchmark checks.
+
+| Workload | Lumen | Node | Bun |
+|---|---:|---:|---:|
+| Richards | 23,495 | 66,103 | 72,440 |
+| DeltaBlue | 3,375 | 154,432 | 109,961 |
+| Crypto | 23,914 | 92,293 | 119,171 |
+| RayTrace | 6,320 | 135,196 | 303,025 |
+| EarleyBoyer | 3,622 | 148,087 | 158,702 |
+| RegExp | 1,628 | 22,729 | 30,518 |
+| Splay | 10,455 | 80,766 | 96,045 |
+| NavierStokes | 38,173 | 70,716 | 71,457 |
+| Score | 8,560 | 83,795 | 99,344 |
+
+The composite is still 9.8 times below Node and 11.6 below Bun. Only NavierStokes is
+within twice both engines on this suite. The separately verified parser remains about
+20/32 times slower, so the performance goal is unfulfilled.
+
+Warm 10000-entry collection calls measured Map build/lookup at 570/380 microseconds
+versus Node 204/32 and Bun 117.8/32. Set build/lookup measured 560/333.3 versus Node
+144/26.4 and Bun 108.9/28. Lower is better. Collection lookup is therefore another
+clear remaining gap; the indexed storage fixed scaling without closing constant costs.
+
+The complete report, commands, source hashes, versions and every raw sample are in
+`/Volumes/XEX-VM/codex-builds/lumen-engine-comparison-virtual-frames/`. The runner is
+`run.py`; `results.json`, `summary.json` and `report.md` contain the measurements.
