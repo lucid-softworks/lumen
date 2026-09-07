@@ -64,6 +64,16 @@ mod local_store;
     any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
 mod numeric_cfg;
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+mod numeric_expr;
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+mod property_probe;
 
 use std::rc::Rc;
 
@@ -1651,6 +1661,8 @@ pub fn compile(
             skip -= 1;
             continue;
         }
+        // Mixed object/numeric expressions retain their original templates on every guard miss.
+        numeric_expr::try_emit(&mut a, chunk, &cfg, pc, &pc_labels, &mut targeted, layout);
         // A web-trace regexp workload is dominated by tiny loops whose body is exactly
         // `re.exec(strings[i])` with the result discarded. Let one guarded Rust entry process
         // the dense string range; a declined guard falls through to these untouched templates.

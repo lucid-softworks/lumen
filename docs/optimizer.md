@@ -1063,3 +1063,87 @@ DeltaBlue were 200/316 ms, so the overall goal remains far away.
 `LUMEN_JIT_NO_STORE_LOAD_FORWARD=1` disables the forwarding. The external optimizer directory
 retains `store-forward-{results,summary,metadata}.json`, its driver/workload and
 `lumen-store-forward`. No builds or tests overlapped these timings.
+
+### Rejected standalone borrowed property chains
+
+A two-read prefix borrowed an intermediate own-property object and decoded/cloned only the
+final value. Both live cache ways and warmed own-shape hints were guarded; accessors,
+proxies, inherited properties and unsupported values resumed the untouched bytecodes.
+The revised experiment passed 675 unit and 34 integration tests, including actual warmed
+hint execution, with unchanged conformance, differential and Clippy baselines.
+
+Three rotated same-binary comparisons nevertheless showed a mixed tradeoff:
+
+| Workload | Disabled | Enabled | Node 24.18.0 | Bun 1.3.14 |
+| --- | ---: | ---: | ---: | ---: |
+| Own field chain (us/10000) | 81.67 | 87 | 2.62 | 2.27 |
+| Array length chain (us/10000) | 97 | 91 | 2.65 | 2.25 |
+| Djot (ms) | 3861 | 3863 | 225 | 142 |
+| DeltaBlue (ms) | 9193 | 9062 | 195 | 302 |
+
+Ordinary field reads regressed in every pair; their median time increased 6.5%. The array
+case improved 6.2%, DeltaBlue improved 1.4%, and Djot was flat. The standalone prefix was
+removed rather than retaining this general field-read regression. The external optimizer
+directory preserves `property-chain-v2-source.zip`, `lumen-property-chain.v2` and the
+`property-chain-{results,summary,metadata}.json.v2` artifacts. No builds or tests overlapped
+the timings. The shared own-entry probe remains a reusable prerequisite for larger numeric
+expressions; extracting that probe is not itself an established application speedup.
+
+### Borrowed nested numeric expressions
+
+`jit/numeric_expr` plans short, acyclic expressions containing object-valued property
+intermediates and arithmetic. It borrows rooted objects in general-purpose registers,
+keeps numbers in floating-point registers, and publishes only the operands needed by an
+existing return, inline-return jump, local store or property store. Every guard failure
+replays the untouched original expression before any VM-state or ownership change.
+Getters, proxies, inherited reads and coercions therefore retain their original behavior;
+existing terminal instructions retain writes, strictness, error handling and cleanup.
+
+The planner requires a property result used as another property's receiver. A destination
+alone does not qualify, and direct numeric fields stay with the existing numeric-chain
+backend. It admits no calls, branches or writes inside the expression. Own-entry probes
+check live receiver kind/plainness, cache shape/slot, descriptor kind and value type; array
+slots additionally validate names. Shapes encode key order, not descriptor attributes, so
+matching a shape does not remove the descriptor guard.
+
+Ten colocated tests cover actual execution, aliases, numeric edge values, live descriptor
+and prototype changes, setters/proxies, strict failures, handlers/captures, and warmed hints.
+The warmed tests caught inline returns lowering to jumps; stopping before the original jump
+now preserves that useful expression boundary without replacing jump semantics.
+
+`LUMEN_JIT_NO_NUMERIC_EXPR=1` disables the expression path. The shared own-entry probe also
+serves existing numeric-CFG inputs; the standalone two-read chain experiment remains removed.
+
+Validation passes 681 unit and 34 integration tests, with 21001/21003 conformance and
+1996 differential agreements/four execution-budget skips. Clippy has exactly the existing
+86 library/88 library-test error baseline; formatting and the strict five-file module audit
+pass. Host filesystem delays stalled executable loading and dependency-directory scanning.
+The byte-identical conformance runner completed from local disk, and the zero-test rustdoc
+stage completed separately with its unnecessary dependency-directory scan omitted. Engine
+source and validation inputs were unchanged. Timing uses a hash-verified local copy of the
+archived release executable for the same reason.
+
+Three rotated same-binary comparisons produced these medians. Kernels are microseconds per
+10000 invocations; application rows are milliseconds.
+
+| Workload | Disabled | Enabled | Node 24.18.0 | Bun 1.3.14 |
+| --- | ---: | ---: | ---: | ---: |
+| Nested numeric return | 132.50 | 132 | 4.75 | 2.27 |
+| Nested numeric write | 213.33 | 210 | 2.80 | 9.73 |
+| Numeric fields in branch graphs | 7.60 | 7.60 | 8.67 | 6.30 |
+| Enclosing numbers in branch graphs | 7.60 | 7.60 | 7.47 | 7.20 |
+| Djot | 3890 | 3901 | 231 | 146 |
+| DeltaBlue | 9236 | 9067 | 195 | 309 |
+
+DeltaBlue improves in every pair (9210→9067, 9236→9042, 9264→9165 ms), reducing median
+time by 1.8%. The nested write kernel has a modest 1.6% median reduction; nested returns,
+existing numeric kernels and Djot have no established gain. Djot pairs are mixed and the
+third round shows broader host variation. DeltaBlue remains 46.5x Node and 29.3x Bun; this
+is incremental progress, not a breakthrough. The current zero-depth entry restriction can
+exclude inlined arithmetic with an existing operand-stack prefix; relaxing it requires
+separate ownership/fallback coverage and measurement.
+
+All 48 runs exit successfully and verify their outputs. No builds, tests or profiling runs
+overlap timings. The external optimizer directory retains `numeric-expr-{results,summary,
+metadata}.json`, drivers/workloads and `lumen-numeric-expr`; the metadata also identifies its
+byte-identical local execution copy.
