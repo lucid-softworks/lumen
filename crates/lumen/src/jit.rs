@@ -48,6 +48,11 @@ mod inline_frames;
     target_arch = "aarch64",
     any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
+mod inline_method;
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 mod local_load;
 #[cfg(all(
     target_arch = "aarch64",
@@ -2222,6 +2227,7 @@ pub fn compile(
                     false,
                     arr_ok,
                     PropRecv::Stack,
+                    None,
                 );
             }
             // Receiver-direct reads (`this.x`, `slotlocal.x`): the receiver never crosses the
@@ -2244,6 +2250,7 @@ pub fn compile(
                     false,
                     arr_ok,
                     PropRecv::This,
+                    None,
                 );
             }
             Op::GetPropLocal(s, n, cache)
@@ -2268,6 +2275,7 @@ pub fn compile(
                     false,
                     arr_ok,
                     PropRecv::Slot(*s as u32 * 16),
+                    None,
                 );
             }
             Op::ToPropKey | Op::ToPropKeyLocal(_) if fast & 64 != 0 => {
@@ -2501,6 +2509,10 @@ pub fn compile(
                     .as_bytes()
                     .first()
                     .is_some_and(|b| b.is_ascii_digit());
+                let inline_method = inline_method::plan(chunk, pc, &pc_labels, layout);
+                if inline_method.is_some() {
+                    targeted[pc + 3] = true;
+                }
                 emit_prop_load_inline(
                     &mut a,
                     layout,
@@ -2513,6 +2525,7 @@ pub fn compile(
                     true,
                     arr_ok,
                     PropRecv::Stack,
+                    inline_method,
                 );
             }
             // ---- inline fast paths (tags: 3 = Bool, 4 = Num; payload at +8; Value = 16) ----
@@ -3809,6 +3822,7 @@ fn emit_prop_load_inline(
     // collide with one. Prototype hops stay `Exotic::None`-only.
     arr_ok: bool,
     recv: PropRecv,
+    inline_method: Option<inline_method::Guard>,
 ) {
     use crate::bytecode::{
         IC_OFF_DEPTH, IC_OFF_HOLDER_SHAPE, IC_OFF_MID2_SHAPE, IC_OFF_MID_OK, IC_OFF_MID_SHAPE,
@@ -4216,6 +4230,9 @@ fn emit_prop_load_inline(
     a.madd(15, 13, 16, 15);
     a.bind(val);
     guard_prop_data(a, 9, 15, ea, slow);
+    if let Some(guard) = &inline_method {
+        inline_method::emit(a, guard, ev);
+    }
     if layout.entry_accessor == layout.entry_value + 8 {
         // Decode the NaN-box into the execution tier's wide `{tag,payload}` pair. BigInt keeps
         // the checked path (matching the old template); strings/symbols/objects clone by bumping

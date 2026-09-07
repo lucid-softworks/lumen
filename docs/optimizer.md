@@ -975,3 +975,36 @@ costs plausibly outweigh the skipped guards for simple targets. The experiment i
 there is no production forwarded-cache module or flag. Its source archive, executable,
 comparison driver and `forwarded-cache-{results,summary,metadata}.json` remain in the external
 optimizer directory. No builds or tests overlapped its timings.
+
+### Eliding temporary owners for inlined methods
+
+The mapped profile exposed repeated `GetMethod → InlineGuard → Pop` sequences. For eligible
+zero-argument calls, the JIT now checks the live packed method identity directly after the
+existing property guards, preserving environment and receiver checks. Success bypasses the
+temporary method clone, stack write/reload and drop. Original templates and entry labels
+remain available on misses, and the new continuation is explicitly targeted.
+
+Three colocated all-tier tests confirm actual execution and cover replacement, accessors,
+prototype changes, proxies, closure environments, primitive receivers and collection after
+removing the active method's property. All 668 unit and 34 integration tests pass, with the
+same 21001/21003 conformance, 1996-agreement/four-skip differential and 86/88 Clippy baselines.
+Formatting and the strict new-module audit pass.
+
+Three rotated same-binary comparisons produced these medians. Method rows are microseconds
+per 10000 invocations; applications are milliseconds.
+
+| Workload | Disabled | Enabled | Node 24.18.0 | Bun 1.3.14 |
+| --- | ---: | ---: | ---: | ---: |
+| Inherited method | 100 | 92 | 2.75 | 2.36 |
+| Own method after inherited warmup | 216.67 | 220 | 2.75 | 2.35 |
+| Djot | 3931 | 3932 | 233 | 146 |
+| DeltaBlue | 9786 | 9281 | 199 | 306 |
+
+DeltaBlue improves in every pair (9745→9281, 9791→9269, 9786→9305), reducing median time by
+5.2%. Inherited calls improve consistently by 8%. The own-method case has no established
+gain and one enabled outlier at 313 us; Djot is flat. DeltaBlue remains roughly 47x Node and
+30x Bun, so this is measured incremental progress, not engine parity.
+
+`LUMEN_JIT_NO_INLINE_METHOD=1` disables the bypass. The external optimizer directory retains
+`inline-method-{results,summary,metadata}.json`, the comparison driver/workload and
+`lumen-inline-method`. No builds or tests overlapped these timings.
