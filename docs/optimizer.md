@@ -243,3 +243,27 @@ Validation: 613 unit tests, 34 integration tests and 1996 differential cases pas
 (four fuzzer budget skips). Language conformance remains 20438/20439 with the existing
 dynamic-import failure. Strict Clippy remains at the existing 86/88 diagnostics, with
 none in the new modules. Formatting and strict module-structure checks pass.
+
+
+### Guarded deeper lexical paths
+
+Free-name reads can now cache paths of up to eight scopes. Pristine compiled scopes
+are validated by their shared binding-layout identity; dynamic scopes require their
+exact weak-pinned identity and structural generation. The reader walks live parent
+links, validates every intervening scope against shadowing, and reads the live binding
+or ordinary global data-property slot. TDZ, import redirects, with scopes, changed
+shapes and accessors keep the checked resolution path. No JavaScript executes during
+cache validation, and cached paths do not retain scope values or closures strongly.
+
+Two quiet rotated Djot comparisons measured 4974 to 4714 ms and 4965 to 4740 ms
+(approximately five percent lower). Node measured 230/228 ms and Bun 150/143 ms.
+DeltaBlue remained approximately flat. An unrelated compiler build restarted during
+the third round, which is retained in the raw results but excluded from this observation.
+This remains preliminary performance evidence, far from the two-times target. Raw
+results are in `name-path-results.json` in the external optimizer artifact directory.
+
+Validation: 616 unit tests, 34 integration tests and 1996 differential cases passed
+(four budget skips). Language conformance is unchanged at 20438/20439; strict Clippy
+has the same existing 86/88 diagnostics and none in the new module. Formatting and
+strict module-structure checks pass. Dedicated tests exercise fresh-layout reuse,
+changed ancestors, shadowing, TDZ, live writes, global getters/deletion and realm guards.

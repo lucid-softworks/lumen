@@ -19,6 +19,7 @@
 
 mod activation;
 mod for_in;
+mod name_path;
 mod object_literal;
 mod parameters;
 mod switch;
@@ -694,6 +695,7 @@ pub struct Chunk {
     /// One [`NameIc`] slot per free-name op (`LoadName`/`LoadNameForCall`), persisting across
     /// calls like `caches`.
     name_caches: Vec<std::cell::Cell<NameIc>>,
+    name_paths: Vec<std::cell::RefCell<Option<name_path::NamePath>>>,
     /// Weak handles pinning each name cache's scope allocation (parallel to `name_caches`), so
     /// the cached raw `env` pointer can never be recycled into a different scope while cached.
     name_pins: std::cell::RefCell<
@@ -2180,6 +2182,9 @@ fn compile_inner(
             .collect(),
         caches: c.caches,
         name_pins: std::cell::RefCell::new(c.name_pins),
+        name_paths: (0..c.name_caches.len())
+            .map(|_| std::cell::RefCell::new(None))
+            .collect(),
         name_caches: c.name_caches,
         name_num_bits: c.name_num_bits,
         name_num_valid: c.name_num_valid,
@@ -6065,6 +6070,9 @@ impl Chunk {
     /// throws the proper error).
     #[inline]
     fn name_ic_hit(&self, i: &Interp, env: &Env, c: u32) -> Option<Value> {
+        if let Some(value) = self.name_path_hit(i, env, c) {
+            return Some(value);
+        }
         let ic = self.name_caches[c as usize].get();
         let raw = Rc::as_ptr(env) as usize;
         if ic.env == raw {
@@ -6188,7 +6196,10 @@ impl Chunk {
         }
         // Global mode: only when there are no intermediate scopes whose later mutation could
         // re-route the name — i.e. the chunk runs directly under the global scope.
-        if !Rc::ptr_eq(env, &i.global_env) || !i.ordinary_get_ptr(Rc::as_ptr(&i.global) as usize) {
+        if !Rc::ptr_eq(env, &i.global_env) {
+            return self.name_path_fill(i, env, n, c);
+        }
+        if !i.ordinary_get_ptr(Rc::as_ptr(&i.global) as usize) {
             return None;
         }
         let g = i.global.borrow();
@@ -6212,8 +6223,8 @@ impl Chunk {
         self.name_pins.borrow_mut()[c as usize] = Some(Rc::downgrade(env));
         Some(v)
     }
-    /// Cached free-name read: hit, else depth-0 refill, else the interpreter's full walk
-    /// (deeper resolutions, `with`, module imports, TDZ, globals — uncached every time).
+    /// Cached free-name read: primary or guarded-path hit, refill, then the interpreter's
+    /// full walk for dynamic resolutions, imports, TDZ and uncached global properties.
     pub(crate) fn load_name_ic(
         &self,
         i: &mut Interp,

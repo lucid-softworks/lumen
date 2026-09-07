@@ -89,6 +89,20 @@ impl<'a> Iterator for VarValues<'a> {
 }
 
 impl VarMap {
+    pub(crate) fn template_layout(&self) -> Option<&Rc<BindingLayout>> {
+        match &self.map {
+            VarStorage::Template(layout, _) if self.generation() == 0 => Some(layout),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn template_binding(&self, slot: usize) -> Option<&Binding> {
+        match &self.map {
+            VarStorage::Template(_, values) if self.generation() == 0 => values.get(slot),
+            _ => None,
+        }
+    }
+
     pub(crate) fn layout_base(&mut self, expected: &Rc<BindingLayout>) -> Option<*mut Binding> {
         match &mut self.map {
             VarStorage::Template(layout, values) if Rc::ptr_eq(layout, expected) => {
