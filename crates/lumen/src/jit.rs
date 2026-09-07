@@ -43,6 +43,11 @@ mod collection_lookup;
     target_arch = "aarch64",
     any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
+mod guarded_write_region;
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 mod inline_frames;
 #[cfg(all(
     target_arch = "aarch64",
@@ -1661,6 +1666,7 @@ pub fn compile(
             skip -= 1;
             continue;
         }
+        guarded_write_region::try_emit(&mut a, chunk, &cfg, pc, &pc_labels, &mut targeted, layout);
         // Mixed object/numeric expressions retain their original templates on every guard miss.
         numeric_expr::try_emit(&mut a, chunk, &cfg, pc, &pc_labels, &mut targeted, layout);
         // A web-trace regexp workload is dominated by tiny loops whose body is exactly

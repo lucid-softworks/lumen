@@ -1429,3 +1429,83 @@ executables, including `compact-outlined-pic-v8-*` and `compact-outlined-pic-map
 Hashes were checked before removing the experiment. The next proposed direction is guarded
 mixed object/numeric regions with branches and numeric-field writes; its static design is
 preserved separately as `mixed-object-region-design.md`, not claimed as implemented or faster.
+
+### Guarded numeric branches and field writes (September 7, 2026)
+
+The experiment extends native numeric regions across bounded acyclic comparisons and
+branches. Every path ends with one existing ordinary named numeric-field write and joins
+the same original bytecode continuation. Borrowed object roots and numeric expressions
+stay in registers. All fallible checks precede the write, so a guard miss can restart the
+original region without replaying an observable effect. Original bytecode entry points
+remain available. The region accepts live guarded lexical/global roots, including object
+roots such as DeltaBlue's Direction constant object.
+
+The commit excludes numeric property keys, exotic receivers, accessors, non-writable
+properties and nonnumeric old values. This avoids dense-element mirror changes and
+object-owner release. NaNs are canonicalized before the packed store. Comparison emission
+preserves unordered-number semantics. Existing VM operand prefixes remain rooted and
+untouched through both success and fallback. The bounded planner admits at most 64 visited
+operations, fewer than four branch levels, eight object homes and sixteen numeric homes
+per expression. It does not yet optimize complete mixed object/numeric loops.
+
+Seven new tests exercise actual native success, aliases, NaN comparisons, global replacement,
+getters and coercion, strict failures, different closure environments, fresh TDZ bindings,
+the eighth object register across name lookup, and an owned operand prefix during getter GC.
+Validation passes 692 unit and 34 integration tests; conformance remains 21001/21003 with the
+same two known failures. Differential testing reports 1996 agreements and four budget skips.
+Clippy has the same 86 library/88 library-test baseline errors; formatting and the strict
+six-module structure audit pass.
+
+Three rotated rounds against Node 24.18.0 and Bun 1.3.14 produced 60 result-verified runs.
+The first six rows are microseconds per 10000 invocations; applications are milliseconds.
+
+| Workload | Region disabled | Region enabled | Node | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| Field diamond | 236.67 | 203.33 | 37.80 | 11.80 |
+| Nested diamond | 313.33 | 260.00 | 15.00 | 44.00 |
+| Nested numeric return | 102.00 | 102.00 | 4.31 | 2.31 |
+| Nested numeric write | 182.50 | 180.00 | 2.83 | 9.90 |
+| Numeric fields | 7.60 | 7.60 | 8.67 | 6.50 |
+| Enclosing numbers | 7.60 | 7.73 | 7.47 | 7.20 |
+| Djot | 3939 | 3944 | 232 | 143 |
+| DeltaBlue | 9163 | 9124 | 202 | 305 |
+
+Field and nested diamonds reduce median time by 14.1% and 17.0%, respectively; all pairs
+improve. DeltaBlue improves only 0.43%, with pairs 9072→9015, 9163→9124 and 9183→9150 ms.
+Djot is effectively flat: 3878→3857, 3939→3960 and 3944→3944 ms. The enabled parser remains
+17.0× Node and 27.6× Bun. The separate Delta workload remains 45.2× Node and 29.9× Bun.
+These kernel wins do not establish a material reduction in the overall engine gap.
+
+An untimed generation diagnostic confirms a region spanning DeltaBlue PCs 102–127 and
+joining at 128. Generation alone does not prove runtime guard success in that application.
+The diagnostic timing is excluded because it overlapped validation. All measured timing
+runs exclude concurrent Lumen builds, tests and profiling. External optimizer artifacts
+use the guarded-write-region prefix and preserve source, executable hashes, validation logs,
+raw results, summaries and provenance. LUMEN_JIT_NO_GUARDED_WRITE_REGION=1 selects the control.
+
+A further 12-run, three-rotation classic-suite comparison includes the enabled implementation.
+Scores are higher-is-better:
+
+| Benchmark | Region disabled | Region enabled | Node | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| Richards | 23684 | 23564 | 65619 | 72874 |
+| DeltaBlue | 3597 | 3626 | 153724 | 111521 |
+| Crypto | 24014 | 24001 | 92145 | 119348 |
+| RayTrace | 6332 | 6313 | 136602 | 307909 |
+| EarleyBoyer | 3639 | 3634 | 148039 | 159297 |
+| RegExp | 1643 | 1635 | 22866 | 30579 |
+| Splay | 10520 | 10374 | 81369 | 95296 |
+| NavierStokes | 38436 | 38617 | 71232 | 70123 |
+| Score (version 7) | 8635 | 8644 | 84073 | 98790 |
+
+The composite changes 8635→8644 (+0.10%), with mixed pairs 8799→8668, 8635→8644 and
+8601→8600. This is effectively flat. Splay loses 1.39% by median and RayTrace loses 0.30%;
+RayTrace decreases in every pair, so the implementation is not a universal improvement.
+The enabled composite remains 9.73× behind Node and 11.43× behind Bun. NavierStokes is
+within 2× both, but the suite composite and parser are still far outside the target.
+
+The implementation is retained for its guarded branch/write capability, consistent focused
+kernel improvements and small three-pair Delta application gain. No material overall
+speedup is claimed. The next extension needs exact exits after earlier writes have committed;
+restarting the original region entry would replay effects. A reviewed bounded design is
+saved externally as guarded-write-exit-design.md; it is not yet implemented.
