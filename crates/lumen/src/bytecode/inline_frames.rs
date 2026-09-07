@@ -58,6 +58,19 @@ pub(super) struct Locations {
 }
 
 impl Chunk {
+    pub(super) fn execution_strictness(&self, interp: &Interp, pc: usize) -> bool {
+        if let Some(locations) = &self.inline_frames {
+            let state = locations.locations[pc];
+            if state != 0 {
+                return locations.states[state as usize - 1].strict;
+            }
+        }
+        interp
+            .fn_frames
+            .last()
+            .map_or(interp.strict, |frame| frame.strict)
+    }
+
     pub(crate) fn has_inline_frames(&self) -> bool {
         self.inline_frames.is_some()
     }

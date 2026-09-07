@@ -28,6 +28,7 @@ mod object_literal;
 mod parameters;
 mod switch;
 mod this_binding;
+mod write_strictness;
 
 use std::rc::Rc;
 
@@ -6885,7 +6886,14 @@ pub(crate) unsafe extern "C" fn jit_exec(
     };
     let ctx = &mut *ctx;
     jit_opstat(ctx, pc);
-    match jit_exec_inner(ctx, pc, &mut sp) {
+    let chunk = &*ctx.chunk;
+    let saved_strict = write_strictness::needed(chunk.ops[pc as usize])
+        .then(|| write_strictness::enter(&mut *ctx.interp, chunk, pc));
+    let result = jit_exec_inner(ctx, pc, &mut sp);
+    if let Some(saved) = saved_strict {
+        (*ctx.interp).strict = saved;
+    }
+    match result {
         Ok(()) => crate::jit::SpFlag { sp, flag: 0 },
         Err(ab) => {
             ctx.error = Some(ab);
@@ -8030,6 +8038,7 @@ pub(crate) unsafe extern "C" fn jit_set_elem(
     jit_opstat(ctx, pc);
     let i = unsafe { &mut *ctx.interp };
     let chunk = unsafe { &*ctx.chunk };
+    let saved_strict = write_strictness::enter(i, chunk, pc);
     let result: Result<(), Abrupt> = (|| match chunk.ops[pc as usize] {
         Op::SetElem | Op::SetElemDrop => {
             let keep = matches!(chunk.ops[pc as usize], Op::SetElem);
@@ -8087,6 +8096,7 @@ pub(crate) unsafe extern "C" fn jit_set_elem(
         }
         _ => unreachable!("jit_set_elem emitted only for element stores"),
     })();
+    i.strict = saved_strict;
     match result {
         Ok(()) => crate::jit::SpFlag { sp, flag: 0 },
         Err(abrupt) => {
@@ -8219,6 +8229,7 @@ pub(crate) unsafe extern "C" fn jit_set_prop(
     jit_opstat(ctx, pc);
     let i = &mut *ctx.interp;
     let chunk = &*ctx.chunk;
+    let saved_strict = write_strictness::enter(i, chunk, pc);
     let r: Result<(), Abrupt> = (|| match chunk.ops[pc as usize] {
         Op::SetProp(n, c) => {
             sp = sp.sub(1);
@@ -8270,6 +8281,7 @@ pub(crate) unsafe extern "C" fn jit_set_prop(
         }
         _ => unreachable!("jit_set_prop emitted only for property stores"),
     })();
+    i.strict = saved_strict;
     match r {
         Ok(()) => crate::jit::SpFlag { sp, flag: 0 },
         Err(ab) => {

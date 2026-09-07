@@ -684,3 +684,40 @@ DeltaBlue is approximately flat. This still leaves Djot 16.9x behind Node and 26
 Bun, and the ASCII microbenchmark itself is far from the 2x target. The external optimizer
 directory retains `code-point-{results,summary,metadata}.json`, the comparison driver,
 workloads and `lumen-code-point`. The classic suite has not been rerun for this change.
+
+### Strict writes after JIT fast calls
+
+Testing a broader inlining opportunity exposed an existing execution bug: direct JIT calls
+can leave the interpreter's strictness flag describing their caller. Slow write helpers then
+used the wrong mode when a strict function called a non-strict writer, or vice versa. A
+non-strict write to a frozen object could throw merely because its caller was strict.
+The saved `lumen-code-point` binary reproduces this failure.
+
+Write helpers now temporarily select strictness from the active compiled frame and inline
+source location, restoring the previous state on success and error. Ordinary reads and JIT
+call entry do not need additional state transitions. The regression tests cover named and
+computed writes, updates, this receivers, read-only array elements and length, unresolved
+names, nested calls and restoration after exceptions.
+
+Those tests also exposed a shared interpreter bug: assignment discarded a false [[Set]]
+result from a proxy trap. The assignment wrapper now converts that failure into TypeError
+in strict code while non-strict assignment remains a no-op. Reflect.set keeps its boolean
+result through its separate [[Set]] path. This second failure also reproduces in the saved
+baseline, including the interpreter tier. The inlining eligibility experiment is archived
+separately in `inline-strictness-initial.zip`; it is not part of this correctness change.
+
+Validation passes 648 unit and 34 integration tests. Forced first-call JIT conformance
+passes 21001/21003 cases across expressions, statements, Function, Reflect.construct,
+Proxy.set and Reflect.set; only the previously reproduced lexical-arguments and errored-cycle
+import failures remain. Differential testing agrees on 1996 programs with four budget skips.
+Formatting, strict module audit and the existing 86/88 Clippy diagnostic baseline match.
+Some process launches were delayed in dyld before entering engine code; the conformance
+worker timeout was increased to 300 seconds for this run, and all final counts above come
+from completed runs. No engine benchmark ran concurrently with these validation jobs.
+
+Three rotated release comparisons measured Djot at 4051 to 4096 ms (1.1% higher median)
+and DeltaBlue at 11129 to 10858 ms. DeltaBlue varied substantially between pairs; one
+post-fix Djot run was also slower at 4545 ms. These measurements do not establish a speedup.
+The fix is retained for correct write behavior, with the small observed parser cost recorded
+for follow-up. The external optimizer directory retains `write-strictness-{results,summary,
+metadata}.json`, the reproduction scripts and `lumen-write-strictness`.

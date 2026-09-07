@@ -3611,8 +3611,12 @@ impl Interp {
     }
 
     pub fn set_member(&mut self, base: &Value, key: &str, value: Value) -> Result<(), Abrupt> {
-        self.set_member_recv(base, key, value, base.clone())
-            .map(|_| ())
+        let strict = self.strict;
+        let success = self.set_member_recv(base, key, value, base.clone())?;
+        if !success && strict {
+            return Err(self.throw("TypeError", format!("cannot assign to property '{key}'")));
+        }
+        Ok(())
     }
 
     /// [[Set]](P, V, Receiver): like [`set_member`] but with an explicit `receiver` and returning the
