@@ -1256,3 +1256,79 @@ median scores are flat or higher. All six runs verify all scores and exit succes
 without overlapping builds, tests or profiling. `compact-hint-v8-{results,summary,metadata}.json`
 and its driver preserve the comparison, including host CPU snapshots. These are same-engine
 on/off measurements, not a new full-suite Node/Bun comparison.
+
+
+### Rejected feedback-only hot-function recompilation
+
+An experiment allowed the existing one-shot second compilation to proceed with an empty
+inline plan when at least two distinct property reads held monomorphic own-property
+feedback. It reused cache seeding, guarded emission, old-code ownership and call-cache epoch
+invalidation. `LUMEN_JIT_NO_FEEDBACK_RECOMPILE=1` selected the retained policy in the same
+saved executable; `LUMEN_JIT_NO_CACHE_SEED` also suppressed the new eligibility branch.
+
+The experiment passed 689 unit and 34 integration tests, including live property mutations,
+ordinary nonempty inline plans, the one-read exclusion, and distinct closures sharing an AST
+across GC. The closure test explicitly asserted feedback-version publication; a named
+function expression initially failed that coverage assertion because it never entered the
+JIT. An anonymous returned closure exercised the intended path and passed. Conformance stayed
+at 21001/21003 with the same two failures, differential testing produced 1996 agreements and
+four budget skips, and Clippy retained exactly the same 86/88 error multiset. Formatting and
+the strict module audit passed.
+
+Three rotated rounds compared the same executable with the new policy disabled/enabled,
+Node 24.18.0 and Bun 1.3.14. All 48 application/kernel runs verified their results. Kernels
+are microseconds per 10000 invocations; applications are milliseconds.
+
+| Workload | Retained policy | Feedback only | Node | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| Nested numeric return | 102 | 102 | 4.85 | 2.36 |
+| Nested numeric write | 182.50 | 182.50 | 2.83 | 9.90 |
+| Numeric fields in branch graphs | 7.60 | 7.60 | 8.67 | 6.50 |
+| Enclosing numbers in branch graphs | 7.60 | 7.60 | 7.47 | 7.33 |
+| Djot | 3960 | 3956 | 228 | 144 |
+| DeltaBlue | 9148 | 9257 | 210 | 327 |
+
+Djot's 0.1% median difference is effectively flat and has mixed pairs. DeltaBlue is 1.2%
+slower by median, with every pair slower: 9067→9087, 9276→9773 and 9148→9257 ms. A separate
+untimed tier-log run confirmed nine feedback-only publications in DeltaBlue, so the policy
+was exercised. These measurements do not establish an application benefit.
+
+Twelve further sequential runs measured the classic suite with the same three-round
+rotation. Scores are higher-is-better:
+
+| Benchmark | Retained policy | Feedback only | Node | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| Richards | 23564 | 23409 | 65573 | 71949 |
+| DeltaBlue | 3603 | 3577 | 153652 | 106701 |
+| Crypto | 23954 | 23966 | 92093 | 119277 |
+| RayTrace | 6313 | 6339 | 135788 | 304283 |
+| EarleyBoyer | 3615 | 3578 | 147380 | 157702 |
+| RegExp | 1643 | 1633 | 22866 | 30154 |
+| Splay | 10260 | 10252 | 79918 | 94432 |
+| NavierStokes | 38025 | 38063 | 70193 | 69678 |
+| Composite | 8583 | 8592 | 83657 | 98128 |
+
+Composite medians differ by only +0.1%, with mixed pairs: 8589→8610, 8583→8592 and
+8533→8372. Richards, DeltaBlue and RegExp are lower in every paired run. Host load varied,
+so these small score differences do not establish a general improvement. The policy and its
+feature-specific tests were removed; production code returned exactly to the previously
+validated compact-hint implementation, with 685 unit and 34 integration tests.
+
+The retained-policy control includes the compact-hint/prefix changes and refreshes the full
+Node/Bun comparison: composite gaps are 9.75× Node and 11.43× Bun. NavierStokes remains within
+2× both (1.85×/1.83×), while Djot is 17.37×/27.50× and standalone DeltaBlue 43.56×/27.98×.
+These remain far from the overall within-2× objective; the differing ratios across dated
+snapshots should not be interpreted as a cumulative speedup.
+
+All timings ran without overlapping Lumen builds, tests or profiling. The external optimizer
+directory preserves `feedback-recompile-{results,summary,metadata,validation}.json`,
+`feedback-recompile-v8-{results,summary,metadata}.json`, drivers, the exact executable and
+`feedback-recompile-source.zip`. Classic metadata includes host CPU snapshots. Executable,
+workload and source hashes were checked before removing the experiment.
+
+A static follow-up identified a possible limitation: compact property-load hints send a
+shape miss directly to the checked helper, even after the live cache learns another shape.
+Falling back through that live cache is a separate, unmeasured candidate; the current data
+does not prove stale hints caused the regression. An audit of existing application profiles
+and tier logs also found little direct interpreter execution, providing no evidence that
+broader syntax compilation alone would close the application gap.
