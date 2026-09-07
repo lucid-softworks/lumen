@@ -1332,3 +1332,100 @@ Falling back through that live cache is a separate, unmeasured candidate; the cu
 does not prove stale hints caused the regression. An audit of existing application profiles
 and tier logs also found little direct interpreter execution, providing no evidence that
 broader syntax compilation alone would close the application gap.
+
+
+### Rejected live-cache fallback for compact property hints
+
+A separate experiment kept compact property-load hits but routed their pre-load guard misses
+through the site's live four-way cache before the checked helper. It reused the existing
+prototype, absence and array-key checks, with no ownership or operand-stack changes during
+probing. Descriptor, bounds and value-decoding failures still went directly to the helper.
+The general probe was extracted into a small module. This experiment used the retained
+recompilation policy, not the rejected feedback-only policy above.
+
+The first implementation embedded the fallback at each compact site. Three rotated rounds
+(60 verified runs) cut alternating own-read time 25.20→11.20 microseconds per 1000 reads and
+alternating inherited-method time 47.20→14.80. However, Djot increased 3929→3974 ms and
+DeltaBlue 9134→9238 ms, both about 1.1% slower by median, with mixed pairs. This motivated an
+outlining experiment rather than immediate retention.
+
+The outlined version queued these fallback bodies after the main code and teardown stub.
+Compact guard failures reached a nearby unconditional-branch trampoline, keeping new long
+conditional-branch relaxation out of the opcode stream. The outlined probes returned to the
+same native load/commit or checked-helper labels. Generic sites without a compact hint kept
+their original inline probes. A test forced far cold branches to relax while checking that
+hot instruction positions remained unchanged.
+
+Both versions passed full validation: 687 unit/34 integration tests for inline fallback,
+then 688/34 with outlining. Tests asserted successful native cache decoding after an actual
+compact miss and covered new receiver/prototype shapes, descriptors, absence, getter GC,
+string/array method receivers and method replacement. Conformance stayed at 21001/21003,
+differential testing at 1996 agreements/four budget skips, and Clippy at the identical 86/88
+error multiset. Formatting and strict audits passed for the extracted modules.
+
+Another 75 verified runs compared three modes of one saved executable, Node 24.18.0 and
+Bun 1.3.14. The first four rows are microseconds per 1000 reads; the next four are
+microseconds per 10000 invocations; applications are milliseconds.
+
+| Workload | Retained behavior | Inline fallback | Outlined fallback | Node | Bun |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Own read, stable | 9.61 | 9.76 | 9.47 | 0.62 | 0.88 |
+| Own read, alternating | 16.20 | 11.20 | 11.20 | 0.89 | 1.32 |
+| Inherited method, stable | 11.60 | 12.00 | 11.60 | 0.63 | 0.90 |
+| Inherited method, alternating | 25.20 | 14.80 | 15.20 | 1.20 | 1.48 |
+| Nested numeric return | 104.00 | 102.00 | 102.00 | 4.31 | 2.31 |
+| Nested numeric write | 183.33 | 185.00 | 182.50 | 2.86 | 10.00 |
+| Numeric fields | 7.73 | 7.60 | 7.60 | 8.80 | 6.50 |
+| Enclosing numbers | 7.60 | 7.60 | 7.73 | 7.47 | 7.33 |
+| Djot | 3926.00 | 3943.00 | 3951.00 | 229.00 | 144.00 |
+| DeltaBlue | 9222.00 | 9232.00 | 9097.00 | 198.00 | 316.00 |
+
+Outlined alternating-own reads improve 30.9% and alternating inherited methods 39.7% by
+median. Every corresponding pair improves, by 30–55% and 39–67% respectively. The retained
+behavior varies substantially between runs on these kernels, so the larger
+percentages from the initial comparison are not interchangeable with this comparison.
+Stable inherited-method reads and the established numeric kernels are essentially unchanged.
+
+The application result remains inconclusive: outlined Djot is 0.64% slower by median, with
+pairs 3926→3916, 3954→3959 and 3920→3951 ms. DeltaBlue is 1.36% faster by median, with mixed
+pairs 9309→9097, 9222→9261 and 9192→9085 ms. These results do not establish a parser gain.
+
+A fixed-count, result-verified map capture matched chunks by exact slot names, opcode
+sequences and occurrence. Across all captured chunks, total code size was 26136/27828/27840
+bytes for retained/inline/outlined modes. In the inlined-method chunk, the first-opcode-start
+to last-opcode-start extent changed 5100→6164→5108 bytes, while total chunk size changed
+5660→6724→6732. Outlining moved fallback bytes out of the opcode stream; it did not eliminate
+their allocation. These extents exclude the final opcode and tail and do not measure dynamic
+hotness or prove the cause of an application timing difference.
+
+A final six-run, three-pair classic-suite comparison measured retained behavior versus
+outlined fallback. Scores are higher-is-better:
+
+| Benchmark | Retained behavior | Outlined fallback |
+| --- | ---: | ---: |
+| Richards | 23553 | 23638 |
+| DeltaBlue | 3584 | 3551 |
+| Crypto | 24045 | 24040 |
+| RayTrace | 6240 | 6221 |
+| EarleyBoyer | 3632 | 3579 |
+| RegExp | 1646 | 1634 |
+| Splay | 10243 | 10398 |
+| NavierStokes | 38173 | 38249 |
+| Composite | 8588 | 8567 |
+
+The composite decreases 0.24%, from 8588 to 8567, with all pairs lower: 8602→8567,
+8588→8567 and 8572→8569. This is a small difference, but the experiment establishes no
+improvement in either the suite composite or parser target. The strong alternating-shape
+kernel gains therefore do not justify enabling it as progress toward the current within-2×
+objective. Both fallback implementations, their extraction and their feature-specific tests
+were removed. Production returned exactly to the previously validated retained implementation.
+
+The saved experiment uses `LUMEN_JIT_NO_COMPACT_LIVE_PIC=1` for retained behavior,
+`LUMEN_JIT_NO_OUTLINE_COMPACT_PIC=1` for inline fallback, and neither for outlined fallback.
+These flags are not retained production features. All timings ran without overlapping Lumen
+builds, tests or profiling. The external optimizer directory preserves `compact-live-pic-*`
+and `compact-outlined-pic-*` results, summaries, metadata, validation, source ZIPs and exact
+executables, including `compact-outlined-pic-v8-*` and `compact-outlined-pic-maps.*` artifacts.
+Hashes were checked before removing the experiment. The next proposed direction is guarded
+mixed object/numeric regions with branches and numeric-field writes; its static design is
+preserved separately as `mixed-object-region-design.md`, not claimed as implemented or faster.
