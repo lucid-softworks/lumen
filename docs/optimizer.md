@@ -72,3 +72,28 @@ Run engines sequentially, alternate ordering and compare several fresh processes
 - Formatting and strict structure checks on the new modules passed. Strict Clippy
   remains blocked by 86 library / 88 library-test pre-existing errors; no new module
   diagnostics were reported.
+
+## Lexical-this compilation
+
+Arrow functions that read lexical `this` now compile. The new bytecode operation resolves
+that binding when it is read, using the interpreter's shared resolver. It does not bind
+`this` from the arrow's caller or eagerly read a derived constructor's uninitialized
+binding. Nested arrows forward the original binding through their environment chain.
+Receiver-direct property operations remain reserved for ordinary function receivers.
+
+Three fresh-process rounds, alternating engine order and without concurrent development
+builds, produced these medians (milliseconds, lower is better):
+
+| Workload | Before | After | Node 24.18.0 | Bun 1.3.14 |
+| --- | ---: | ---: | ---: | ---: |
+| Djot, 10000 verified parse/render iterations | 6149 | 5705 | 235 | 145 |
+| DeltaBlue, 5000 iterations | 10003 | 9872 | 205 | 315 |
+
+Djot takes about 7% less time; DeltaBlue's approximately 1% difference is not a meaningful
+win. This is progress in compilation coverage, not proximity to Node/Bun. The working
+performance target is within 2x of both on the engine suite and real application workload.
+
+Validation: 604 unit tests and 13 public-boundary integration tests passed. The same
+20438/20439 language conformance tests passed, with only the previously reproduced
+dynamic-import failure. Strict Clippy still reports the existing 86/88 errors outside
+these modules. The new modules pass strict structure checks.

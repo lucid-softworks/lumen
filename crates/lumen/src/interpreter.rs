@@ -4,6 +4,8 @@
 //! Control flow uses [`Abrupt`] threaded through `Result`: expressions can only ever raise
 //! `Throw`, while statements additionally produce `Return`/`Break`/`Continue` completions.
 
+mod this_binding;
+
 use crate::ast::*;
 use crate::value::*;
 use std::cell::RefCell;

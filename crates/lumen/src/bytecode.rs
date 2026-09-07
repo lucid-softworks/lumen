@@ -17,6 +17,8 @@
 //! immediately). Selectable via the `LUMEN_TIER` / `LUMEN_TIER_THRESHOLD` env vars, the CLI's
 //! `--tier`, or `Engine::set_tier`.
 
+mod this_binding;
+
 use std::rc::Rc;
 
 use crate::ast::*;
@@ -437,6 +439,8 @@ pub enum Op {
     /// [`Op::StoreName`] with a per-site generation-checked name cache.
     StoreNameCached(u32, u32),
     LoadThis,
+    /// Resolve lexical this at the read, preserving derived-constructor TDZ semantics.
+    LoadLexicalThis,
     /// `obj.name`. First operand is the name index; second is the per-site inline-cache index into
     /// `Chunk::caches` (see `Interp::get_prop_ic`).
     GetProp(u32, u32),
@@ -1984,7 +1988,7 @@ fn compile_inner(
     hot: Option<&Chunk>,
 ) -> Option<Rc<Chunk>> {
     // Body facts the scanner already knows: `new.target` is an observation channel into the
-    // activation that slots do not provide; `this` / `arguments` in an arrow are free variables
+    // activation that slots do not provide; `arguments` in an arrow is a free variable
     // we do not model. Parameterless synchronous ordinary functions can materialize an unmapped
     // arguments object into a dedicated slot (the common variadic-helper shape).
     let scan = func.scan_flags();
@@ -1995,10 +1999,6 @@ fn compile_inner(
     let uses_arguments = scan & SCAN_ARGUMENTS != 0;
     if uses_arguments && (func.is_arrow || func.is_async || !func.params.is_empty()) {
         log_bail("fn", "arguments with arrow/async/parameters");
-        return None;
-    }
-    if func.is_arrow && scan & SCAN_THIS != 0 {
-        log_bail("fn", "arrow reading this");
         return None;
     }
     // Generators still run in the tree-walker (their `.return()`/`.throw()` injection and yield*
@@ -2035,7 +2035,10 @@ fn compile_inner(
     };
 
     let mut c = Compiler {
-        env_this,
+        // Arrows forward the enclosing binding through their scope chain. They must not
+        // synthesize a new this binding for nested arrows, especially before super().
+        env_this: env_this && !func.is_arrow,
+        lexical_this: func.is_arrow,
         strict: func.is_strict,
         plan_stack: vec![(plan.clone(), 0)],
         cache_seed_stack: hot
@@ -2459,6 +2462,8 @@ fn plan_inlines_at(
 
 #[derive(Default)]
 struct Compiler {
+    /// Root arrow bodies read this from the closure environment.
+    lexical_this: bool,
     /// The compiled function's strictness (carried into ops whose runtime behavior forks on it).
     strict: bool,
     /// Captured once-per-call block `let`s homed in the activation (see CaptureScan's
@@ -4292,7 +4297,7 @@ impl Compiler {
             } if op == "="
                 && !prop.starts_with('#')
                 && match &**mobj {
-                    Expr::This => true,
+                    Expr::This => self.direct_this_allowed(),
                     Expr::Ident(name) => {
                         matches!(self.home(name), Some(Home::Slot(..))) && no_assign_to(value, name)
                     }
@@ -4471,15 +4476,7 @@ impl Compiler {
                 Ok(())
             }
             Expr::This => {
-                // A spliced callee's `this` is the receiver, parked in a caller slot.
-                if let Some(slot) = self.inline_this {
-                    if self.inline_depth > 0 {
-                        self.emit(Op::LoadLocal(slot));
-                        return Ok(());
-                    }
-                }
-                self.uses_this = true;
-                self.emit(Op::LoadThis);
+                self.emit_this();
                 Ok(())
             }
             Expr::Paren(inner) => self.expr(inner),
@@ -4509,7 +4506,7 @@ impl Compiler {
                             return Ok(());
                         }
                     }
-                    Expr::This => {
+                    Expr::This if self.direct_this_allowed() => {
                         self.uses_this = true;
                         let i = self.name_idx(prop);
                         let c = self.new_cache(i);
@@ -5315,6 +5312,7 @@ fn run_vm(
                 chunk.store_name_ic(i, env, n, c, v)?;
             }
             Op::LoadThis => stack.push(this_val.clone()),
+            Op::LoadLexicalThis => stack.push(i.lexical_this(env)?),
             Op::GetProp(n, c) => {
                 let obj = pop!();
                 let v = i.get_prop_ic(&obj, &chunk.names[n as usize], &chunk.caches[c as usize])?;
@@ -6924,6 +6922,7 @@ impl Chunk {
             | Op::LoadCap(_)
             | Op::LoadName(..)
             | Op::LoadThis
+            | Op::LoadLexicalThis
             | Op::MakeClosure(..) => (0, 1),
             Op::Dup => (1, 2),
             Op::Dup2 => (2, 4),
@@ -9122,6 +9121,7 @@ unsafe fn jit_exec_inner(
             chunk.store_name_ic(i, env, n, c, v)?;
         }
         Op::LoadThis => push!(ctx.this_val.clone()),
+        Op::LoadLexicalThis => push!(i.lexical_this(env)?),
         Op::GetProp(n, c) => {
             let obj = pop!();
             let v = i.get_prop_ic(&obj, &chunk.names[n as usize], &chunk.caches[c as usize])?;
