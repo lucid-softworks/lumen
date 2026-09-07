@@ -549,3 +549,58 @@ The next profile-driven target is the blanket exclusion of class constructors fr
 execution. Base-class field initialization already occurs before the body in
 `run_constructor_on`; derived constructors still require their special this/return handling.
 This needs explicit eligibility and correctness checks before any performance claim.
+
+### Compiled base-class constructor bodies
+
+Eligible base-class constructor bodies now enter the bytecode/JIT tiers. The previous blanket
+class exclusion kept Djot's large InlineParser and EventParser constructors on the tree-walker,
+even after their default parameters and captured arrows became supported. `run_constructor_on`
+still initializes instance fields, private members and decorator initializers before the body.
+Derived constructors retain their TDZ this binding, super rebinding and return validation on
+the existing path. Ordinary class calls and constructor shortcuts keep their separate guards;
+a compiled class body does not permit calling that class without new.
+
+Five new all-tier tests cover field/default ordering, captured this, independent instances,
+private members, return overrides through super, Reflect.construct prototypes, initializer
+errors after warmup, and rejection of ordinary calls to hot compiled classes. The tests inspect
+compiled chunks and native code to verify that the intended path executes. All 638 unit and
+34 integration tests pass. Forced first-call JIT conformance passes 20956/20958 cases across
+expressions, statements, Function and Reflect.construct. The saved pre-change binary has the
+same two failures under these settings: lexical-arguments.js and the known errored-cycle
+import case. Differential testing agrees on 1996 seeds with four budget skips; formatting,
+strict module audit and the existing strict Clippy diagnostic baseline also match.
+
+Three rotated release comparisons on the same M4 measured these median milliseconds:
+
+| Workload | Before | Compiled base constructors | Node 24.18.0 | Bun 1.3.14 |
+| --- | ---: | ---: | ---: | ---: |
+| Djot, 10000 verified parse/render iterations | 4669 | 4008 | 227 | 145 |
+| DeltaBlue, 5000 verified iterations | 9797 | 9786 | 201 | 334 |
+
+Djot time falls 14.2%; every run verifies all 3160000 HTML characters. DeltaBlue is flat.
+A separate three-round classic V8-v7 comparison is also flat overall (higher scores are better):
+
+| Test | Before | After | Node | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| Richards | 23670 | 23462 | 64338 | 71003 |
+| DeltaBlue | 3358 | 3349 | 146504 | 107845 |
+| Crypto | 23858 | 23819 | 90088 | 119628 |
+| RayTrace | 6240 | 6234 | 133642 | 304061 |
+| EarleyBoyer | 3607 | 3624 | 144094 | 157838 |
+| RegExp | 1639 | 1632 | 22729 | 30427 |
+| Splay | 10243 | 10227 | 80212 | 95418 |
+| NavierStokes | 37656 | 37285 | 70193 | 70787 |
+| Composite | 8466 | 8456 | 82288 | 98398 |
+
+The collection comparison exposed a tradeoff. Five extra paired repeats measured Map lookup
+at 190 to 204 microseconds per 10000 reads (7.4% slower), Map construction unchanged at 346.7,
+Set construction 373.3 to 380, and Set lookup 165.7 to 170. Each binary also had one roughly
+2x slower process, retained in the raw results. The cause is not established. This change is
+retained for its repeatable application improvement; collection lookup remains follow-up work.
+
+The goal is still unmet: the composite is 9.7x behind Node and 11.6x behind Bun; Djot remains
+17.7x and 27.6x slower respectively. Only NavierStokes is within 2x of both in this suite.
+The external optimizer directory retains `base-constructors-{results,summary,metadata}.json`,
+`base-constructors-collections-repeat.json` and the release binary. The sibling
+`lumen-engine-comparison-base-constructors` directory contains the full-suite driver, workload,
+raw runs, binary/source hashes and medians.

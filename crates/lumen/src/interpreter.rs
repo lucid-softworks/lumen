@@ -5,6 +5,7 @@
 //! `Throw`, while statements additionally produce `Return`/`Break`/`Continue` completions.
 
 mod bindings;
+mod constructor_body;
 mod this_binding;
 pub(crate) use bindings::BindingLayout;
 pub use bindings::VarMap;
@@ -6723,23 +6724,18 @@ impl Interp {
         is_construct: bool,
         fn_obj: &Gc,
     ) -> Result<Value, Abrupt> {
-        // Bytecode fast call: an eligible sync callee with a compiled chunk runs on the VM with no
-        // activation environment at all. Sound because a compiled body has no closures,
-        // `arguments`, direct eval, `with`, `super`, or `new.target` (`bytecode::compile` refuses
-        // them all): nothing can observe the activation, so free names resolve through the
-        // definition env exactly as they would through an empty activation parented there.
-        // Constructs qualify too when the callee is a *plain* function (no `class_info`): the
-        // fresh `this` came in from `construct_nt`, which also maps a non-object return back to
-        // it — and a VM body cannot rebind `this`, so the slow path's scope walk-back would find
-        // the same value. Class constructors (field initializers, derived-`this` TDZ) and
-        // generators/async stay on the tree-walker. For plain calls `call_dispatch` already
-        // saved/cleared `new_target`/`constructing`. One divergence: no `lazy` args stash, so
-        // legacy `f.arguments` reflection during an active VM frame reads null (the VM's
-        // slot-based locals never aliased it faithfully anyway).
+        // Eligible synchronous bodies use compiled slots, with a real activation only when
+        // capture analysis requires one. Compiler refusals retain the tree-walker fallback.
+        // Plain and base-class constructor bodies qualify: run_constructor_on has already
+        // initialized base-class instance elements, and the caller maps non-object returns to
+        // the original this. Derived constructors keep the tree-walker's TDZ this binding,
+        // super rebinding and special return validation. Class calls and construction shortcuts
+        // remain guarded separately; compiling a body does not make a class ordinarily callable.
+        // Legacy arguments reflection retains the existing compiled-frame limitations.
         if !matches!(self.tier, crate::bytecode::Tier::Interp)
             && !func.is_generator
             && !func.is_async
-            && (!is_construct || !self.class_info.contains_key(&(Rc::as_ptr(fn_obj) as usize)))
+            && (!is_construct || self.constructor_body_can_compile(fn_obj))
             // Closures under a `with` scope stay on the tree-walker (see `Scope::under_with`).
             && !closure.borrow().under_with
         {
