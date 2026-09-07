@@ -49,6 +49,11 @@ mod inline_frames;
     any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
 mod local_load;
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+mod numeric_cfg;
 
 use std::rc::Rc;
 
@@ -1936,6 +1941,10 @@ pub fn compile(
                 if std::env::var_os("LUMEN_JIT_REGIONLOG").is_some() {
                     eprintln!("[jit-region] head {pc}: EMITTED numeric diamond");
                 }
+            }
+            if !emitted_region {
+                emitted_region =
+                    numeric_cfg::try_emit(&mut a, chunk, &cfg, pc, &pc_labels, &mut targeted);
             }
             if !emitted_region {
                 if let Some(plan) = plan_loop(chunk, ops, pc, &targeted, layout, fast, &cfg) {

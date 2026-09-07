@@ -764,3 +764,40 @@ observed Lumen score remains far below half of either other engine's slowest obs
 The performance goal remains unmet. The sibling `lumen-engine-comparison-write-strictness`
 directory retains all nine runs, per-test scores/ranges, source and binary hashes and the
 driver. No Lumen builds or validation jobs ran alongside these measurements.
+
+### Numeric loops with general control flow
+
+A new ARM64 backend discovers closed numeric loops from the shared CFG and validates their
+SSA graph. It supports forward branches, multiple backedges and nested loops without a fixed
+instruction-pattern match. Up to eight private numeric locals keep fixed floating-point
+register homes across block edges. Entry guards precede every mutation; every external exit
+and bounded continuation writes modified locals back before resuming baseline code. Calls,
+handlers, nonnumeric operands and unsupported instructions retain the existing path.
+
+Four colocated all-tier tests verify actual optimized execution as well as branch/continue/
+break behavior, continuation after 1024 backedges, NaN/infinity/signed zero, coercion callbacks,
+BigInt updates and effectful/exceptional fallback. All 652 unit and 34 integration tests pass.
+Forced first-call JIT conformance remains 21001/21003 with the same two known failures.
+Differential testing agrees on 1996 programs, with four execution-budget skips.
+Formatting, the strict module audit and the existing 86/88 Clippy diagnostic baseline match.
+
+Three rotated same-executable enabled/disabled comparisons produced these medians:
+
+| Workload | Disabled | Enabled | Node 24.18.0 | Bun 1.3.14 |
+| --- | ---: | ---: | ---: | ---: |
+| 10000 branched numeric iterations, microseconds | 33.6 | 17.2 | 7.10 | 5.30 |
+| 10000 nested numeric iterations, microseconds | 33.6 | 16.8 | 4.16 | 5.00 |
+| 10000 verified Djot iterations, milliseconds | 3987 | 3943 | 232 | 146 |
+| 5000 verified DeltaBlue iterations, milliseconds | 9940 | 9980 | 197 | 315 |
+
+The disabled numeric runs varied significantly (16.6–34.0 and 20.0–34.0 microseconds), so
+these medians should not be read as a universal 2x speedup. Enabled runs were stable at
+16.8–17.4 and 16.8–17.0 microseconds. Application results are essentially flat; separate
+coverage logging shows no Djot loops emitted by this numeric-only backend. This is a
+foundation for broader loop lowering, not application parity: Djot remains about 17x behind
+Node and 27x behind Bun. No builds or validation jobs ran alongside these measurements.
+
+The external optimizer directory retains `numeric-cfg-{results,summary,metadata}.json`,
+`compare-numeric-cfg.py`, `numeric-cfg.js` and `lumen-numeric-cfg`. The environment switch
+`LUMEN_JIT_NO_NUMERIC_CFG=1` provides the same-binary control. Guarded array reads and exact
+mid-loop state reconstruction are the next extension.
