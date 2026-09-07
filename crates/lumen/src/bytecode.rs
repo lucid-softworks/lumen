@@ -266,7 +266,7 @@ pub struct CallIc {
     /// is never reassigned while the object lives.
     pub native: usize,
     /// Intrinsic id for a native entry the call template can inline entirely (0 = none;
-    /// see `INTRINSIC_CHAR_CODE_AT`). Filled from the fn pointer at record time.
+    /// see `INTRINSIC_ASCII_CODE_UNIT`). Filled from the fn pointer at record time.
     pub intrinsic: u8,
 }
 
@@ -276,9 +276,9 @@ pub struct CallIc {
 /// first gate routes them to the helper.
 pub const CALL_IC_NEEDS_ENV: u8 = 16;
 
-/// `String.prototype.charCodeAt`: the call template inlines the all-ASCII receiver + exact-u32
+/// `String.prototype.charCodeAt` and `codePointAt`: inline the all-ASCII receiver + exact-u32
 /// in-bounds index case to a byte load (see `crate::lstr::ASCII_HINT`).
-pub const INTRINSIC_CHAR_CODE_AT: u8 = 1;
+pub const INTRINSIC_ASCII_CODE_UNIT: u8 = 1;
 pub const INTRINSIC_STRING_SLICE: u8 = 2;
 pub const INTRINSIC_OBJECT_HAS_OWN: u8 = 3;
 pub const INTRINSIC_FUNCTION_APPLY: u8 = 4;
@@ -8479,9 +8479,11 @@ unsafe fn jit_call_inner(
                                 intrinsic: match nf as *const () as usize {
                                     p if p
                                         == crate::builtins::nf_char_code_at as *const ()
+                                            as usize
+                                        || p == crate::builtins::nf_code_point_at as *const ()
                                             as usize =>
                                     {
-                                        INTRINSIC_CHAR_CODE_AT
+                                        INTRINSIC_ASCII_CODE_UNIT
                                     }
                                     p if p == crate::builtins::nf_char_at as *const () as usize => {
                                         INTRINSIC_CHAR_AT

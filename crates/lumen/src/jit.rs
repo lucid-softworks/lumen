@@ -3096,7 +3096,7 @@ pub fn compile(
                             collection_insert::emit(&mut a, pc, 1, done, l_unwind);
                             a.cmp_imm_w(9, crate::bytecode::INTRINSIC_CHAR_AT as u32);
                             a.b_cond(C_EQ, char_at);
-                            a.cmp_imm_w(9, crate::bytecode::INTRINSIC_CHAR_CODE_AT as u32);
+                            a.cmp_imm_w(9, crate::bytecode::INTRINSIC_ASCII_CODE_UNIT as u32);
                             a.b_cond(C_EQ, char_code);
                             a.cmp_imm_w(9, crate::bytecode::INTRINSIC_MATH_SQRT as u32);
                             a.b_cond(C_EQ, sqrt);
@@ -3158,8 +3158,8 @@ pub fn compile(
                             a.ucvtf_d_w(1, 9);
                             a.fcmp(0, 1);
                             a.b_cond(C_NE, hit_slow);
-                            // bounds (ASCII: byte index == unit index); OOB answers NaN in the
-                            // helper
+                            // Bounds (ASCII: byte index == unit index). Out-of-bounds results
+                            // differ by builtin and remain on its original native path.
                             a.ldr_w_imm(14, 11, crate::lstr::LEN_OFF as u32);
                             a.cmp_reg_x(9, 14);
                             a.b_cond(C_HS, hit_slow);

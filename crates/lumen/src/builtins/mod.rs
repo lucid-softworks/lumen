@@ -31,6 +31,8 @@ mod proxy;
 mod reflect;
 mod regexp;
 mod shadowrealm;
+mod string_code_point;
+pub(crate) use string_code_point::nf_code_point_at;
 mod typedarray;
 mod weakrefs;
 
@@ -8355,7 +8357,7 @@ fn locale_upper(s: &str, lang: Option<&str>) -> String {
 }
 
 /// `String.prototype.charCodeAt` (named: the JIT's call-IC fill compares the fn pointer to
-/// tag intrinsic entries — see `bytecode::INTRINSIC_CHAR_CODE_AT`).
+/// tag intrinsic entries — see `bytecode::INTRINSIC_ASCII_CODE_UNIT`).
 pub(crate) fn nf_char_code_at(
     i: &mut crate::interpreter::Interp,
     this: Value,
@@ -8948,26 +8950,7 @@ fn install_string(it: &mut Interp) {
             }
         })
     });
-    it.def_method(&sp, "codePointAt", 1, |i, this, args| {
-        let s = this_string(i, &this)?;
-        let n = ab(i.to_number(&arg(args, 0)))?;
-        let n = if n.is_nan() { 0.0 } else { n.trunc() };
-        if n < 0.0 || !n.is_finite() {
-            return Ok(Value::Undefined);
-        }
-        let idx = n as usize;
-        Ok(match i.unit_at(&s, idx) {
-            Some(u) if (0xD800..0xDC00).contains(&u) => match i.unit_at(&s, idx + 1) {
-                Some(lo) if (0xDC00..0xE000).contains(&lo) => {
-                    let c = 0x10000 + ((u as u32 - 0xD800) << 10) + (lo as u32 - 0xDC00);
-                    Value::Num(c as f64)
-                }
-                _ => Value::Num(u as f64),
-            },
-            Some(u) => Value::Num(u as f64),
-            None => Value::Undefined,
-        })
-    });
+    it.def_method(&sp, "codePointAt", 1, nf_code_point_at);
     it.def_method(&sp, "trimStart", 0, |i, this, _| {
         Ok(Value::from_string(
             this_string(i, &this)?

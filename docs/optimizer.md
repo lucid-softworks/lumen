@@ -655,3 +655,32 @@ The external optimizer directory contains `dense-collections-{results,summary,me
 the corresponding `dense-collections-other-keys` results and summary, drivers and workload
 hashes, and `lumen-dense-collections`. Files prefixed `dense-collections-initial` retain the
 earlier dispatch experiment and noisy comparison; they are not the final measurement.
+
+### ASCII code-point reads
+
+String.prototype.codePointAt now shares charCodeAt's guarded native byte-load path for
+ASCII receivers and exact, in-bounds integer indices. The call cache still checks the exact
+builtin and realm. All other cases call the original named implementation, preserving
+Unicode surrogate pairs, coercion order and codePointAt's undefined out-of-bounds result.
+No new machine-code emitter or helper ABI is needed for the shared ASCII case.
+
+Three new all-tier tests cover warm ASCII reads, Unicode and index edge cases, coercion,
+prototype overrides and foreign error realms. A native-call counter proves that 1000 hot
+ASCII reads bypass native dispatch rather than merely producing the correct result through
+fallback. All 645 unit and 34 integration tests pass, as do 41 codePointAt/charCodeAt
+conformance cases with first-call JIT enabled. Formatting, strict module checks and the
+existing 86/88 Clippy diagnostic baseline also match.
+
+Three rotated release runs on the same M4 produced these medians:
+
+| Workload | Before | ASCII code-point path | Node 24.18.0 | Bun 1.3.14 |
+| --- | ---: | ---: | ---: | ---: |
+| 10000 ASCII code-point reads, microseconds | 370.0 | 208.0 | 12.53 | 9.87 |
+| 10000 verified Djot iterations, milliseconds | 4144 | 3957 | 234 | 148 |
+| 5000 verified DeltaBlue iterations, milliseconds | 10042 | 10098 | 202 | 318 |
+
+ASCII read time falls 43.8%; Djot improves in every pair, with a 4.5% lower median.
+DeltaBlue is approximately flat. This still leaves Djot 16.9x behind Node and 26.7x behind
+Bun, and the ASCII microbenchmark itself is far from the 2x target. The external optimizer
+directory retains `code-point-{results,summary,metadata}.json`, the comparison driver,
+workloads and `lumen-code-point`. The classic suite has not been rerun for this change.
