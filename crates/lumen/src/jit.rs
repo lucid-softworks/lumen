@@ -24,6 +24,12 @@
     allow(dead_code)
 )]
 
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+mod local_load;
+
 use std::rc::Rc;
 
 use crate::bytecode::Chunk;
@@ -1452,6 +1458,7 @@ pub fn compile(
     }
     let cfg = crate::jit_ir::Cfg::build(chunk).ok()?;
     let max_stack = cfg.jit_stack_capacity();
+    let last_uses = crate::jit_ir::liveness::LastUses::build(chunk, &cfg);
     // Debug: `LUMEN_JIT_DUMP=<substr>` prints the op stream of chunks whose leading slot names
     // contain the substring (empty value = all chunks) as they compile.
     if let Ok(pat) = std::env::var("LUMEN_JIT_DUMP") {
@@ -2694,39 +2701,7 @@ pub fn compile(
                 a.bind(done);
             }
             Op::LoadLocal(slot) if fast & 8 != 0 && (*slot as u32) * 16 + 16 < 4096 => {
-                let off = *slot as u32 * 16;
-                let slow = a.new_label();
-                let done = a.new_label();
-                a.ldrb_imm(9, 22, off);
-                a.cmp_imm_w(9, 1); // Empty = TDZ throw → slow
-                a.b_cond(C_EQ, slow);
-                if rc_ok {
-                    a.cmp_imm_w(9, 5);
-                    a.b_cond(C_EQ, slow);
-                    a.ldr_imm(10, 22, off);
-                    a.ldr_imm(11, 22, off + 8);
-                    a.stur(10, 20, 0);
-                    a.stur(11, 20, 8);
-                    let nobump = a.new_label();
-                    a.cmp_imm_w(9, 6);
-                    a.b_cond(C_LO, nobump);
-                    a.ldur(13, 11, rc_strong);
-                    a.add_imm(13, 13, 1);
-                    a.stur(13, 11, rc_strong);
-                    a.bind(nobump);
-                } else {
-                    a.cmp_imm_w(9, 4);
-                    a.b_cond(C_HI, slow);
-                    a.ldr_imm(10, 22, off);
-                    a.ldr_imm(11, 22, off + 8);
-                    a.stur(10, 20, 0);
-                    a.stur(11, 20, 8);
-                }
-                a.add_imm(20, 20, 16);
-                a.b(done);
-                a.bind(slow);
-                emit_exec(&mut a, pc as u32, l_unwind);
-                a.bind(done);
+                local_load::emit(&mut a, *slot, pc, layout, last_uses.contains(pc), l_unwind);
             }
             Op::StoreLocal(slot) if fast & 16 != 0 && (*slot as u32) * 16 + 16 < 4096 => {
                 let off = *slot as u32 * 16;
