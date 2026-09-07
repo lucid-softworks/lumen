@@ -1147,3 +1147,36 @@ All 48 runs exit successfully and verify their outputs. No builds, tests or prof
 overlap timings. The external optimizer directory retains `numeric-expr-{results,summary,
 metadata}.json`, drivers/workloads and `lumen-numeric-expr`; the metadata also identifies its
 byte-identical local execution copy.
+
+### Full-suite comparison including nested numeric expressions
+
+Three rotated runs on September 7, 2026 use retained commit `2bf3b7d`, Node 24.18.0 and
+Bun 1.3.14. This snapshot includes adjacent store/load forwarding and nested numeric
+expressions; the rejected standalone property-chain prefix is absent. Classic V8 version 7
+scores are higher-is-better; cells are medians of three runs.
+
+| Benchmark | Lumen | Node | Bun |
+| --- | ---: | ---: | ---: |
+| Richards | 23571 | 65898 | 72627 |
+| DeltaBlue | 3597 | 151833 | 109928 |
+| Crypto | 23853 | 91997 | 119717 |
+| RayTrace | 6252 | 137268 | 305393 |
+| EarleyBoyer | 3638 | 148206 | 158468 |
+| RegExp | 1630 | 22843 | 30821 |
+| Splay | 10252 | 79845 | 94481 |
+| NavierStokes | 37804 | 70935 | 71161 |
+| Composite | 8587 | 83560 | 99325 |
+
+The composite gap is 9.73x to Node and 11.57x to Bun. Lumen's scores were 8587, 8587 and
+8532. NavierStokes remains within 2x both engines (1.88x each); overall proximity remains
+unmet. The separate verified Djot workload above remains 16.9x Node and 26.7x Bun, and the
+5000-iteration DeltaBlue workload remains 46.5x/29.3x. Those standalone elapsed-time ratios
+are distinct from the classic suite's scores and calibration.
+
+The earlier composite of 8558 and this 8587 snapshot were taken under different host
+conditions, so their small difference is not an attributed aggregate gain. The paired
+9236→9067 ms DeltaBlue experiment establishes the latest 1.8% improvement. All nine full
+runs exited successfully with eight benchmark scores and a composite, with no builds,
+tests or profiling runs overlapping. The external optimizer directory retains
+`numeric-expr-v8-{results,summary,metadata}.json` (including host CPU snapshots), its driver,
+and the hash-verified release executable identified in the metadata.
