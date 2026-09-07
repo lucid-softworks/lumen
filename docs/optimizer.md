@@ -898,3 +898,36 @@ rerun for this allocator change. No Lumen builds or tests overlapped these measu
 `LUMEN_JIT_NO_CFG_REGALLOC=1` selects the previous fixed-register emitter in the same binary.
 The external optimizer directory retains `cfg-regalloc-{results,summary,metadata}.json`,
 the comparison driver and `lumen-cfg-regalloc`.
+
+### Numeric region inputs
+
+Closed numeric CFG regions now guard and pin up to six numeric inputs from enclosing
+bindings or own data properties, including `this` fields and array length. Live property
+cache ways are checked at entry; array named slots additionally check their keys because
+numeric element changes can move those slots. Accessors, proxies, inherited properties,
+coercion and failed guards retain baseline execution. Regions contain no calls or object
+writes, and side exits reload inputs before reentry.
+
+All 662 unit and 34 integration tests pass, including changed closure bindings, shifted
+array slots and a mid-loop getter that changes both a field and the loop bound. Conformance
+remains 21001/21003, differential testing reports 1996 agreements and four budget skips,
+and Clippy retains the same 86/88 baseline. Formatting and the strict module audit pass.
+
+Three rotated same-binary comparisons produced these medians. Numeric rows report
+microseconds per 10000 iterations; application rows report milliseconds.
+
+| Workload | Inputs disabled | Inputs enabled | Node 24.18.0 | Bun 1.3.14 |
+| --- | ---: | ---: | ---: | ---: |
+| Numeric fields | 69.41 | 7.60 | 8.67 | 6.50 |
+| Enclosing numbers | 36.40 | 7.60 | 7.47 | 7.33 |
+| Djot | 3949 | 3914 | 228 | 146 |
+| DeltaBlue | 9758 | 9841 | 199 | 308 |
+
+Both numeric kernels improve in every pair and are within 1.17x both other engines.
+Applications remain essentially flat: Djot is still 17–27x slower, and DeltaBlue 32–49x
+slower. These kernels demonstrate useful coverage, not overall engine parity. No Lumen
+builds or tests overlapped the timings; the classic suite was not rerun for this change.
+
+`LUMEN_JIT_NO_CFG_INPUTS=1` disables this extension. The external optimizer directory
+retains `cfg-inputs-{results,summary,metadata}.json`, `compare-cfg-inputs.py`, the verified
+workloads and `lumen-cfg-inputs`.

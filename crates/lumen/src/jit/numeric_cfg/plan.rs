@@ -1,4 +1,5 @@
 //! Discover numeric regions from CFG edges, without matching a fixed instruction sequence.
+use super::inputs::Input;
 use crate::bytecode::{Chunk, Op, UpdKind};
 use crate::jit_ir::{Cfg, RegionIr};
 
@@ -6,6 +7,7 @@ use crate::jit_ir::{Cfg, RegionIr};
 pub(super) enum Step {
     Constant(u64),
     Load(u16),
+    Input(u8),
     GetElem {
         slot: u16,
         pc: usize,
@@ -36,6 +38,7 @@ pub(super) struct Plan {
     pub locals: Vec<u16>,
     pub dirty: Vec<u16>,
     pub receivers: Vec<u16>,
+    pub inputs: Vec<Input>,
     pub exits: Vec<usize>,
 }
 
@@ -60,6 +63,7 @@ pub(super) fn build(chunk: &Chunk, cfg: &Cfg, head: usize) -> Option<Plan> {
         locals: Vec::new(),
         dirty: Vec::new(),
         receivers: Vec::new(),
+        inputs: Vec::new(),
         exits: Vec::new(),
     };
     let mut size = 0;
@@ -84,6 +88,14 @@ pub(super) fn build(chunk: &Chunk, cfg: &Cfg, head: usize) -> Option<Plan> {
         return None;
     }
     if plan.receivers.len() > 4 || plan.receivers.iter().any(|s| plan.locals.contains(s)) {
+        return None;
+    }
+    if plan
+        .inputs
+        .iter()
+        .filter_map(Input::receiver)
+        .any(|s| plan.locals.contains(&s) || s as usize * 16 + 8 >= 4096)
+    {
         return None;
     }
     for (_, target) in &region.exits {
@@ -125,50 +137,54 @@ fn translate(
         if cfg.stack_depth_at(pc)? > 8 {
             return None;
         }
-        let step = match ops[pc] {
-            Op::Const(k) => Step::Constant(chunk.jit_const_num(k)?),
-            Op::LoadLocal(s) => {
-                local(plan, s, false)?;
-                Step::Load(s)
-            }
-            Op::GetElemLocal(slot) => {
-                if slot as usize * 16 + 8 >= 4096 {
-                    return None;
+        let step = if let Some(source) = Input::decode(chunk, ops[pc]) {
+            input(plan, source)?
+        } else {
+            match ops[pc] {
+                Op::Const(k) => Step::Constant(chunk.jit_const_num(k)?),
+                Op::LoadLocal(s) => {
+                    local(plan, s, false)?;
+                    Step::Load(s)
                 }
-                if !plan.receivers.contains(&slot) {
-                    plan.receivers.push(slot);
+                Op::GetElemLocal(slot) => {
+                    if slot as usize * 16 + 8 >= 4096 {
+                        return None;
+                    }
+                    if !plan.receivers.contains(&slot) {
+                        plan.receivers.push(slot);
+                    }
+                    Step::GetElem { slot, pc }
                 }
-                Step::GetElem { slot, pc }
-            }
-            Op::StoreLocal(s) => {
-                local(plan, s, true)?;
-                Step::Store(s)
-            }
-            Op::UpdateLocal(s, k) => {
-                local(plan, s, true)?;
-                Step::Update(s, k)
-            }
-            Op::Add => Step::Arithmetic(0),
-            Op::Sub => Step::Arithmetic(1),
-            Op::Mul => Step::Arithmetic(2),
-            Op::Div => Step::Arithmetic(3),
-            Op::Neg => Step::Negate,
-            Op::Dup => Step::Duplicate,
-            Op::Pop => Step::Pop,
-            Op::Jump(target) => Step::Jump(target as usize),
-            op => {
-                let condition = false_condition(op)?;
-                let Op::JumpIfFalse(no) = *ops.get(pc + 1)? else {
-                    return None;
-                };
-                if pc + 2 != end || cfg.stack_depth_at(pc) != Some(2) {
-                    return None;
+                Op::StoreLocal(s) => {
+                    local(plan, s, true)?;
+                    Step::Store(s)
                 }
-                pc += 1;
-                Step::Compare {
-                    condition,
-                    yes: pc + 1,
-                    no: no as usize,
+                Op::UpdateLocal(s, k) => {
+                    local(plan, s, true)?;
+                    Step::Update(s, k)
+                }
+                Op::Add => Step::Arithmetic(0),
+                Op::Sub => Step::Arithmetic(1),
+                Op::Mul => Step::Arithmetic(2),
+                Op::Div => Step::Arithmetic(3),
+                Op::Neg => Step::Negate,
+                Op::Dup => Step::Duplicate,
+                Op::Pop => Step::Pop,
+                Op::Jump(target) => Step::Jump(target as usize),
+                op => {
+                    let condition = false_condition(op)?;
+                    let Op::JumpIfFalse(no) = *ops.get(pc + 1)? else {
+                        return None;
+                    };
+                    if pc + 2 != end || cfg.stack_depth_at(pc) != Some(2) {
+                        return None;
+                    }
+                    pc += 1;
+                    Step::Compare {
+                        condition,
+                        yes: pc + 1,
+                        no: no as usize,
+                    }
                 }
             }
         };
@@ -182,6 +198,19 @@ fn translate(
         steps.push(Step::Jump(end));
     }
     Some(steps)
+}
+
+fn input(plan: &mut Plan, input: Input) -> Option<Step> {
+    let index = if let Some(index) = plan.inputs.iter().position(|old| old.same_source(&input)) {
+        index
+    } else {
+        if plan.inputs.len() == 6 {
+            return None;
+        }
+        plan.inputs.push(input);
+        plan.inputs.len() - 1
+    };
+    Some(Step::Input(index as u8))
 }
 
 fn false_condition(op: Op) -> Option<u32> {

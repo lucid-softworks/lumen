@@ -10,6 +10,10 @@ pub(super) fn step(a: &mut Asm, plan: &Plan, step: Step, depth: &mut u32) {
             a.fmov_d_x(top, 9);
             *depth += 1;
         }
+        Step::Input(index) => {
+            a.fmov_d_d(top, super::super::inputs::register(index));
+            *depth += 1;
+        }
         Step::Load(s) => {
             a.fmov_d_d(top, plan.home(s));
             *depth += 1;

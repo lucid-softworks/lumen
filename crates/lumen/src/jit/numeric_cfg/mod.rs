@@ -2,6 +2,7 @@
 mod arrays;
 mod branches;
 mod emit;
+mod inputs;
 mod plan;
 mod values;
 use super::asm::Asm;
@@ -24,6 +25,12 @@ pub(super) fn try_emit(
     };
     if !plan.receivers.is_empty()
         && (!arrays::supported(layout) || std::env::var_os("LUMEN_JIT_NO_NUMERIC_ARRAYS").is_some())
+    {
+        return false;
+    }
+    if !plan.inputs.is_empty()
+        && (!inputs::supported(&plan.inputs, layout)
+            || std::env::var_os("LUMEN_JIT_NO_CFG_INPUTS").is_some())
     {
         return false;
     }

@@ -94,6 +94,7 @@ impl Values {
         }
         match step {
             Step::Load(slot) => self.stack.push(plan.home(slot)),
+            Step::Input(index) => self.stack.push(super::inputs::register(index)),
             Step::Constant(bits) => {
                 let result = self.destination(a, plan, next, &[]);
                 a.mov_imm64(9, bits);

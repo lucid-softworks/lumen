@@ -24,6 +24,7 @@ pub(super) fn emit(
     for &slot in &plan.locals {
         a.ldr_d_imm(plan.home(slot), 22, slot as u32 * 16 + 8);
     }
+    super::inputs::emit(a, &plan.inputs, layout, plain);
     super::arrays::preamble(a, plan, layout, plain);
     #[cfg(test)]
     super::record_entry(a);
