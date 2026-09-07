@@ -1,8 +1,8 @@
 //! Set algebra and set-like protocol helpers.
 
 use super::{canonicalize_map_key, coll_live_len};
-use crate::builtins::collection_data::CollectionData;
-use crate::builtins::{ab, arg, coll_ptr_kind, new_from_ctor, same_value_zero, set_internal};
+use crate::builtins::collection_data::{CollectionData, CollectionKind};
+use crate::builtins::{ab, arg, coll_ptr_kind, new_from_ctor, same_value_zero};
 use crate::interpreter::Interp;
 use crate::value::{Object, Value};
 use std::rc::Rc;
@@ -18,7 +18,7 @@ fn new_set(i: &mut Interp, values: Vec<Value>) -> Value {
     let obj =
         new_from_ctor(i, "Set").unwrap_or_else(|_| Object::new(i.extra_protos.get("Set").cloned()));
     let ptr = Rc::as_ptr(&obj) as usize;
-    let mut entries = CollectionData::default();
+    let mut entries = CollectionData::new(CollectionKind::Set);
     for v in values {
         // Set records canonicalize -0 to +0.
         let v = canonicalize_map_key(v);
@@ -26,7 +26,6 @@ fn new_set(i: &mut Interp, values: Vec<Value>) -> Value {
     }
     i.gc_pin(&obj);
     i.map_data.insert(ptr, entries);
-    set_internal(&obj, "__ck", Value::str("Set"));
     Value::Obj(obj)
 }
 /// GetSetRecord: a set-like `other` exposes a numeric `size`, and callable `has` and `keys`.

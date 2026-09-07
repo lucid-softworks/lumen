@@ -1,5 +1,6 @@
 //! Live Map and Set iteration across mutation.
 
+use crate::builtins::collection_data::CollectionKind;
 use crate::builtins::{ab, arg, coll_ptr, coll_ptr_kind, iter_result, map_ptr, set_internal};
 use crate::interpreter::Interp;
 use crate::value::{set_builtin, Gc, Object, Value};
@@ -44,12 +45,8 @@ pub(super) fn collection_for_each(
 }
 
 fn collection_iter(i: &mut Interp, this: &Value, kind: u8) -> Result<Value, Value> {
-    coll_ptr(i, this)?; // brand check (a real Map/Set)
-    let is_set = this
-        .as_obj()
-        .and_then(|o| o.borrow().props.get("__ck").map(|p| p.value()))
-        .map(|v| matches!(v, Value::Str(ref s) if &**s == "Set"))
-        .unwrap_or(false);
+    let ptr = coll_ptr(i, this)?;
+    let is_set = i.map_data[&ptr].kind() == CollectionKind::Set;
     let key = if is_set {
         "%SetIteratorPrototype%"
     } else {

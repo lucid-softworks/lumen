@@ -1,30 +1,45 @@
 //! Weak collection brand checks and prototype methods.
+//! Weakness is not modeled yet: entries remain strongly stored. Brand and key checks here
+//! enforce the distinct WeakMap/WeakSet APIs without changing that storage limitation.
 
+use crate::builtins::collection_data::CollectionKind;
 use crate::builtins::{ab, arg, can_be_held_weakly, map_ptr, set_to_string_tag};
 use crate::interpreter::Interp;
 use crate::value::{set_builtin, NativeFn, Object, Property, Value};
 
-/// WeakMap/WeakSet: like Map/Set but keys must be objects and there is no iteration/size (we do not
-/// model weakness — entries simply persist, which is unobservable to non-GC tests).
-/// Resolve the backing-store pointer for a weak-collection receiver, enforcing its brand: `want` is
-/// the exact kind ("WeakMap"/"WeakSet") for kind-specific methods, or "Weak" to accept either for
-/// the methods (has/delete) shared by both.
-fn weak_brand_ptr(i: &mut Interp, this: &Value, want: &str) -> Result<usize, Value> {
-    let ptr = map_ptr(this)
-        .filter(|p| i.map_data.contains_key(p))
-        .ok_or_else(|| i.make_error("TypeError", "method called on incompatible receiver"))?;
-    let kind = this
-        .as_obj()
-        .and_then(|o| o.borrow().props.get("__ck").map(|p| p.value()));
-    let ok = match &kind {
-        Some(Value::Str(s)) if want == "Weak" => s.starts_with("Weak"),
-        Some(Value::Str(s)) => &**s == want,
-        _ => false,
+/// Require the exact weak collection slot; ordinary properties cannot supply it.
+fn weak_brand_ptr(i: &Interp, this: &Value, want: CollectionKind) -> Result<usize, Value> {
+    map_ptr(this)
+        .filter(|ptr| i.map_data.get(ptr).is_some_and(|data| data.kind() == want))
+        .ok_or_else(|| i.make_error("TypeError", "method called on incompatible receiver"))
+}
+
+fn weak_has<const SET: bool>(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
+    let kind = if SET {
+        CollectionKind::WeakSet
+    } else {
+        CollectionKind::WeakMap
     };
-    if !ok {
-        return Err(i.make_error("TypeError", "method called on incompatible receiver"));
-    }
-    Ok(ptr)
+    let ptr = weak_brand_ptr(i, &this, kind)?;
+    let key = args.first().unwrap_or(&Value::Undefined);
+    Ok(Value::Bool(i.map_data[&ptr].contains(key)))
+}
+
+fn weak_delete<const SET: bool>(
+    i: &mut Interp,
+    this: Value,
+    args: &[Value],
+) -> Result<Value, Value> {
+    let kind = if SET {
+        CollectionKind::WeakSet
+    } else {
+        CollectionKind::WeakMap
+    };
+    let ptr = weak_brand_ptr(i, &this, kind)?;
+    let key = args.first().unwrap_or(&Value::Undefined);
+    Ok(Value::Bool(
+        i.map_data.get_mut(&ptr).unwrap().remove_weak(key),
+    ))
 }
 
 pub(super) fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ctor_fn: NativeFn) {
@@ -32,7 +47,7 @@ pub(super) fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ct
     it.extra_protos.insert(name, proto.clone());
     let adder: NativeFn = if is_set {
         |i, this, a| {
-            let ptr = weak_brand_ptr(i, &this, "WeakSet")?;
+            let ptr = weak_brand_ptr(i, &this, CollectionKind::WeakSet)?;
             let key = arg(a, 0);
             if !can_be_held_weakly(i, &key) {
                 return Err(i.make_error("TypeError", "Invalid value used in weak set"));
@@ -43,7 +58,7 @@ pub(super) fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ct
         }
     } else {
         |i, this, a| {
-            let ptr = weak_brand_ptr(i, &this, "WeakMap")?;
+            let ptr = weak_brand_ptr(i, &this, CollectionKind::WeakMap)?;
             let (key, val) = (arg(a, 0), arg(a, 1));
             if !can_be_held_weakly(i, &key) {
                 return Err(i.make_error("TypeError", "Invalid value used as weak map key"));
@@ -61,7 +76,7 @@ pub(super) fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ct
     );
     if !is_set {
         it.def_method(&proto, "get", 1, |i, this, a| {
-            let ptr = weak_brand_ptr(i, &this, "WeakMap")?;
+            let ptr = weak_brand_ptr(i, &this, CollectionKind::WeakMap)?;
             let key = arg(a, 0);
             Ok(i.map_data
                 .get(&ptr)
@@ -70,7 +85,7 @@ pub(super) fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ct
         });
         // Upsert proposal: getOrInsert(key, value) / getOrInsertComputed(key, callbackfn).
         it.def_method(&proto, "getOrInsert", 2, |i, this, a| {
-            let ptr = weak_brand_ptr(i, &this, "WeakMap")?;
+            let ptr = weak_brand_ptr(i, &this, CollectionKind::WeakMap)?;
             let key = arg(a, 0);
             if !can_be_held_weakly(i, &key) {
                 return Err(i.make_error("TypeError", "Invalid value used as weak map key"));
@@ -86,7 +101,7 @@ pub(super) fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ct
             Ok(value)
         });
         it.def_method(&proto, "getOrInsertComputed", 2, |i, this, a| {
-            let ptr = weak_brand_ptr(i, &this, "WeakMap")?;
+            let ptr = weak_brand_ptr(i, &this, CollectionKind::WeakMap)?;
             let key = arg(a, 0);
             if !can_be_held_weakly(i, &key) {
                 return Err(i.make_error("TypeError", "Invalid value used as weak map key"));
@@ -107,25 +122,18 @@ pub(super) fn install_weak(it: &mut Interp, name: &'static str, is_set: bool, ct
             Ok(value)
         });
     }
-    it.def_method(&proto, "has", 1, |i, this, a| {
-        let ptr = weak_brand_ptr(i, &this, "Weak")?;
-        let key = arg(a, 0);
-        Ok(Value::Bool(
-            i.map_data
-                .get(&ptr)
-                .map(|e| e.contains(&key))
-                .unwrap_or(false),
-        ))
-    });
-    it.def_method(&proto, "delete", 1, |i, this, a| {
-        let ptr = weak_brand_ptr(i, &this, "Weak")?;
-        let key = arg(a, 0);
-        let mut removed = false;
-        if let Some(e) = i.map_data.get_mut(&ptr) {
-            removed = e.remove_weak(&key);
-        }
-        Ok(Value::Bool(removed))
-    });
+    let has: NativeFn = if is_set {
+        weak_has::<true>
+    } else {
+        weak_has::<false>
+    };
+    let delete: NativeFn = if is_set {
+        weak_delete::<true>
+    } else {
+        weak_delete::<false>
+    };
+    it.def_method(&proto, "has", 1, has);
+    it.def_method(&proto, "delete", 1, delete);
     let ctor = it.make_native(name, 0, ctor_fn);
     ctor.borrow_mut().props.insert(
         "prototype",

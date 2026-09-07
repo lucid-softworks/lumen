@@ -9,6 +9,26 @@ use std::rc::Rc;
 
 const NO_SLOT: usize = usize::MAX;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum CollectionKind {
+    #[default]
+    Map,
+    Set,
+    WeakMap,
+    WeakSet,
+}
+
+impl CollectionKind {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Map => "Map",
+            Self::Set => "Set",
+            Self::WeakMap => "WeakMap",
+            Self::WeakSet => "WeakSet",
+        }
+    }
+}
+
 struct Entry {
     pair: Option<(Value, Value)>,
     // Intrusive collision chain avoids allocating a Vec for every distinct key hash.
@@ -17,6 +37,7 @@ struct Entry {
 
 #[derive(Default)]
 pub(crate) struct CollectionData {
+    kind: CollectionKind,
     entries: Vec<Entry>,
     // Logical position of entries[0], retained when clear releases the backing list.
     base: usize,
@@ -26,6 +47,17 @@ pub(crate) struct CollectionData {
 }
 
 impl CollectionData {
+    pub(crate) fn new(kind: CollectionKind) -> Self {
+        Self {
+            kind,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn kind(&self) -> CollectionKind {
+        self.kind
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.live_len
     }

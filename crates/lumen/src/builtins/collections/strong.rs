@@ -4,7 +4,7 @@ use super::iteration::{collection_for_each, collection_iter_kind};
 use super::{canonicalize_map_key, coll_live_len};
 use crate::builtins::collection_data::CollectionData;
 use crate::builtins::{
-    ab, arg, coll_ptr_kind, install_species, same_value_zero, set_internal, set_to_string_tag,
+    ab, arg, coll_ptr_kind, install_species, same_value_zero, set_to_string_tag,
 };
 use crate::interpreter::Interp;
 use crate::value::{set_builtin, NativeFn, Object, Property, Value};
@@ -223,7 +223,6 @@ pub(super) fn install_map_like(
                 .collect();
             i.gc_pin(&m);
             i.map_data.insert(ptr, entries);
-            set_internal(&m, "__ck", Value::str("Map"));
             Ok(Value::Obj(m))
         });
     }

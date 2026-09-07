@@ -445,3 +445,48 @@ brand failures and foreign-realm errors. Collection conformance passes 813/813 a
 differential testing has 1996 agreements with four budget skips. Formatting and strict
 module audits pass. Strict Clippy retains the existing 86/88 diagnostics, none in the
 new modules or modified collection storage.
+
+### Internal collection brands
+
+CollectionData now records its immutable Map/Set/WeakMap/WeakSet kind. Constructors,
+subclass slot transfers, Map.groupBy and Set algebra results carry this kind; normal
+properties never participate in brand checks. The earlier `__ck` compatibility behavior
+allowed a Map to masquerade as a Set, so it was deliberately corrected. New collections
+expose no marker property, and a user-created `__ck` property has ordinary JS semantics.
+WeakMap and WeakSet has/delete methods now require their distinct internal slots too.
+This follows the [ECMAScript keyed collection requirements](https://tc39.es/ecma262/2023/multipage/keyed-collections.html).
+Weak entries still use the existing strong storage; this change does not implement GC
+weakness.
+
+The hot read/insert helpers compare the stored kind directly, avoiding receiver-property
+lookup and temporary string ownership. Shared strong brand checks were extracted into
+`builtins/collections/brand.rs` with tests for spoofing, accessor properties, subclasses,
+alternate new-target prototypes, factory results, weak compaction and foreign realms.
+The standalone spoofing probe now matches Node and Bun: Map.get remains valid after an
+ordinary marker write, while Set.add still rejects that Map.
+
+Three rotated full comparisons against `33fd903` measured Map build/lookup at
+386.7/240 to 346.7/198 microseconds and Set build/lookup at 413.3/224 to 373.3/173.3.
+The first baseline process was an outlier (513.3/420 and 526.7/412), so five further
+paired collection runs checked repeatability. Their medians were:
+
+| Workload | Before | After |
+|---|---:|---:|
+| Map build | 393.3 | 350 |
+| Map lookup | 244 | 204 |
+| Set build | 413.3 | 380 |
+| Set lookup | 224 | 183.3 |
+
+The outlier did not recur. These repeats support about 16–18% lower lookup time and
+8–11% lower construction time. Node/Bun in the full comparison measured Map build/lookup
+at 190/32.4 and 117.5/31.2, and Set at 146.7/26.8 and 107.8/28. All output checks pass.
+Djot measured 4598 to 4658 ms (about 1.3% slower in this run; Node/Bun 228/143), while
+DeltaBlue was flat at 9741 to 9703 ms (203/319). There is no application speedup claim,
+and the overall goal remains unfulfilled.
+
+The external optimizer directory holds `compare-collection-brands.py`,
+`collection-brands-results.json`, `collection-brands-summary.json` and
+`collection-brands-repeat.json`. Validation passes 633 unit and 34 integration tests,
+813/813 collection conformance cases, and 1996 differential agreements with four budget
+skips. Formatting and strict structure audits pass; strict Clippy retains the existing
+86/88 diagnostics, none in the modified collection modules.

@@ -1,11 +1,12 @@
 //! Collection installation and constructors; storage and method families have separate owners.
 
-use super::collection_data::CollectionData;
-use super::{ab, new_from_ctor, set_internal, set_to_string_tag, step_iter_with};
+use super::collection_data::{CollectionData, CollectionKind};
+use super::{ab, new_from_ctor, set_to_string_tag, step_iter_with};
 use crate::interpreter::Interp;
 use crate::value::{Object, Value};
 use std::rc::Rc;
 
+pub(super) mod brand;
 pub(crate) mod insert;
 mod iteration;
 pub(crate) mod lookup;
@@ -39,33 +40,28 @@ pub(super) fn install_collections(it: &mut Interp) {
 
 // Non-capturing constructor entry points (native fns must be bare `fn` pointers).
 fn map_ctor(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
-    collection_ctor(i, a, "Map", false)
+    collection_ctor(i, a, CollectionKind::Map)
 }
 fn set_ctor(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
-    collection_ctor(i, a, "Set", true)
+    collection_ctor(i, a, CollectionKind::Set)
 }
 fn weakmap_ctor(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
-    collection_ctor(i, a, "WeakMap", false)
+    collection_ctor(i, a, CollectionKind::WeakMap)
 }
 fn weakset_ctor(i: &mut Interp, _t: Value, a: &[Value]) -> Result<Value, Value> {
-    collection_ctor(i, a, "WeakSet", true)
+    collection_ctor(i, a, CollectionKind::WeakSet)
 }
 
-fn collection_ctor(
-    i: &mut Interp,
-    args: &[Value],
-    name: &str,
-    is_set: bool,
-) -> Result<Value, Value> {
+fn collection_ctor(i: &mut Interp, args: &[Value], kind: CollectionKind) -> Result<Value, Value> {
     if !i.constructing {
         return Err(i.make_error("TypeError", "Constructor requires 'new'"));
     }
+    let name = kind.name();
+    let is_set = matches!(kind, CollectionKind::Set | CollectionKind::WeakSet);
     let obj = new_from_ctor(i, name)?;
     let ptr = Rc::as_ptr(&obj) as usize;
     i.gc_pin(&obj);
-    i.map_data.insert(ptr, CollectionData::default());
-    // Brand the instance so prototype methods can reject cross-collection receivers.
-    set_internal(&obj, "__ck", Value::str(name));
+    i.map_data.insert(ptr, CollectionData::new(kind));
     let mv = Value::Obj(obj);
     if let Some(src) = args.first() {
         if !matches!(src, Value::Undefined | Value::Null) {

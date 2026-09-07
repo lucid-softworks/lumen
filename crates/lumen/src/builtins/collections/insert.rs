@@ -1,6 +1,9 @@
 //! Owned collection insertion shared by native methods and consuming JIT helpers.
 use super::canonicalize_map_key;
-use crate::builtins::{arg, collection_data::CollectionData};
+use crate::builtins::{
+    arg,
+    collection_data::{CollectionData, CollectionKind},
+};
 use crate::interpreter::Interp;
 use crate::value::{NativeFn, Value};
 use std::rc::Rc;
@@ -17,13 +20,15 @@ pub(super) fn intrinsic(native: usize) -> u8 {
     0
 }
 
-fn data<'a>(i: &'a mut Interp, this: &Value, kind: &str) -> Option<&'a mut CollectionData> {
+fn data<'a>(
+    i: &'a mut Interp,
+    this: &Value,
+    kind: CollectionKind,
+) -> Option<&'a mut CollectionData> {
     let object = this.as_obj()?;
-    let marker = object.borrow().props.get("__ck").map(|p| p.value());
-    if !matches!(marker, Some(Value::Str(ref s)) if &**s == kind) {
-        return None;
-    }
-    i.map_data.get_mut(&(Rc::as_ptr(object) as usize))
+    i.map_data
+        .get_mut(&(Rc::as_ptr(object) as usize))
+        .filter(|data| data.kind() == kind)
 }
 
 pub(crate) fn map_set_owned(
@@ -32,7 +37,7 @@ pub(crate) fn map_set_owned(
     key: Value,
     value: Value,
 ) -> Result<(), Value> {
-    let Some(data) = data(i, this, "Map") else {
+    let Some(data) = data(i, this, CollectionKind::Map) else {
         return Err(i.make_error("TypeError", "method called on an incompatible receiver"));
     };
     data.insert(key, value);
@@ -40,7 +45,7 @@ pub(crate) fn map_set_owned(
 }
 
 pub(crate) fn set_add_owned(i: &mut Interp, this: &Value, key: Value) -> Result<(), Value> {
-    let Some(data) = data(i, this, "Set") else {
+    let Some(data) = data(i, this, CollectionKind::Set) else {
         return Err(i.make_error("TypeError", "method called on an incompatible receiver"));
     };
     // Set iteration exposes either side of the pair. Both must contain canonical +0.

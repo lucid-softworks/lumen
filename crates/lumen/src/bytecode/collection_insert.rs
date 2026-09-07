@@ -153,8 +153,8 @@ mod tests {
             throws(()=>put(new Proxy(m,{}),{},{}));throws(()=>add(new Proxy(s,{}),{}));
             throws(()=>put({set:Map.prototype.set}, {},{}));
             throws(()=>add({add:Set.prototype.add},{}));
-            m.__ck='Set';throws(()=>put(m,1,2));m.__ck='Map';
-            s.__ck='Map';throws(()=>add(s,1));s.__ck='Set';
+            m.__ck='Set';assert(put(m,1,2)===m);m.__ck='Map';
+            s.__ck='Map';assert(add(s,1)===s);s.__ck='Set';
             assert(put(m,1,2)===m && m.get(1)===2);assert(add(s,1)===s);
             m.set();assert(m.has(undefined) && m.get(undefined)===undefined);
             m.set('missing');assert(m.has('missing') && m.get('missing')===undefined);

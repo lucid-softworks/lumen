@@ -12,6 +12,7 @@ use std::rc::Rc;
 mod atomics;
 pub(crate) mod collection_data;
 mod collections;
+use collections::brand::{coll_ptr, coll_ptr_kind};
 pub(crate) use collections::{
     insert as collection_insert, intrinsic as collection_intrinsic, lookup as collection_lookup,
 };
@@ -2898,34 +2899,6 @@ fn builtin_tag(i: &Interp, this: &Value) -> &'static str {
         }
         _ => "Object",
     }
-}
-
-/// Brand-check a Map/Set receiver: it must be an object carrying a collection data slot (every
-/// Map/Set/WeakMap/WeakSet gets one at construction), else TypeError.
-fn coll_ptr(i: &Interp, this: &Value) -> Result<usize, Value> {
-    coll_ptr_kind(i, this, None)
-}
-
-/// Resolve a Map/Set backing pointer with a brand check. `want = Some("Map"|"Set")` requires that
-/// exact kind; `None` accepts either strong collection but still rejects WeakMap/WeakSet and plain
-/// objects (which lack a strong `[[MapData]]`/`[[SetData]]` slot).
-fn coll_ptr_kind(i: &Interp, this: &Value, want: Option<&str>) -> Result<usize, Value> {
-    let err = || i.make_error("TypeError", "method called on an incompatible receiver");
-    let o = this.as_obj().ok_or_else(err)?;
-    let ptr = Rc::as_ptr(o) as usize;
-    if !i.map_data.contains_key(&ptr) {
-        return Err(err());
-    }
-    let kind = o.borrow().props.get("__ck").map(|p| p.value());
-    let ok = match (&kind, want) {
-        (Some(Value::Str(s)), Some(w)) => &**s == w,
-        (Some(Value::Str(s)), None) => &**s == "Map" || &**s == "Set",
-        _ => false,
-    };
-    if !ok {
-        return Err(err());
-    }
-    Ok(ptr)
 }
 
 /// A bound handler `(target, this=Undefined, [bound...])` used to thread per-element state into a
