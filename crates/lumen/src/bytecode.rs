@@ -19,6 +19,7 @@
 
 mod activation;
 pub(crate) mod array_destructure;
+pub(crate) mod array_iterator_step;
 pub(crate) mod collection_insert;
 pub(crate) mod collection_lookup;
 mod for_in;
@@ -5675,9 +5676,20 @@ fn run_vm(
                 stack.push(nx);
             }
             Op::IterStepL(is, ns) => {
-                let it = slots[is as usize].clone();
-                let nx = slots[ns as usize].clone();
-                match i.iterator_step(&it, &nx)? {
+                // The pure fast path borrows rooted slots; only fallback crosses a callback.
+                let stepped = match array_iterator_step::try_yield(
+                    i,
+                    &slots[is as usize],
+                    &slots[ns as usize],
+                ) {
+                    Some(value) => Some(value),
+                    None => {
+                        let it = slots[is as usize].clone();
+                        let nx = slots[ns as usize].clone();
+                        i.iterator_step(&it, &nx)?
+                    }
+                };
+                match stepped {
                     Some(v) => {
                         stack.push(v);
                         stack.push(Value::Bool(true));
@@ -9539,9 +9551,17 @@ unsafe fn jit_exec_inner(
             push!(nx);
         }
         Op::IterStepL(is, ns) => {
-            let it = slots[is as usize].clone();
-            let nx = slots[ns as usize].clone();
-            match i.iterator_step(&it, &nx)? {
+            // The pure fast path borrows rooted slots; only fallback crosses a callback.
+            let stepped =
+                match array_iterator_step::try_yield(i, &slots[is as usize], &slots[ns as usize]) {
+                    Some(value) => Some(value),
+                    None => {
+                        let it = slots[is as usize].clone();
+                        let nx = slots[ns as usize].clone();
+                        i.iterator_step(&it, &nx)?
+                    }
+                };
+            match stepped {
                 Some(v) => {
                     push!(v);
                     push!(Value::Bool(true));

@@ -2177,3 +2177,102 @@ source ZIP, binary hashes and validation artifacts are archived under
 The next prepared, unapplied `IterStepL` candidate retains the real iterator
 while avoiding yielded result objects for guarded ordinary-array steps;
 exhaustion and close behavior remain on existing paths.
+
+### Guarded yielded Array Iterator steps (2026-09-08)
+
+`bytecode/array_iterator_step.rs` specializes successful ordinary-array yields
+at the existing VM/JIT `IterStepL` boundary. It retains the real iterator and
+captured next local, so the existing exhaustion, normal-close and throw-close
+paths continue to operate on the exact iterator visible to user code.
+
+The pure preflight requires the captured next function to be the originally
+installed intrinsic, an ordinary `ic_plain` iterator with own data kind zero,
+a writable own numeric index, and an own data array target. The live target
+must be an ordinary `ic_plain` array with a valid own data length and a present
+own data element at that index. Undefined is an eligible yielded value; holes,
+accessors, proxies, foreign methods, readonly state and exhaustion fall back.
+The helper clones the element into an owned Value, revalidates the numeric
+index descriptor, then performs one Number-to-Number update. No fallible action
+or fallback remains after that update. It allocates no iterator result and
+skips the native call plus generic done/value reads for that yielded step.
+
+Both dispatches borrow the rooted iterator/next slots only during the pure
+helper. Slot owners remain intact, and the helper cannot execute JS, collect
+GC or relocate frames. A miss ends those borrows and clones both values before
+the callback-capable original iterator_step. This also removes two reference-
+count increment/decrement pairs from successful yields. The guard checks the
+captured next identity, not mutable current prototype properties: changing
+prototype.next after GetIterator does not replace the already captured method.
+`LUMEN_NO_ARRAY_ITERATOR_STEP` selects the baseline at realm setup independently
+of the destructuring flag, with no hot getenv.
+
+Eight colocated tests run in Interp, Bytecode and JIT with exact successful-step
+counts, and all eight also pass disabled. They cover captured-method replacement,
+live growth/shrink, holes/inherited getters/proxies, real iterator identity during
+break and throw close, readonly index and length-getter fallbacks, undefined
+versus exhaustion, aliased objects surviving GC, body-installed element getters,
+foreign next methods, and configurable index getter/setter fallback followed by
+fast resumption. Validation passes 738 unit and 34 integration tests, plus
+21,047/21,049 selected conformance tests with the same two known failures.
+Differential fuzzing yields 1,996 agreements and four budget skips. Formatting
+and the strict new-module audit pass; Clippy retains the exact pre-existing
+86-library/88-library-test error-message multiset.
+
+A temporary test-only full-Djot diagnostic records 1,510,000 successful yields
+across 10,000 output-verified parses. Its timing is invalid for performance
+comparison. The diagnostic source/log are archived and the exact original
+source hash was restored before timing. The measured release includes the
+borrowed-slot dispatch; the earlier unborrowed build was not benchmarked.
+
+Thirty-six sequential, verified timings use three rotated rounds of the same
+binary disabled/enabled, Node and Bun, without own builds/tests/profiling in
+parallel. Medians (lower is better):
+
+| Workload | Baseline | Yield fast path | Node | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| ForOfNumbers (µs / 10k yields) | 2235.29 | 700 | 7.1 | 7.73333 |
+| ForOfObjects (µs / 10k yields) | 2160 | 610 | 10.8 | 15.4667 |
+| ForOfUndefined (µs / 10k yields) | 2320 | 740 | 20.4 | 12.8 |
+| ForOfBreak (µs / 5k yields) | 1140 | 366.667 | 3.8 | 3.72 |
+| Djot (ms) | 3767 | 3507 | 228 | 144 |
+| DeltaBlue (ms) | 8758 | 8768 | 195 | 310 |
+
+All paired iteration kernels improve, with 67.8–71.8% less median time. Djot
+improves 6.90%, with pairs 3722→3488, 3786→3507 and 3767→3529 ms (6.29–7.37%
+less time). This is a repeated parser improvement in the measured session.
+DeltaBlue remains effectively flat at +0.11% median, with mixed pairs (+1.54%,
+-0.43%, +0.68%). The parser still takes 15.38× Node and 24.35× Bun time, well
+outside the full objective. Kernel ratios describe these particular verified
+loops and are not overall engine speed ratios.
+
+Twelve rotated classic runs verify all nine scores. Medians (higher is better):
+
+| Benchmark | Baseline | Yield fast path | Node | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| Richards | 23571 | 23431 | 64754 | 71116 |
+| DeltaBlue | 3835 | 3769 | 150835 | 107759 |
+| Crypto | 23944 | 24037 | 91917 | 119171 |
+| RayTrace | 6431 | 6438 | 136454 | 303469 |
+| EarleyBoyer | 3548 | 3629 | 147803 | 159395 |
+| RegExp | 1635 | 1627 | 22434 | 30397 |
+| Splay | 10154 | 10243 | 79837 | 94758 |
+| NavierStokes | 38139 | 37729 | 70490 | 61438 |
+| Score (version 7) | 8673 | 8641 | 83460 | 97919 |
+
+The composite changes -0.37% by median, with mixed pairs (-0.24%, +0.27%,
+-0.37%). Richards (-0.59%), classic DeltaBlue (-1.72%) and RegExp (-0.49%) have
+lower median scores with every respective pair lower. Crypto (+0.39%) and
+EarleyBoyer (+2.28%) improve in all pairs. Remaining directions are mixed.
+No overall suite gain is claimed. The implementation is retained for the
+repeated 6.90% parser and 67.8–71.8% iteration-kernel time reductions, with these
+suite counter-regressions recorded. Remaining composite score ratios are
+9.66× Node and 11.33× Bun; parser ratios remain 15.38×/24.35×.
+
+All 48 timings, source ZIP, executable hashes and validation records are
+archived under `array-iterator-step-*` and `lumen-array-iterator-step-*` in the
+external optimizer directory. The next diagnostic is a fresh Delta profile
+with accurate mixed-loop entry/body/exit ranges resolved after assembler branch
+relaxation. Older pre-mixed-loop profiles do not establish the current dominant
+CPU mechanism. Existing counters establish sustained native backedges, while
+source inspection suggests redundant wide-Value shadow traffic; their actual
+runtime share must be established before a register-home implementation.

@@ -11,6 +11,10 @@ const VALUES: &str = "%DestructureArrayValuesIntrinsic%";
 const NEXT: &str = "%DestructureArrayNextIntrinsic%";
 const LIMIT: usize = 16;
 
+pub(super) fn original_next(i: &Interp) -> Option<&Gc> {
+    i.extra_protos.get(NEXT)
+}
+
 pub(crate) fn remember_next(i: &mut Interp, proto: &Gc) {
     if let Some(Value::Obj(next)) = proto.borrow().props.get("next").map(|p| p.value()) {
         i.extra_protos.insert(NEXT, next);

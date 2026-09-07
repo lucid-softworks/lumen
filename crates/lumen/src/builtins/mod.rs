@@ -6461,6 +6461,7 @@ fn install_iterator(it: &mut Interp) {
     };
     it.def_method(&arr_iter_proto, "next", 0, array_next);
     crate::bytecode::array_destructure::remember_next(it, &arr_iter_proto);
+    crate::bytecode::array_iterator_step::install(it);
     it.extra_protos
         .insert("%ArrayIteratorPrototype%", arr_iter_proto);
 
