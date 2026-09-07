@@ -147,3 +147,20 @@ compilation dependency.
 Validation: 608 unit tests, 24 integration tests and the same 20438/20439 language
 conformance tests passed. The remaining failure and strict-Clippy baseline are unchanged.
 The new module passes strict structure checks.
+
+## Constant computed object keys
+
+Object literals now fold computed string literals, including parenthesized strings,
+into the existing shape-template path. Value evaluation order, inferred function names,
+duplicate-key insertion order and computed `__proto__` data properties retain their
+semantics. Dynamic keys still use the interpreter. The lowering is extracted into
+`bytecode/object_literal.rs`.
+
+Three rotated fresh-process rounds of verified Djot produced medians of 5256 ms before
+and 4948 ms after (about 6% less time), versus Node 228 ms and Bun 143 ms. This remains
+about 22x/35x slower than those engines on this workload.
+
+Validation: 609 unit tests and 26 integration tests passed, as did 1996 differential
+fuzzer cases (four budget skips). Language conformance remains 20438/20439, with the
+existing dynamic-import failure. Formatting and strict structure checks pass; strict
+Clippy remains at its existing 86/88 diagnostics outside the new module.

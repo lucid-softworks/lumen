@@ -18,6 +18,7 @@
 //! `--tier`, or `Engine::set_tier`.
 
 mod for_in;
+mod object_literal;
 mod parameters;
 mod switch;
 mod this_binding;
@@ -4685,49 +4686,7 @@ impl Compiler {
                 self.emit(Op::MakeArray(elems.len() as u16));
                 Ok(())
             }
-            Expr::Object(props) => {
-                let mut count = 0u16;
-                // Keys must land contiguously in `names`; values go on the stack in order.
-                let mut keys: Vec<String> = Vec::new();
-                for p in props {
-                    let PropDef::KeyValue { key, value } = p else {
-                        return Err(Bail);
-                    };
-                    let k = match key {
-                        PropKey::Ident(k) => k.clone(),
-                        PropKey::Str(k) => k.to_string(),
-                        _ => return Err(Bail),
-                    };
-                    // `__proto__:` in literal position sets the prototype, not a property.
-                    if k == "__proto__" || k.starts_with('#') {
-                        return Err(Bail);
-                    }
-                    // NamedEvaluation: `{ m: function(){} }` names the anonymous function "m".
-                    self.named_expr(value, &k)?;
-                    keys.push(k);
-                    count += 1;
-                }
-                // Keys go into `names` only after every value is compiled — value expressions
-                // add names of their own, and the key range must stay contiguous.
-                let start = self.names.len() as u32;
-                for k in &keys {
-                    self.names.push(Rc::from(k.as_str()));
-                }
-                // Distinct keys → a pre-shaped template site ({a:1, a:2} keeps the insert path:
-                // the template's slot-indexed value writes assume one slot per key).
-                let tidx = {
-                    let mut sorted: Vec<&String> = keys.iter().collect();
-                    sorted.sort();
-                    if count > 0 && sorted.windows(2).all(|w| w[0] != w[1]) {
-                        self.obj_maps += 1;
-                        self.obj_maps - 1
-                    } else {
-                        u32::MAX
-                    }
-                };
-                self.emit(Op::MakeObject(start, count, tidx));
-                Ok(())
-            }
+            Expr::Object(props) => self.object_literal(props),
             other => {
                 log_bail("expr", &format!("{:.60}", format!("{other:?}")));
                 Err(Bail)
