@@ -152,56 +152,9 @@ pub fn futex_notify(id: u64, index: usize, max: i64) -> u64 {
 
 pub type Env = Rc<RefCell<Scope>>;
 
-/// One entry of the legacy `fn.caller`/`fn.arguments` reflection stack (see `call_user`). The
-/// arguments object materializes lazily: a body that never names `arguments` skips building it,
-/// and `lazy` keeps what a later reflective read needs to conjure it on demand.
-/// `repr(C)`: the asm call sequence (arc 3b) pushes frames from machine code — fn_ptr@0,
-/// coro@8, strict@12, extra@16, size 24 (asserted in jit.rs).
-#[repr(C)]
-pub struct FnFrame {
-    /// `Rc::as_ptr` of the callee. No strong handle is kept: every frame is pushed while its
-    /// caller holds the callee alive (the callee `Value` sits on the caller's operand stack or in
-    /// the dispatch chain for the whole call — for frames owned by a parked coroutine, the
-    /// worker's frozen stack; a torn-down coroutine's worker parks forever rather than unwinding,
-    /// which this invariant depends on), so the rare reflective reads reconstruct one via
-    /// [`FnFrame::callee`] instead of paying a refcount round-trip on every call.
-    pub fn_ptr: usize,
-    /// Owning coroutine body (`Interp::cur_coro`; 0 = the main driver): a worker-thread panic
-    /// evicts the dead body's frames by this tag (see `ThreadCoro::resume`).
-    pub coro: u32,
-    pub strict: bool,
-    /// The rare per-frame state (a live `arguments` object, or what a reflective `fn.arguments`
-    /// read needs to conjure one). Boxed so the common frame stays 24 bytes — frames are pushed
-    /// and popped on EVERY call, and the pop's copy-out and drop-check of a fat frame was a
-    /// measurable slice of the call path.
-    pub extra: Option<Box<FrameExtra>>,
-}
-
-/// See [`FnFrame::extra`].
-pub struct FrameExtra {
-    pub args_obj: Value,
-    pub lazy: Option<(Rc<crate::ast::Function>, Rc<[Value]>, Env)>,
-}
-
-impl Default for FrameExtra {
-    fn default() -> FrameExtra {
-        FrameExtra {
-            args_obj: Value::Null,
-            lazy: None,
-        }
-    }
-}
-
-impl FnFrame {
-    /// A strong handle to the callee, reconstructed from `fn_ptr` (see its aliveness invariant).
-    pub fn callee(&self) -> Gc {
-        let p = self.fn_ptr as *const RefCell<crate::value::Object>;
-        unsafe {
-            Rc::increment_strong_count(p);
-            Rc::from_raw(p)
-        }
-    }
-}
+mod frames;
+pub use frames::FnFrame;
+pub(crate) use frames::InlineFrame;
 
 /// The JIT fast call's frame-buffer freelist (see `Interp::frame_pool`). A newtype so teardown
 /// frees the raw buffers (their contents are already dropped whenever a buffer is pooled).
@@ -773,6 +726,7 @@ pub(crate) fn interp_layout(i: &mut Interp) -> InterpLayout {
     i.fn_frames = Vec::with_capacity(7);
     for k in 0..3 {
         i.fn_frames.push(FnFrame {
+            inline: std::ptr::null(),
             fn_ptr: 0x1000 + k,
             coro: 0,
             strict: false,
@@ -1624,7 +1578,7 @@ impl Interp {
     /// the `name: message` head. Bounded by the engine's own recursion guard (~128 frames).
     fn capture_stack(&self) -> Rc<str> {
         let mut out = String::new();
-        for frame in self.fn_frames.iter().rev() {
+        for frame in self.reflected_frames().iter().rev() {
             let callee = frame.callee();
             let name = {
                 let b = callee.borrow();
@@ -3512,10 +3466,14 @@ impl Interp {
                                 // strict caller is censored to null). Eval runs inline, so eval
                                 // frames are naturally skipped.
                                 let rptr = Rc::as_ptr(r) as usize;
-                                let top = self.fn_frames.iter().rposition(|fr| fr.fn_ptr == rptr);
+                                let frames = self.reflected_frames();
+                                let top = frames.iter().rposition(|fr| fr.fn_ptr == rptr);
                                 return Ok(match (key, top) {
                                     (_, None) => Value::Null,
                                     ("arguments", Some(k)) => {
+                                        let Some(k) = frames[k].physical else {
+                                            return Ok(Value::Null);
+                                        };
                                         // The activation skipped building its arguments object
                                         // (the body never names it) — conjure it now.
                                         let lazy = match self.fn_frames[k].extra.as_deref() {
@@ -3537,7 +3495,7 @@ impl Interp {
                                             None => Value::Null,
                                         }
                                     }
-                                    (_, Some(k)) => match self.fn_frames[..k].last() {
+                                    (_, Some(k)) => match frames[..k].last() {
                                         None => Value::Null,
                                         Some(fr) if fr.strict => Value::Null,
                                         Some(fr) => Value::Obj(fr.callee()),
@@ -4421,6 +4379,7 @@ impl Interp {
     }
 
     pub(crate) fn gc_collect(&mut self) {
+        let _inline_roots = self.inline_gc_roots();
         let live = crate::value::gc_snapshot();
         // Scopes are graph nodes too: a closure's captured environment references objects (its
         // bindings) and vice versa (`Callable::User`), so cycles routinely pass through them.
@@ -5390,6 +5349,7 @@ impl Interp {
         fn_obj: &Gc,
     ) -> Result<Value, Abrupt> {
         self.fn_frames.push(FnFrame {
+            inline: std::ptr::null(),
             fn_ptr: Rc::as_ptr(fn_obj) as usize,
             coro: self.cur_coro,
             strict: func.is_strict,
@@ -5542,6 +5502,7 @@ impl Interp {
         let saved_ctor = std::mem::replace(&mut self.constructing, false);
         let saved_nt = std::mem::replace(&mut self.new_target, Value::Undefined);
         self.fn_frames.push(FnFrame {
+            inline: std::ptr::null(),
             fn_ptr: ic.callee,
             coro: self.cur_coro,
             strict: ic.strict,
@@ -5699,6 +5660,7 @@ impl Interp {
         let saved_ctor = std::mem::replace(&mut self.constructing, false);
         let saved_nt = std::mem::replace(&mut self.new_target, Value::Undefined);
         self.fn_frames.push(FnFrame {
+            inline: std::ptr::null(),
             fn_ptr: ic.callee,
             coro: self.cur_coro,
             strict: ic.strict,
@@ -5798,6 +5760,7 @@ impl Interp {
                     head.replace('\n', " ")
                 );
             }
+            chunk2.pin_inline_callees(self);
             let _ = func.code2.set(Some(chunk2));
             crate::bytecode::CALL_IC_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -6336,6 +6299,7 @@ impl Interp {
         // the body invokes could observe it ambiently.
         let saved_nt = std::mem::replace(&mut self.new_target, callee.clone());
         self.fn_frames.push(FnFrame {
+            inline: std::ptr::null(),
             fn_ptr: key,
             coro: self.cur_coro,
             strict: ic.strict,
@@ -6695,6 +6659,7 @@ impl Interp {
         let saved_ctor = std::mem::replace(&mut self.constructing, false);
         let saved_nt = std::mem::replace(&mut self.new_target, Value::Undefined);
         self.fn_frames.push(FnFrame {
+            inline: std::ptr::null(),
             fn_ptr: Rc::as_ptr(o) as usize,
             coro: self.cur_coro,
             strict: func.is_strict,

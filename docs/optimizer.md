@@ -295,3 +295,42 @@ A separate warmed ordinary-inline caller-reflection probe reproduced an existing
 correctness gap: `target.caller === invoke` succeeded only 110 of 500 calls, already
 on the archived pre-helper binary. Correct frame bookkeeping is required before
 expanding inlining. The probe is archived as `ordinary-inline-caller-probe.js`.
+
+
+### Virtual frames for inlined calls
+
+The optimizer now records an immutable inline call chain for each bytecode location,
+separately from the op stream. Checked helpers record their location before an operation
+can enter JavaScript, throw or collect garbage. Native direct calls record the caller's
+location before pushing the physical callee. Reflection and error-stack capture expand
+that chain on demand, preserving nested `fn.caller` identities and strict-caller censoring.
+The physical frame grows from 24 to 32 bytes; its native push/pop ABI and layout assertions
+were updated together. Inlined bodies retain the existing restrictions on arguments,
+closures and handlers; async/generator callees are explicitly excluded.
+
+Inline targets use the existing GC bookkeeping pins when optimized code is installed.
+These pins count as internal references, so inactive targets remain collectable. During
+collection, active inline locations temporarily root their callees. This also keeps a
+callee alive if its last ordinary reference is removed inside the inlined body, without
+adding a reference-count operation to every inlined call. The locations themselves own
+only weak function handles and immutable parent metadata.
+
+An earlier explicit enter/leave-op implementation fixed reflection but disrupted five
+specialized-region planning checks. It was replaced, not retained. Keeping location
+metadata outside the bytecode restores all five checks. A dedicated Richards test changes
+a field into a getter after warmup and verifies that the optimized region's side exit
+reconstructs the inlined predicate as the getter's caller. Other tests cover nested
+exceptions, strict callers, native code generation, active-callee collection safety and
+collection of the same callee after return. The original warmed caller probe now passes
+500/500 instead of 110/500.
+
+Three rotated comparisons measured Djot at 4561 to 4611 ms (about one percent overhead)
+and DeltaBlue at 9718 to 9693 ms (flat). Node/Bun were 230/146 ms and 195/312 ms respectively.
+This is a correctness prerequisite for expanding the optimizer, not a speedup claim.
+Raw results are in `virtual-frame-results.json` in the external optimizer directory.
+
+Validation: all 622 unit and 34 integration tests pass, including every specialized-region
+check. Language plus Function conformance remains 20947/20948 with the existing dynamic
+import failure; differential testing has 1996 agreements and four budget skips. Strict
+Clippy retains the existing 86/88 diagnostics and none in the new modules. Formatting
+and strict module-structure audits pass.

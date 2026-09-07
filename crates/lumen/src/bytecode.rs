@@ -19,6 +19,7 @@
 
 mod activation;
 mod for_in;
+mod inline_frames;
 mod name_path;
 pub(crate) use name_path::jit::load_cached as jit_load_cached_name;
 mod object_literal;
@@ -742,6 +743,7 @@ pub struct Chunk {
     >,
     /// Guard data for speculatively inlined call sites (`Op::InlineGuard` indexes this).
     inline_targets: Vec<InlineTarget>,
+    inline_frames: Option<inline_frames::Locations>,
     /// Machine-code runs of this chunk (the [`plan_inlines`] trigger counts these).
     pub(crate) jit_runs: std::cell::Cell<u32>,
     /// Whether the one-shot inline recompile has been attempted for this chunk.
@@ -2200,6 +2202,7 @@ fn compile_inner(
         call_caches: c.call_caches,
         construct_caches: c.construct_caches,
         call_pins: std::cell::RefCell::new(c.call_pins),
+        inline_frames: c.inline_frames.finish(&c.inline_targets),
         inline_targets: c.inline_targets,
         jit_runs: std::cell::Cell::new(0),
         inline_attempted: std::cell::Cell::new(false),
@@ -2302,7 +2305,7 @@ fn plan_inlines_at(
             let callee_env = Rc::as_ptr(&user.env);
             let shared_closure = !caller_env.is_null() && callee_env == caller_env;
             let f = &user.func;
-            if f.is_arrow || f.is_strict != caller.is_strict {
+            if f.is_arrow || f.is_async || f.is_generator || f.is_strict != caller.is_strict {
                 skip!(idx, "arrow/strictness");
             }
             if f.params.iter().any(|p| {
@@ -2462,6 +2465,7 @@ struct Compiler {
     /// `return` jumps inside the current spliced body, patched to the join point.
     inline_returns: Vec<usize>,
     inline_targets: Vec<InlineTarget>,
+    inline_frames: inline_frames::Builder,
 }
 
 /// One planned inline: the callee function (AST) and its pinned identity.
@@ -2589,6 +2593,7 @@ fn no_assign_to(e: &Expr, name: &str) -> bool {
 
 impl Compiler {
     fn emit(&mut self, op: Op) -> usize {
+        self.inline_frames.emit();
         self.ops.push(op);
         self.ops.len() - 1
     }
@@ -2703,9 +2708,11 @@ impl Compiler {
             self.inline_targets.len(),
             self.slot_names.len(),
             self.funcs.len(),
+            self.inline_frames.checkpoint(),
         );
         if self.try_emit_inline(&entry, argc, cc, has_this).is_err() {
             self.ops.truncate(snap.0);
+            self.inline_frames.rollback(snap.9, snap.0);
             self.consts.truncate(snap.1);
             self.names.truncate(snap.2);
             self.caches.truncate(snap.3);
@@ -2866,7 +2873,9 @@ impl Compiler {
             };
             self.scope_bind(name, param_slots[k], false);
         }
+        let frame_context = self.inline_frames.enter(t, f.is_strict, self.ops.len());
         let r = self.inline_body(f);
+        self.inline_frames.leave(frame_context);
         self.call_seed_stack.pop();
         self.name_seed_stack.pop();
         self.cache_seed_stack.pop();
@@ -4928,6 +4937,7 @@ fn run_vm(
         };
     }
     loop {
+        chunk.record_inline_location(i, *pc);
         let op = chunk.ops[*pc];
         *pc += 1;
         match op {
@@ -6943,6 +6953,7 @@ pub(crate) unsafe extern "C" fn jit_make_regexp(
     pc: u32,
     sp: *mut Value,
 ) -> crate::jit::SpFlag {
+    (*(*ctx).chunk).record_inline_location(&mut *(*ctx).interp, pc as usize);
     let ctx = unsafe { &mut *ctx };
     let chunk = unsafe { &*ctx.chunk };
     let Op::MakeRegExp(body, flags) = chunk.ops[pc as usize] else {
@@ -6972,6 +6983,7 @@ pub(crate) unsafe extern "C" fn jit_add_strings(
     pc: u32,
     sp: *mut Value,
 ) -> crate::jit::SpFlag {
+    (*(*ctx).chunk).record_inline_location(&mut *(*ctx).interp, pc as usize);
     let base = unsafe { sp.sub(2) };
     if !matches!(unsafe { &*base }, Value::Str(_))
         || !matches!(unsafe { &*base.add(1) }, Value::Str(_))
@@ -7013,6 +7025,7 @@ pub(crate) unsafe extern "C" fn jit_intrinsic(
     packed: u32,
     sp: *mut Value,
 ) -> crate::jit::SpFlag {
+    (*(*ctx).chunk).record_inline_location(&mut *(*ctx).interp, (packed & 0xffff) as usize);
     let ctx = &mut *ctx;
     let i = &mut *ctx.interp;
     let intrinsic = (packed >> 16) as u8;
@@ -7319,6 +7332,7 @@ pub(crate) unsafe extern "C" fn jit_regexp_exec_loop(
     ctx: *mut crate::jit::JitCtx,
     head: u32,
 ) -> u64 {
+    (*(*ctx).chunk).record_inline_location(&mut *(*ctx).interp, head as usize);
     macro_rules! decline {
         () => {{
             return 0;
@@ -7480,6 +7494,7 @@ pub(crate) unsafe extern "C" fn jit_regexp_literal_exec_discard(
     ctx: *mut crate::jit::JitCtx,
     literal_pc: u32,
 ) -> u64 {
+    (*(*ctx).chunk).record_inline_location(&mut *(*ctx).interp, literal_pc as usize);
     macro_rules! decline {
         () => {{
             return 0;
@@ -7591,6 +7606,7 @@ pub(crate) unsafe extern "C" fn jit_regexp_literal_replace_discard(
     ctx: *mut crate::jit::JitCtx,
     start_pc: u32,
 ) -> u64 {
+    (*(*ctx).chunk).record_inline_location(&mut *(*ctx).interp, start_pc as usize);
     macro_rules! decline {
         () => {{
             return 0;
@@ -7687,6 +7703,7 @@ pub(crate) unsafe extern "C" fn jit_regexp_literal_match_discard(
     ctx: *mut crate::jit::JitCtx,
     start_pc: u32,
 ) -> u64 {
+    (*(*ctx).chunk).record_inline_location(&mut *(*ctx).interp, start_pc as usize);
     macro_rules! decline {
         () => {{
             return 0;
@@ -8743,6 +8760,7 @@ pub(crate) fn jit_opstat_enabled() -> bool {
 
 #[inline(always)]
 unsafe fn jit_opstat(ctx: &mut crate::jit::JitCtx, pc: u32) {
+    (*ctx.chunk).record_inline_location(&mut *ctx.interp, pc as usize);
     {
         if ctx.opstat_enabled {
             struct OpstatDump(crate::fasthash::FastMap<String, u64>);

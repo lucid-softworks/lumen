@@ -33,6 +33,11 @@ mod captured;
     target_arch = "aarch64",
     any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
+mod inline_frames;
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 mod local_load;
 
 use std::rc::Rc;
@@ -684,7 +689,8 @@ mod layout_asserts {
     const _: () = assert!(std::mem::offset_of!(crate::interpreter::FnFrame, coro) == 8);
     const _: () = assert!(std::mem::offset_of!(crate::interpreter::FnFrame, strict) == 12);
     const _: () = assert!(std::mem::offset_of!(crate::interpreter::FnFrame, extra) == 16);
-    const _: () = assert!(std::mem::size_of::<crate::interpreter::FnFrame>() == 24);
+    const _: () = assert!(std::mem::size_of::<crate::interpreter::FnFrame>() == 32);
+    const _: () = assert!(std::mem::offset_of!(crate::interpreter::FnFrame, inline) == 24);
     // The direct-call sequence reads the callee's code/pc_offsets straight from its JitCode.
     const _: () = assert!(std::mem::offset_of!(super::JitCode, mem) == 0);
     const _: () = assert!(std::mem::offset_of!(super::JitCode, pc_offsets) == 16);
@@ -2997,6 +3003,9 @@ pub fn compile(
             // and op decode. Any mismatch (incl. an empty way: callee 0 matches no payload)
             // falls to the full helper.
             Op::Call(argc, c) | Op::CallWithThis(argc, c) => {
+                if chunk.has_inline_frames() {
+                    inline_frames::record(&mut a, ilayout, chunk.inline_location(pc));
+                }
                 let inline_probe = fast & 524288 != 0;
                 let slow = a.new_label();
                 let done = a.new_label();
@@ -4544,9 +4553,9 @@ fn emit_direct_call(
     a.add_imm(11, 11, 1);
     a.str_w_imm(11, 14, il.depth as u32); // depth++ (u32 field)
     a.str_w_imm(13, 14, il.gc_tick as u32); // tick (not due)
-                                            // FnFrame push: entry = ptr + len*24
+                                            // FnFrame push: entry = ptr + len*32
     a.ldr_imm(6, 14, (il.fn_frames + il.fnf_ptr_word) as u32);
-    a.movz(5, 24, 0);
+    a.movz(5, 32, 0);
     a.madd(6, 16, 5, 6);
     a.add_imm(4, 10, gc_data_off as u32);
     a.stur(4, 6, 0); // fn_ptr = the callee's as_ptr identity
@@ -4555,6 +4564,7 @@ fn emit_direct_call(
     a.ldrb_imm(5, 12, IC_STRICT);
     a.sturb(5, 6, 12); // strict
     a.stur(31, 6, 16); // extra = None (xzr)
+    a.stur(31, 6, 24); // no inline source location yet
     a.add_imm(16, 16, 1);
     a.str_imm(16, 14, (il.fn_frames + il.fnf_len_word) as u32);
     // frame pool pop: buf = ptr[--len] → x9 (the callee slots base)
@@ -4812,7 +4822,7 @@ fn emit_direct_finish_stub(
         a.ldr_imm(16, 14, (il.fn_frames + il.fnf_len_word) as u32);
         a.ldr_imm(6, 14, (il.fn_frames + il.fnf_ptr_word) as u32);
         a.sub_imm(16, 16, 1);
-        a.movz(5, 24, 0);
+        a.movz(5, 32, 0);
         a.madd(6, 16, 5, 6);
         a.ldur(9, 6, 16); // FnFrame.extra
         a.cbnz(9, true, slow);
