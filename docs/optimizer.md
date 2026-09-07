@@ -745,3 +745,22 @@ three-round results, five-pair Djot repeat and diagnostics showing getEol's new 
 The prior validated production executable was restored. Further work should address general
 loop execution: the existing register-resident loop planner explicitly admits linear loops,
 while its separate branch-region paths recognize specific instruction patterns.
+
+### Full-suite recheck after strict-write fixes
+
+Nine fresh-process V8-v7 runs completed and verified their outputs, rotating Lumen, Node
+24.18.0 and Bun 1.3.14. Scores varied sharply while unrelated compiler processes and other
+applications were active on the machine. Composite scores (higher is better):
+
+| Engine | Median | Observed range |
+| --- | ---: | ---: |
+| Lumen | 7176 | 5404–7346 |
+| Node | 37419 | 37096–75374 |
+| Bun | 63474 | 55574–67085 |
+
+These data are too unstable to establish a change in the gap from the earlier comparison;
+in particular, Node's lower median is not evidence of a Lumen improvement. Even the fastest
+observed Lumen score remains far below half of either other engine's slowest observed score.
+The performance goal remains unmet. The sibling `lumen-engine-comparison-write-strictness`
+directory retains all nine runs, per-test scores/ranges, source and binary hashes and the
+driver. No Lumen builds or validation jobs ran alongside these measurements.
