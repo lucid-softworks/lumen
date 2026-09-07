@@ -1878,3 +1878,95 @@ routines have only eight and five samples. Inlining, anonymous native code and t
 report's five-hit threshold limit attribution. The ASCII substring candidate is a bounded
 experiment, not an established major bottleneck. Regex result-object materialization and
 ownership traffic remain stronger architectural hypotheses requiring caller attribution.
+
+### ASCII substring experiment and parser caller attribution (2026-09-07)
+
+A fresh caller attribution parses the complete sample-tree indentation, subtracting immediate
+children to compute exclusive residuals and counting ancestry unions without recursive double
+counting. All residuals are nonnegative and sum to the 4,623 main-thread samples. RegExp exec
+accounts for 374 samples (8.09%) inclusive; its disjoint make_array/set_data descendant union
+is 172 (3.72% overall). Matcher ancestry contributes 78 samples (1.69%). GC ancestry contributes
+553 samples (11.96%) outside the regexp stack; deferred GC cannot be assigned to its original
+allocating caller from CPU stacks. The exec_text_discard_shared wrapper delegates to
+exec_text_shared, explaining the sampled symbol without implying a source change.
+
+The same attribution finds array_iter_next at 512 samples (11.08%). Disjoint immediate child
+paths include get_member 181, set_member 109, set_data 109, new_object 22, direct self 31 and
+remaining paths 60. This points to internal iterator-state access and result construction,
+while not separating target-length lookup from internal-field lookup inside get_member.
+Artifacts are `djot-regexp-attribution.md`, its JSON, the reproducible parser script and
+`djot-other-native-attribution.json`/`djot-array-next-children.json`. Categories such as
+property and allocation ancestry overlap and must not be added together.
+
+The isolated substring candidate extracts the existing builtin into `string_substring.rs`.
+A proven ASCII hint permits byte slicing directly into the ordinary contiguous LStr result,
+without materializing UTF-16 units or an intermediate Rust String. A clear hint retains the
+original UTF-16 path, including lone/split surrogate behavior. Receiver conversion precedes
+start/end coercion, and clamping, truncation and bound swapping remain unchanged. The source
+string is retained through callbacks and GC. Long inputs could already reuse a cached unit
+buffer; avoiding a fresh input conversion is not a universal per-call saving.
+
+The A/B switch `LUMEN_NO_ASCII_SUBSTRING=1` is sampled at realm installation and selects a
+plain function pointer to a const-generic implementation. There is no getenv or captured
+closure dispatch on each call. The prepared candidate's capturing closure was corrected
+because the builtin API accepts NativeFn pointers. Output still allocates/copies an LStr;
+this is not a substring-view representation.
+
+Validation passes 717 unit/34 integration tests, all 46 targeted substring conformance tests,
+and 1,996 differential-fuzz agreements with four budget skips. Tests require actual ASCII
+and UTF-16 path execution across all tiers and cover empty/long strings, fractional/NaN/
+infinite/signed-zero bounds, receiver/start/end coercion ordering and short-circuit errors.
+Clippy matches the existing 86/88 diagnostic baseline, and formatting/strict structural
+checks pass. The prior broad conformance baseline is not presented as a new run here.
+
+The external `ascii-substring.js` verifies every result in four 10,000-call kernels: short
+prefixes, clamped/swapped short ranges, a repeated 6,656-byte ASCII source, and UTF-16 slices
+including surrogate halves. The timing includes those checks and uses calibrated batches.
+Thirty-six sequential runs compare that kernel, verified Djot and DeltaBlue across three
+rotated rounds of disabled/enabled Lumen, Node v24.18.0 and Bun. Drivers strip inherited
+LUMEN_* settings, record versions/source/executable/workload hashes and CPU snapshots, and
+validate output. No own builds, tests or profiling overlap timings. Median times:
+
+| Workload (lower is better) | UTF-16 path | ASCII enabled | Node | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| ShortPrefix, microseconds / 10k calls | 940 | 720 | 83.53 | 111.11 |
+| ShortRanges, microseconds / 10k calls | 960 | 760 | 92.31 | 151.43 |
+| LongAscii, microseconds / 10k calls | 860 | 680 | 204 | 135 |
+| UtfSixteen, microseconds / 10k calls | 940 | 940 | 67.69 | 127.5 |
+| Djot, milliseconds | 3910 | 3927 | 230 | 143 |
+| DeltaBlue, milliseconds | 8808 | 8865 | 198 | 314 |
+
+ASCII kernels improve 20.8–23.4% by median with all pairs faster. UTF-16 median is unchanged
+(two ties and one 2.13% slower pair). Djot changes +0.43%, with pairs 3890→3927, 3941→3944
+and 3910→3889; DeltaBlue changes +0.65%, with pairs 8808→8804, 8899→8937 and 8750→8865.
+Neither application shows a reliable gain. The parser remains 17.1× Node and 27.5× Bun in
+this session. Node has variable short-prefix and UTF-16 kernel samples, so median kernel
+ratios are workload observations, not stable overall engine comparisons.
+
+Twelve additional rotated classic v8-v7 runs verify all nine scores. Median scores (higher
+is better), archived under `ascii-substring-v8-*`:
+
+| Benchmark | UTF-16 path | ASCII enabled | Node | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| Richards | 23648 | 23709 | 65679 | 72020 |
+| DeltaBlue | 3689 | 3703 | 153625 | 105577 |
+| Crypto | 23883 | 24032 | 92347 | 119540 |
+| RayTrace | 6512 | 6441 | 137564 | 305245 |
+| EarleyBoyer | 3633 | 3566 | 147782 | 158027 |
+| RegExp | 1644 | 1636 | 22707 | 30275 |
+| Splay | 10243 | 10309 | 79307 | 94326 |
+| NavierStokes | 38287 | 38249 | 69975 | 71606 |
+| Score (version 7) | 8643 | 8628 | 83819 | 98483 |
+
+The composite changes -0.17%, with pairs -0.64%, -0.62% and +0.14%. RayTrace decreases
+1.09% and NavierStokes 0.10% by median with all respective pairs lower. Other workloads have
+mixed paired directions; EarleyBoyer decreases 1.84% by median. The implementation is
+retained for the repeated substantial substring-kernel gain, with application/suite limits
+and counter-regressions recorded. No parser or overall speedup is claimed. Composite gaps
+remain 9.71× Node and 11.41× Bun, well outside the full objective.
+
+All 48 timing runs and validation records are preserved in `ascii-substring-*` artifacts;
+`ascii-substring-measured-source.zip` includes the new source module. The next prepared,
+unapplied candidate uses guarded direct Array Iterator state access, preserving reentrant
+length-getter mutations and exact fallback ordering. Result construction, branding changes,
+and the pre-existing keys-iterator element-fetch behavior are outside that candidate.

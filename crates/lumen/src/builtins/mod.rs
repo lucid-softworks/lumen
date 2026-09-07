@@ -32,6 +32,7 @@ mod reflect;
 mod regexp;
 mod shadowrealm;
 mod string_code_point;
+mod string_substring;
 pub(crate) use string_code_point::nf_code_point_at;
 mod typedarray;
 mod weakrefs;
@@ -8766,22 +8767,7 @@ fn install_string(it: &mut Interp) {
         ))
     });
     it.def_method(&sp, "slice", 2, nf_string_slice);
-    it.def_method(&sp, "substring", 2, |i, this, args| {
-        let s = this_string(i, &this)?;
-        let chars = i.units_full(&s);
-        let len = chars.len() as i64;
-        let mut a = (ab(i.to_number(&arg(args, 0)))? as i64).clamp(0, len);
-        let mut b = match arg(args, 1) {
-            Value::Undefined => len,
-            v => (ab(i.to_number(&v))? as i64).clamp(0, len),
-        };
-        if a > b {
-            std::mem::swap(&mut a, &mut b);
-        }
-        Ok(Value::from_string(crate::jstr::from_units(
-            &chars[a as usize..b as usize],
-        )))
-    });
+    string_substring::install(it, &sp);
     // Annex B B.2.3.1 String.prototype.substr(start, length).
     it.def_method(&sp, "substr", 2, |i, this, args| {
         let s = this_string(i, &this)?;
