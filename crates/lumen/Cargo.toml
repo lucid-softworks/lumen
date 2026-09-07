@@ -34,6 +34,10 @@ workspace = true
 name = "engine"
 harness = false
 
+[[bench]]
+name = "collections"
+harness = false
+
 # Internal-stage benchmarks (lexer/parser/snapshot). Needs the `bench` feature for `bench_api`.
 [[bench]]
 name = "internals"
