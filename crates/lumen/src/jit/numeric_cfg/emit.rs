@@ -6,7 +6,7 @@ fn home(plan: &Plan, slot: u16) -> u32 {
     16 + plan.locals.iter().position(|s| *s == slot).unwrap() as u32
 }
 
-fn flush(a: &mut Asm, plan: &Plan) {
+pub(super) fn flush(a: &mut Asm, plan: &Plan) {
     for &slot in &plan.dirty {
         a.str_d_imm(home(plan, slot), 22, slot as u32 * 16 + 8);
     }
@@ -19,12 +19,7 @@ pub(super) fn emit(
     pc_labels: &[usize],
 ) -> usize {
     let plain = a.new_label();
-    let labels: Vec<_> = plan
-        .blocks
-        .iter()
-        .map(|b| (b.start, a.new_label()))
-        .collect();
-    let exits: Vec<_> = plan.exits.iter().map(|&pc| (pc, a.new_label())).collect();
+    let branches = super::branches::Branches::new(a, plan, pc_labels, plain);
     for &slot in &plan.locals {
         a.ldrb_imm(9, 22, slot as u32 * 16);
         a.cmp_imm_w(9, 4);
@@ -37,18 +32,11 @@ pub(super) fn emit(
     #[cfg(test)]
     super::record_entry(a);
     a.movz(17, 1024, 0);
-    let label = |pc| {
-        labels
-            .iter()
-            .chain(exits.iter())
-            .find(|(p, _)| *p == pc)
-            .unwrap()
-            .1
-    };
     let mut guards = Vec::new();
-    a.b(label(plan.head));
-    for block in &plan.blocks {
-        a.bind(label(block.start));
+    a.b(branches.label(plan.head));
+    for (index, block) in plan.blocks.iter().enumerate() {
+        let next = plan.blocks.get(index + 1).map(|b| b.start);
+        a.bind(branches.label(block.start));
         let mut depth = 0;
         for &step in &block.steps {
             match step {
@@ -58,27 +46,18 @@ pub(super) fn emit(
                     super::arrays::read(a, plan, slot, 24 + depth - 1, guard);
                 }
                 Step::Compare { condition, yes, no } => {
-                    a.fcmp(24, 25);
-                    let false_edge = a.new_label();
-                    a.b_cond(condition, false_edge);
-                    edge(a, plan, block.start, yes, label(yes), plain, pc_labels);
-                    a.bind(false_edge);
-                    edge(a, plan, block.start, no, label(no), plain, pc_labels);
+                    branches.compare(a, block.start, condition, yes, no, next);
                     depth = 0;
                 }
                 Step::Jump(pc) => {
-                    edge(a, plan, block.start, pc, label(pc), plain, pc_labels);
+                    branches.jump(a, block.start, pc, next);
                 }
                 _ => value_step(a, plan, step, &mut depth),
             }
         }
         debug_assert_eq!(depth, 0);
     }
-    for (pc, exit) in exits {
-        a.bind(exit);
-        flush(a, plan);
-        a.b(pc_labels[pc]);
-    }
+    branches.exits(a);
     for (guard, pc, depth) in guards {
         a.bind(guard);
         #[cfg(test)]
@@ -88,31 +67,6 @@ pub(super) fn emit(
         a.b(pc_labels[pc]);
     }
     plain
-}
-
-#[allow(clippy::too_many_arguments)]
-fn edge(
-    a: &mut Asm,
-    plan: &Plan,
-    source: usize,
-    target: usize,
-    label: usize,
-    plain: usize,
-    pc_labels: &[usize],
-) {
-    if target <= source {
-        let keep = a.new_label();
-        a.sub_imm(17, 17, 1);
-        a.cbnz(17, false, keep);
-        flush(a, plan);
-        a.b(if target == plan.head {
-            plain
-        } else {
-            pc_labels[target]
-        });
-        a.bind(keep);
-    }
-    a.b(label);
 }
 
 fn value_step(a: &mut Asm, plan: &Plan, step: Step, depth: &mut u32) {

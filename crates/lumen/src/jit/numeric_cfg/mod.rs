@@ -1,5 +1,6 @@
 //! Register-resident numeric loops with general forward branches and multiple backedges.
 mod arrays;
+mod branches;
 mod emit;
 mod plan;
 use super::asm::Asm;
@@ -106,6 +107,33 @@ mod tests {
             }
             assert(calc(5000)===50273001);
             assert(calc(4)===80004);
+        "#,
+            true,
+        );
+    }
+
+    #[test]
+    fn nested_continues_and_bottom_conditions_keep_edge_state() {
+        check(
+            r#"
+            function nested(n) {
+                var sum=0;
+                for(var i=0;i<n;i++) {
+                    for(var j=0;j<n;j++) {
+                        if(j<20){sum+=i;continue;}
+                        if(i<20){sum-=j;continue;}
+                        sum+=2;
+                    }
+                }
+                return sum;
+            }
+            assert(nested(40)===4600);
+            function bottom(n) {
+                var i=0,sum=0;
+                do {if(i<1200)sum+=2;else sum--;i++;}while(i<n);
+                return sum;
+            }
+            assert(bottom(2000)===1600);
         "#,
             true,
         );

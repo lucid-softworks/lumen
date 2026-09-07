@@ -840,3 +840,24 @@ No Lumen builds or tests ran alongside these measurements.
 The external optimizer directory retains `numeric-arrays-{results,summary,metadata}.json`,
 `numeric-arrays-v8-repeat-{results,summary}.json` (including CPU snapshots), both comparison
 drivers, the workload, the instrumented coverage log and `lumen-numeric-arrays`.
+
+### Numeric CFG branch layout
+
+Numeric CFG edges now have a dedicated lowering module. Forward conditions branch directly
+to their non-adjacent successor and use fallthrough when possible; backward edges retain
+bounded continuation and local reconstruction. An additional all-tier regression covers
+nested continues and bottom-tested loops. All 656 unit and 34 integration tests pass, as do
+the existing 21001/21003 conformance, 1996-agreement/four-skip differential, formatting,
+module-audit and 86/88 Clippy baselines.
+
+Three same-binary enabled/disabled comparisons show no measured speedup: branched numeric
+loops were 18.0/18.0 microseconds, nested numeric loops 18.2/18.4, and both array-loop cases
+18.0/18.0 (disabled/enabled). Djot measured 4335/4275 ms and DeltaBlue 10486/10565 ms, with
+substantial application timing variation. The change is retained as a branch-lowering
+refactor that removes redundant jumps, not as evidence of progress toward engine parity.
+The next register-allocation work should remove local/operand-stack copies on the numeric
+recurrences rather than assuming branch count is the limiting cost.
+
+`LUMEN_JIT_NO_CFG_FALLTHROUGH=1` preserves the previous edge layout for comparison. The
+external optimizer directory retains `cfg-fallthrough-{results,summary,metadata}.json`, its
+comparison driver and `lumen-cfg-fallthrough`. No builds or tests overlapped these timings.
