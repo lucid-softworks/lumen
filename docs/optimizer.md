@@ -823,3 +823,20 @@ An instrumented classic-suite run verified its output and showed the general bac
 emitting numeric array-comparison loops, including a big-integer comparison kernel. Its
 scores are not timing evidence: the run enabled bytecode/region logging alongside validation.
 `LUMEN_JIT_NO_NUMERIC_ARRAYS=1` independently disables this extension for same-binary controls.
+
+Three rotated same-binary comparisons measured 10000 branched array reads at 35.2 to
+17.8 microseconds and nested array reads at 36.8 to 17.6 microseconds (disabled/enabled
+medians). Node measured 9.07/7.47 microseconds and Bun 7.60/7.87 microseconds, respectively:
+the new path roughly halves Lumen's time but remains outside 2x Bun. Djot was flat at
+4267/4271 ms, as was DeltaBlue at 10224/10169 ms.
+
+The classic-suite medians were 8034/7993 versus Node 78441 and Bun 79865, but broad timing
+variation prevents a reliable small-change comparison. One enabled run fell to 7366; three
+additional paired runs then ranged from 5302–7898 disabled and 7488–7857 enabled. CPU
+snapshots during the repeats recorded heavy unrelated Rust compiler and test-runner activity.
+No full-suite gain or regression is established, and the roughly 10x composite gap remains.
+No Lumen builds or tests ran alongside these measurements.
+
+The external optimizer directory retains `numeric-arrays-{results,summary,metadata}.json`,
+`numeric-arrays-v8-repeat-{results,summary}.json` (including CPU snapshots), both comparison
+drivers, the workload, the instrumented coverage log and `lumen-numeric-arrays`.
