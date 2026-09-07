@@ -1509,3 +1509,123 @@ kernel improvements and small three-pair Delta application gain. No material ove
 speedup is claimed. The next extension needs exact exits after earlier writes have committed;
 restarting the original region entry would replay effects. A reviewed bounded design is
 saved externally as guarded-write-exit-design.md; it is not yet implemented.
+
+### Exact exits across consecutive numeric writes (September 7, 2026)
+
+The guarded-write backend now admits bounded straight-line sequences containing at least
+two existing ordinary named Number-to-Number stores. Value-producing `SetProp` is supported,
+so a chained assignment can keep an outer receiver and the assignment result in native
+registers after committing the inner write. Numeric expressions and borrowed object roots
+remain in fixed, distinct homes until the sequence finishes or exits.
+
+Each original opcode has a pre-op virtual operand snapshot. Every guard branches before
+changing a register needed by that snapshot. After a prior commit, the new `region_exit`
+module clones each logical Object operand, publishes ordered wide Values above the untouched
+owned stack prefix, advances the stack pointer and resumes that exact original instruction.
+Failures through the first store can instead resume the original region entry, because no
+write or owner change has occurred yet. Pure operations have no guard exits. Locals,
+inline-frame owners and object-valued graph edges remain unchanged. A later failure therefore
+does not replay an earlier store. Separate fallback labels bypass write-region selection,
+preventing a failed entry guard from immediately retrying itself. All original targets remain
+available and are protected from baseline fusion before emission reaches them.
+
+Property reads are never reused. Every numeric write invalidates name-root reuse, since the
+receiver can alias the global object. Existing immutable physical local/this roots can still
+be borrowed across writes. Store guards retain the ordinary receiver, non-index name, live
+plain/shape/slot/data/writable checks and Number-only replacement restriction. No helper,
+allocation, owner release or GC occurs inside a successful sequence. The planner rejects
+handlers, calls, local assignments, control transfers and unsupported operations. It stops
+when at least two stores have completed and the relative stack is empty, and bounds scanning
+to 32 original operations.
+It does not yet implement mixed object loops or dirty Object-local restoration.
+
+The scope follows actual application candidates: Djot's hot `skipSpace()` assigns `indent`
+and then `pos`; DeltaBlue's captured `markInputs()` bytecode chains assignments through two
+object-valued fields. Untimed diagnostics generate write sequences in both application runs,
+including DeltaBlue PCs 9–13. Generation is not a measurement of runtime success rate; those
+diagnostic timings are excluded because they overlap validation.
+
+Six new tests include real native stack publication with duplicate Object ownership and
+signed zero, plus all-tier fixtures for pending receivers in chained assignments, getters
+and setters with GC after a prior commit, aliasing and global-name reloads, strict failures,
+and an owned outer operand prefix. All-tier fixtures assert actual native commits and
+actual post-commit exits. Validation passes 698 unit and 34 integration tests. Conformance
+remains 21001/21003 with the same two known failures; differential testing gives 1996
+agreements and four budget skips. Clippy matches the existing 86 library/88 library-test
+error baseline, and formatting plus the strict nine-module structure audit pass.
+
+The external optimizer directory preserves `write-sequence-*` workloads, drivers, source
+ZIP, raw results, summaries, validation logs and provenance. The same-binary control sets
+`LUMEN_JIT_NO_WRITE_SEQUENCE=1`; the earlier guarded branch/write regions stay enabled.
+
+The first 36-run comparison used a precise exit stub for every opcode. Sequential and
+chained fields reduced median time 210→162.5 µs (22.6%) and 306.67→186.67 µs (39.1%).
+Djot was flat at 3906→3905 ms; DeltaBlue had mixed pairs (9092→9269, 9104→9025,
+9052→9074 ms), establishing no application gain.
+
+The final emitter omits unused pure-operation stubs and routes all precommit guards to
+one original-entry destination. Only fallible post-commit operations retain precise
+materialization stubs. A fixed-count, verified map comparison matched chunks by exact
+slot names, opcode sequences and occurrence. Total captured code changed 44728→44248 bytes;
+the matched sequential function changed 7084→7004 and the chained function 7616→7456 bytes.
+These are emitted code sizes, not executed-byte counts or evidence of the cause of a timing
+change.
+
+A further 45 verified runs compared feature-disabled and compact behavior in the same
+binary, the saved initial full-exit binary, Node 24.18.0 and Bun 1.3.14. Three rounds rotated
+engine order; no Lumen build, test or diagnostic overlapped timings. Kernels are microseconds
+per 10000 invocations and applications are milliseconds.
+
+| Workload | Disabled | Full exits | Compact exits | Node | Bun |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SequentialFields | 212.50 | 162.50 | 165.00 | 8.64 | 3.68 |
+| ChainedFields | 313.33 | 190.00 | 190.00 | 3.32 | 5.10 |
+| Djot | 3938.00 | 3947.00 | 3902.00 | 228.00 | 150.00 |
+| DeltaBlue | 9120.00 | 9148.00 | 9073.00 | 197.00 | 306.00 |
+
+Compact sequential fields improve 22.4% and chained fields 39.4% versus disabled, with all
+pairs improving. Compact sequential fields are 1.5% slower by median than the original
+full-exit implementation, also slower in every pair; removing code is not a universal speedup.
+Djot improves 0.91% versus disabled, with pairs 3996→3883, 3938→3902 and 3930→3908 ms.
+It improves 1.14% versus full exits, also in all pairs. This is a small three-round result,
+not a large parser breakthrough. DeltaBlue improves 0.52% by median but its pairs remain
+mixed: 9098→9204, 9120→9073 and 9133→9068 ms.
+
+The compact parser still takes 17.1× Node and 26.0× Bun in this comparison. Changes in those
+ratios across separate comparison sessions are not cumulative optimization gains; Bun's
+median here is 150 ms, versus 143 ms in the initial sequence comparison. The within-2×
+application target remains unmet.
+
+A final six-run, three-pair classic-suite comparison measured disabled versus compact behavior.
+Scores are higher-is-better:
+
+| Benchmark | Disabled | Compact exits |
+| --- | ---: | ---: |
+| Richards | 23455 | 23435 |
+| DeltaBlue | 3603 | 3633 |
+| Crypto | 23917 | 24017 |
+| RayTrace | 6301 | 6473 |
+| EarleyBoyer | 3605 | 3591 |
+| RegExp | 1629 | 1623 |
+| Splay | 10512 | 10358 |
+| NavierStokes | 38397 | 38101 |
+| Score (version 7) | 8598 | 8612 |
+
+The composite changes 8598→8612 (+0.16%), with all pairs slightly positive: 8618→8620,
+8565→8591 and 8598→8612. This is effectively flat. RayTrace improves 2.73% by median,
+with every pair higher, while Splay decreases 1.47%, also in every pair. The optimization
+therefore has a measurable counter-regression, not a universal gain.
+
+The compact sequence implementation is retained for the small repeated parser gain,
+substantial verified sequence-kernel improvements and the precise post-write exit capability.
+No broad breakthrough is claimed. The original full-exit implementation remains archived,
+not selectable in production. Existing `LUMEN_JIT_NO_GUARDED_WRITE_REGION` disables both
+branch/write and sequence paths; `LUMEN_JIT_NO_WRITE_SEQUENCE` isolates the new extension.
+
+This turn completed 87 result-verified timing runs across the initial comparison, compact
+comparison and classic suite. The next architectural requirement is restoring changing
+Object locals across native loop iterations, alongside precise numeric-local and operand
+snapshots. The external `mixed-loop-local-exits.md` design identifies the existing scheduler
+materializer as an ownership precedent and requires multiple completed native iterations;
+that broader loop implementation remains future work. The within-2× suite/parser goal is
+still unfulfilled.

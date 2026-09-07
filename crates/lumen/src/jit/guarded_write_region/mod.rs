@@ -2,6 +2,8 @@
 mod emit;
 mod name;
 mod plan;
+mod sequence;
+mod sequence_emit;
 mod store;
 mod values;
 
@@ -17,7 +19,7 @@ pub(super) fn try_emit(
     chunk: &Chunk,
     cfg: &Cfg,
     pc: usize,
-    labels: &[usize],
+    labels: (&[usize], &[usize]),
     targeted: &mut [bool],
     layout: &JitLayout,
 ) -> bool {
@@ -27,6 +29,9 @@ pub(super) fn try_emit(
         || std::env::var_os("LUMEN_JIT_NO_GUARDED_WRITE_REGION").is_some()
     {
         return false;
+    }
+    if sequence_emit::try_emit(a, chunk, cfg, pc, labels, targeted, layout) {
+        return true;
     }
     let Some(plan) = plan::build(chunk, cfg, pc) else {
         return false;
@@ -53,7 +58,7 @@ pub(super) fn try_emit(
         chunk,
         layout,
         fail,
-        labels[plan.join],
+        labels.0[plan.join],
         plan.prefix_depth,
     );
     a.bind(fail);

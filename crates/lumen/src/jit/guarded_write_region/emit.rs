@@ -103,64 +103,76 @@ fn expression(
     layout: &JitLayout,
     fail: usize,
 ) {
-    for value in &expression.values {
-        let rep = value.rep.expect("fully constrained region");
-        let register = value.register;
-        match value.source {
-            Source::Local(slot) => {
-                a.add_imm(14, 22, slot as u32 * 16);
-                root(a, rep, register, fail);
-            }
-            Source::This => {
-                a.ldr_imm(14, 19, 48);
-                root(a, rep, register, fail);
-            }
-            Source::Name(n, c) => {
-                let target = match rep {
-                    Rep::Object => name::Target::Object(register),
-                    Rep::Number => name::Target::Number(register),
-                };
-                assert!(name::emit(
-                    a,
-                    chunk,
-                    layout,
-                    Op::LoadName(n, c),
-                    target,
-                    fail
-                ));
-            }
-            Source::Property {
-                receiver,
-                name,
-                cache,
-            } => {
-                a.mov(11, expression.values[receiver].register);
-                property_probe::own_entry_with_hint(
-                    a,
-                    layout,
-                    chunk.jit_cache_ptr(cache),
-                    chunk.jit_name(name),
-                    chunk.jit_cache_preferred(cache),
-                    fail,
-                );
-                property(a, layout, rep, register, fail);
-            }
-            Source::Constant(bits) => {
-                a.mov_imm64(9, bits);
-                a.fmov_d_x(register, 9);
-            }
-            Source::Arithmetic {
-                left,
-                right,
-                operation,
-            } => a.f_arith(
-                operation,
-                register,
-                expression.values[left].register,
-                expression.values[right].register,
-            ),
-            Source::Negate(input) => a.fneg(register, expression.values[input].register),
+    for at in 0..expression.values.len() {
+        value(a, expression, at, chunk, layout, fail);
+    }
+}
+
+pub(super) fn value(
+    a: &mut Asm,
+    expression: &Expression,
+    at: usize,
+    chunk: &Chunk,
+    layout: &JitLayout,
+    fail: usize,
+) {
+    let value = &expression.values[at];
+    let rep = value.rep.expect("fully constrained region");
+    let register = value.register;
+    match value.source {
+        Source::Local(slot) => {
+            a.add_imm(14, 22, slot as u32 * 16);
+            root(a, rep, register, fail);
         }
+        Source::This => {
+            a.ldr_imm(14, 19, 48);
+            root(a, rep, register, fail);
+        }
+        Source::Name(n, c) => {
+            let target = match rep {
+                Rep::Object => name::Target::Object(register),
+                Rep::Number => name::Target::Number(register),
+            };
+            assert!(name::emit(
+                a,
+                chunk,
+                layout,
+                Op::LoadName(n, c),
+                target,
+                fail
+            ));
+        }
+        Source::Property {
+            receiver,
+            name,
+            cache,
+        } => {
+            a.mov(11, expression.values[receiver].register);
+            property_probe::own_entry_with_hint(
+                a,
+                layout,
+                chunk.jit_cache_ptr(cache),
+                chunk.jit_name(name),
+                chunk.jit_cache_preferred(cache),
+                fail,
+            );
+            property(a, layout, rep, register, fail);
+        }
+        Source::Constant(bits) => {
+            a.mov_imm64(9, bits);
+            a.fmov_d_x(register, 9);
+        }
+        Source::Arithmetic {
+            left,
+            right,
+            operation,
+        } => a.f_arith(
+            operation,
+            register,
+            expression.values[left].register,
+            expression.values[right].register,
+        ),
+        Source::Negate(input) => a.fneg(register, expression.values[input].register),
     }
 }
 

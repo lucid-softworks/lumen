@@ -79,6 +79,11 @@ mod numeric_expr;
     any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
 mod property_probe;
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+mod region_exit;
 
 use std::rc::Rc;
 
@@ -1578,6 +1583,7 @@ pub fn compile(
     let mut a = asm::Asm::new();
     // One label per bytecode pc (branch/catch targets bind as we emit).
     let pc_labels: Vec<usize> = (0..ops.len()).map(|_| a.new_label()).collect();
+    let write_fallback_labels: Vec<usize> = (0..ops.len()).map(|_| a.new_label()).collect();
     let has_active_null_dispatch = fast_scheduler_shell
         .as_ref()
         .and_then(|(_, shell)| shell.active.as_ref())
@@ -1664,9 +1670,19 @@ pub fn compile(
             // Consumed by a fusion (chain / compare+branch / key-producer pair). The label and
             // pc-offset still bind here (harmless: nothing jumps into a fused region — checked).
             skip -= 1;
+            a.bind(write_fallback_labels[pc]);
             continue;
         }
-        guarded_write_region::try_emit(&mut a, chunk, &cfg, pc, &pc_labels, &mut targeted, layout);
+        guarded_write_region::try_emit(
+            &mut a,
+            chunk,
+            &cfg,
+            pc,
+            (&pc_labels, &write_fallback_labels),
+            &mut targeted,
+            layout,
+        );
+        a.bind(write_fallback_labels[pc]);
         // Mixed object/numeric expressions retain their original templates on every guard miss.
         numeric_expr::try_emit(&mut a, chunk, &cfg, pc, &pc_labels, &mut targeted, layout);
         // A web-trace regexp workload is dominated by tiny loops whose body is exactly

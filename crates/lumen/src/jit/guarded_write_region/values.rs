@@ -41,6 +41,7 @@ pub(super) struct Expression {
 pub(super) struct Builder {
     values: Vec<Value>,
     stack: Vec<usize>,
+    name_floor: usize,
 }
 
 impl Builder {
@@ -58,12 +59,19 @@ impl Builder {
         if matches!(source, Source::Local(s) if s as usize * 16 + 16 >= 4096) {
             return None;
         }
-        if let Some(id) = self.values.iter().position(|v| match (v.source, source) {
-            (Source::Local(a), Source::Local(b)) => a == b,
-            (Source::This, Source::This) => true,
-            (Source::Name(a, c), Source::Name(b, d)) => a == b && c == d,
-            _ => false,
-        }) {
+        if let Some(id) =
+            self.values
+                .iter()
+                .enumerate()
+                .position(|(id, v)| match (v.source, source) {
+                    (Source::Local(a), Source::Local(b)) => a == b,
+                    (Source::This, Source::This) => true,
+                    (Source::Name(a, c), Source::Name(b, d)) => {
+                        id >= self.name_floor && a == b && c == d
+                    }
+                    _ => false,
+                })
+        {
             return Some(id);
         }
         Some(self.value(source))
@@ -139,6 +147,41 @@ impl Builder {
         };
         self.stack.push(id);
         (self.stack.len() <= 8 && self.values.len() <= 32).then_some(())
+    }
+
+    pub(super) fn snapshot(&self) -> Vec<usize> {
+        self.stack.clone()
+    }
+
+    pub(super) fn value_count(&self) -> usize {
+        self.values.len()
+    }
+
+    pub(super) fn sequence_store(&mut self, op: Op) -> Option<(usize, usize)> {
+        let implicit = match op {
+            Op::SetPropThisDrop(..) => Some(self.root(Source::This)?),
+            Op::SetPropLocalDrop(s, ..) => Some(self.root(Source::Local(s))?),
+            Op::SetProp(..) | Op::SetPropDrop(..) => None,
+            _ => return None,
+        };
+        let number = self.stack.pop()?;
+        let receiver = match implicit {
+            Some(root) => root,
+            None => self.stack.pop()?,
+        };
+        self.require(receiver, Rep::Object)?;
+        self.require(number, Rep::Number)?;
+        if matches!(op, Op::SetProp(..)) {
+            self.stack.push(number);
+        }
+        // A numeric store can alias a global binding. Future name reads must be live;
+        // unchanged physical locals/this remain safe roots, and properties are never CSE'd.
+        self.name_floor = self.values.len();
+        Some((receiver, number))
+    }
+
+    pub(super) fn sequence_finish(self) -> Option<Expression> {
+        self.finish(&[])
     }
 
     pub(super) fn comparison(self) -> Option<Expression> {
