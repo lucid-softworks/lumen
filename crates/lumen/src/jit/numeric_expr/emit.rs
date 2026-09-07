@@ -55,7 +55,7 @@ pub(super) fn emit(a: &mut Asm, chunk: &Chunk, plan: &Plan, layout: &JitLayout, 
     }
     commit(a, plan, layout);
     #[cfg(test)]
-    super::record_success(a);
+    super::record_success(a, plan.prefix_depth);
     a.b(labels[plan.end]);
     a.bind(plain);
 }

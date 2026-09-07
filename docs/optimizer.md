@@ -1180,3 +1180,79 @@ runs exited successfully with eight benchmark scores and a composite, with no bu
 tests or profiling runs overlapping. The external optimizer directory retains
 `numeric-expr-v8-{results,summary,metadata}.json` (including host CPU snapshots), its driver,
 and the hash-verified release executable identified in the metadata.
+
+### Compact own-property hints and pending operand prefixes
+
+Numeric expressions now accept any known CFG entry depth. Their checked relative-stack
+operations cannot consume existing operands, and successful emission appends exactly the
+original terminal operands above the untouched prefix. Tests cover pending numeric and
+owned/coercible operands, pending setter destinations, and getter-triggered GC on fallback.
+
+The prefix-only experiment passed 683 unit/34 integration tests and unchanged conformance,
+differential and Clippy baselines. Its three-round application medians (Djot 3972→3955 ms,
+DeltaBlue 9227→9142 ms) and kernel results did not establish a useful general speedup.
+Mapped code proved that the actual inlined return loop had selected the new region: its
+first property-read span grew from 504 to 5820 bytes, adding 5316 bytes to the chunk. Write
+paths already entered at depth zero and were unchanged. A benchmark-shaped execution test
+then confirmed 42000 successful prefix commits and 252000 warmed property-hint hits, ruling
+out repeated guard failure as the explanation for the flat return timing.
+
+Warmed own-property probes now check their known exotic kind directly and address the
+entry by a constant offset. They still validate live plainness, shape, entry bounds, data
+descriptor and value type; array hints still check the live entry key. A miss restores the
+borrowed stored-Rc receiver and probes all live cache ways. This removes dynamic mode
+selection and slot multiplication from successful warmed hints without changing ownership.
+
+Four added tests bring validation to 685 unit and 34 integration tests, with 21001/21003
+conformance, 1996 differential agreements/four budget skips and the same 86/88 Clippy error
+baseline. All 37 focused JIT tests pass, including dedicated actual array-hint execution
+and warm descriptor/shape/key mutations. Formatting and strict module audits pass.
+
+Three rotated same-binary comparisons distinguish the retained behavior, the prefix-only
+extension, and the combined compact-hint/prefix path. Kernels are microseconds per 10000
+invocations; applications are milliseconds.
+
+| Workload | Retained behavior | Prefix only | Compact + prefix | Node 24.18.0 | Bun 1.3.14 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Nested numeric return | 132.50 | 130 | 102 | 4.75 | 2.27 |
+| Nested numeric write | 207.50 | 207.50 | 182.50 | 2.83 | 10 |
+| Numeric fields in branch graphs | 7.47 | 7.60 | 7.47 | 8.67 | 6.40 |
+| Enclosing numbers in branch graphs | 7.60 | 7.60 | 7.60 | 7.47 | 7.33 |
+| Djot | 3900 | 3934 | 3900 | 230 | 145 |
+| DeltaBlue | 9079 | 9123 | 9111 | 200 | 314 |
+
+The combined path reduces nested-return time 23.0% and nested-write time 12.0%, consistently
+across all three pairs. Existing numeric kernels and Djot are flat. Standalone DeltaBlue
+is 0.35% slower by median, with all three combined-path runs slightly slower than their
+retained-behavior counterparts; these results do not establish an application speedup.
+
+`LUMEN_JIT_NO_NUMERIC_EXPR_PREFIX=1` restores the zero-depth selection restriction.
+`LUMEN_JIT_NO_COMPACT_PROPERTY_HINT=1` retains the previous warmed-hint instruction sequence.
+Both flags together reproduce the retained behavior for the comparisons above. All 60 runs
+exit successfully and verify their results, without overlapping builds, tests or profiling.
+The external optimizer directory preserves `numeric-prefix-*`, the mapped-code diagnosis,
+`compact-hint-{results,summary,metadata}.json`, comparison drivers and exact saved executables.
+
+A further three rotated classic V8 version 7 pairs compare the retained behavior (both
+optimizations disabled) against the combined path. Scores are higher-is-better:
+
+| Benchmark | Retained behavior | Compact + prefix |
+| --- | ---: | ---: |
+| Richards | 23438 | 23436 |
+| DeltaBlue | 3573 | 3573 |
+| Crypto | 23251 | 24031 |
+| RayTrace | 6259 | 6339 |
+| EarleyBoyer | 3564 | 3608 |
+| RegExp | 1643 | 1645 |
+| Splay | 10374 | 10309 |
+| NavierStokes | 38139 | 38211 |
+| Composite | 8565 | 8600 |
+
+Composite medians increase 0.4%, from 8565 to 8600. Individual composite pairs are
+8510→8600, 8565→8616 and 8565→8572; the last difference is very small. The suite therefore
+shows a modest measured change alongside the much clearer kernel gains, not a broad
+throughput breakthrough. Splay's median is slightly lower with mixed pairs; the other
+median scores are flat or higher. All six runs verify all scores and exit successfully,
+without overlapping builds, tests or profiling. `compact-hint-v8-{results,summary,metadata}.json`
+and its driver preserve the comparison, including host CPU snapshots. These are same-engine
+on/off measurements, not a new full-suite Node/Bun comparison.

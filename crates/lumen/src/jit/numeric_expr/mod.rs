@@ -38,14 +38,21 @@ pub(super) fn try_emit(
 #[cfg(test)]
 thread_local! {
     static SUCCESSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PREFIX_SUCCESSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
-fn record_success(a: &mut Asm) {
+fn record_success(a: &mut Asm, prefix_depth: usize) {
     a.mov_imm64(9, SUCCESSES.with(|n| n.as_ptr() as usize) as u64);
     a.ldr_imm(10, 9, 0);
     a.add_imm(10, 10, 1);
     a.str_imm(10, 9, 0);
+    if prefix_depth != 0 {
+        a.mov_imm64(9, PREFIX_SUCCESSES.with(|n| n.as_ptr() as usize) as u64);
+        a.ldr_imm(10, 9, 0);
+        a.add_imm(10, 10, 1);
+        a.str_imm(10, 9, 0);
+    }
 }
 
 #[cfg(test)]
@@ -228,5 +235,89 @@ mod tests {
                 "{body}"
             );
         }
+    }
+
+    #[test]
+    fn inlined_arithmetic_preserves_numeric_and_owned_operand_prefixes() {
+        super::PREFIX_SUCCESSES.with(|n| n.set(0));
+        check(
+            r#"
+            function calculate(o){return o.child.value*2+1;}
+            function pending(o){return 100+calculate(o);}
+            function makePrefix(){return {valueOf(){return 100;}};}
+            function ownedPending(o){return makePrefix()+calculate(o);}
+            function invoke(o){return pending(o);}
+            function invokeOwned(o){return ownedPending(o);}
+            const o={child:{value:7}};
+            for(let i=0;i<600;i++){
+                assert(invoke(o)===115);assert(invokeOwned(o)===115);
+            }
+            let reads=0;
+            Object.defineProperty(o.child,'value',{get(){reads++;$262.gc();return 9;}});
+            assert(invoke(o)===119 && reads===1);
+            assert(invokeOwned(o)===119 && reads===2);
+        "#,
+        );
+        assert!(super::PREFIX_SUCCESSES.with(|n| n.get()) > 0);
+    }
+
+    #[test]
+    fn pending_destination_owner_survives_getter_gc_and_fallback() {
+        super::PREFIX_SUCCESSES.with(|n| n.set(0));
+        check(
+            r#"
+            let sets=0,written=0;
+            function setValue(v){sets++;written=v;}
+            function destination(){return Object.create(null,{value:{set:setValue}});}
+            function calculate(o){return o.child.value*2+1;}
+            function pending(o){destination().value=calculate(o);}
+            function invoke(o){return pending(o);}
+            const o={child:{value:7}};
+            for(let i=0;i<600;i++){invoke(o);assert(written===15 && sets===i+1);}
+            let reads=0;
+            Object.defineProperty(o.child,'value',{get(){reads++;$262.gc();return 9;}});
+            invoke(o);assert(written===19 && sets===601 && reads===1);
+        "#,
+        );
+        assert!(super::PREFIX_SUCCESSES.with(|n| n.get()) > 0);
+    }
+
+    #[test]
+    fn nested_field_accumulator_executes_hinted_prefix_regions() {
+        let mut engine = Engine::new();
+        engine.set_tier(Tier::Jit);
+        engine.set_tier_threshold(8);
+        super::SUCCESSES.with(|n| n.set(0));
+        super::PREFIX_SUCCESSES.with(|n| n.set(0));
+        crate::jit::property_probe::HINT_SUCCESSES.with(|n| n.set(0));
+        // Match the benchmark's three nested reads and pending sum. Reduce each
+        // loop to 1000 iterations, but keep 150 compiled caller entries so the
+        // accumulator's own inline-recompile trigger is exercised.
+        let source = r#"
+            function calculate(o){return o.left.value*o.scale.value+o.offset.value;}
+            var data={left:{value:4},scale:{value:3},offset:{value:1},dst:{value:0}};
+            function returns(){var sum=0;for(var i=0;i<1000;i++)sum+=calculate(data);return sum;}
+            function invoke(){return returns();}
+            var total=0;
+            for(var call=0;call<150;call++){
+                var value=invoke();
+                if(value!==13000)throw new Error('nested prefix sum');
+                total+=value;
+            }
+            if(total!==1950000)throw new Error('nested prefix checksum');
+            data.left.value=5;
+            if(invoke()!==16000)throw new Error('nested prefix live fields');
+            'passed'
+        "#;
+        match engine.eval(source, false).unwrap() {
+            Completion::Value(value) => assert_eq!(value, "passed"),
+            Completion::Throw { name, message } => panic!("{name}: {message}"),
+        }
+        let entries = super::SUCCESSES.with(|n| n.get());
+        let prefixes = super::PREFIX_SUCCESSES.with(|n| n.get());
+        let hints = crate::jit::property_probe::HINT_SUCCESSES.with(|n| n.get());
+        eprintln!("nested field accumulator: expressions={entries}, prefixes={prefixes}, property hints={hints}");
+        assert!(prefixes > 0, "pending-accumulator region never committed");
+        assert!(hints > 0, "no warmed own-property hint succeeded");
     }
 }

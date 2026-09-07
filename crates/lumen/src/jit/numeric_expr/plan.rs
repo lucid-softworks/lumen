@@ -37,10 +37,15 @@ pub(super) struct Plan {
     pub values: Vec<Value>,
     pub destination: Option<usize>,
     pub result: usize,
+    #[cfg(test)]
+    pub prefix_depth: usize,
 }
 
 pub(super) fn build(chunk: &Chunk, cfg: &Cfg, start: usize) -> Option<Plan> {
-    if cfg.stack_depth_at(start) != Some(0) {
+    // Builder's stack is relative to the existing operand prefix. Its checked
+    // pops never consume that prefix; successful emission appends terminal operands.
+    let prefix_depth = cfg.stack_depth_at(start)?;
+    if prefix_depth != 0 && std::env::var_os("LUMEN_JIT_NO_NUMERIC_EXPR_PREFIX").is_some() {
         return None;
     }
     let mut builder = Builder::default();
@@ -55,7 +60,13 @@ pub(super) fn build(chunk: &Chunk, cfg: &Cfg, start: usize) -> Option<Plan> {
                 | Op::Return
                 | Op::Jump(_)
         ) {
-            return builder.finish(pc, matches!(op, Op::SetPropDrop(..)));
+            let plan = builder.finish(pc, matches!(op, Op::SetPropDrop(..)))?;
+            #[cfg(test)]
+            let plan = Plan {
+                prefix_depth,
+                ..plan
+            };
+            return Some(plan);
         }
         builder.step(chunk, op)?;
         if builder.stack.len() > 8 {
@@ -213,6 +224,8 @@ impl Builder {
             values: self.values,
             destination,
             result,
+            #[cfg(test)]
+            prefix_depth: 0,
         })
     }
 }

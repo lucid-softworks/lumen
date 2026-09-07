@@ -1,4 +1,5 @@
 //! Borrow an own data-property entry through live ordinary/array cache ways.
+mod compact;
 mod key;
 use crate::bytecode::{
     IcState, IC_ARR_KEYCHK, IC_OFF_DEPTH, IC_OFF_RECV_SHAPE, IC_OFF_SLOT, PROP_IC_WAYS,
@@ -21,9 +22,16 @@ pub(super) fn own_entry_with_hint(
     preferred: Option<IcState>,
     fail: usize,
 ) {
-    receiver(a, layout, fail);
     let done = a.new_label();
-    if let Some(state) = preferred.filter(|s| matches!(s.depth, 0 | IC_ARR_KEYCHK)) {
+    let mut preferred = preferred.filter(|s| matches!(s.depth, 0 | IC_ARR_KEYCHK));
+    if std::env::var_os("LUMEN_JIT_NO_COMPACT_PROPERTY_HINT").is_none() {
+        if let Some(state) = preferred {
+            compact::emit(a, layout, state, name, done);
+            preferred = None;
+        }
+    }
+    receiver(a, layout, fail);
+    if let Some(state) = preferred {
         let live = a.new_label();
         a.cmp_imm_w(8, state.depth as u32);
         a.b_cond(C_NE, live);
@@ -108,4 +116,49 @@ fn record_hint(a: &mut Asm) {
     a.ldr_imm(12, 9, 0);
     a.add_imm(12, 12, 1);
     a.str_imm(12, 9, 0);
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{bytecode::Tier, Completion, Engine};
+    #[test]
+    fn warmed_hints_recheck_shapes_descriptors_and_array_keys() {
+        let mut engine = Engine::new();
+        engine.set_tier(Tier::Jit);
+        engine.set_tier_threshold(8);
+        crate::jit::property_probe::HINT_SUCCESSES.with(|n| n.set(0));
+        super::compact::ARRAY_SUCCESSES.with(|n| n.set(0));
+        let source = r#"
+            function read(o){return o.child.value+1;}
+            function middle(o){return read(o);}
+            function site(o){return middle(o);}
+            function assert(v){if(!v)throw new Error('compact own hint');}
+            var a={child:{value:7}}, b={padding:1,child:{padding:2,value:11}};
+            for(var i=0;i<600;i++)assert(site(a)===8);
+            for(var i=0;i<40;i++){assert(site(b)===12);assert(site(a)===8);}
+            var reads=0;
+            Object.defineProperty(a.child,'value',{configurable:true,get:function(){reads++;$262.gc();return 13;}});
+            assert(site(a)===14 && reads===1);
+            Object.defineProperty(a.child,'value',{configurable:true,writable:true,value:15});
+            assert(site(a)===16 && reads===1);
+            function arrayRead(o){return o.child.length+o.child.value;}
+            function arrayMiddle(o){return arrayRead(o);}
+            function arraySite(o){return arrayMiddle(o);}
+            var arr=[1,2,3];arr.value=10;var holder={child:arr};
+            for(var i=0;i<600;i++)assert(arraySite(holder)===13);
+            arr.push(4,5);assert(arraySite(holder)===15);
+            arr.length=0;assert(arraySite(holder)===10);
+            delete arr.value;arr.padding=2;arr.value=12;assert(arraySite(holder)===12);
+            'passed'
+        "#;
+        match engine.eval(source, false).unwrap() {
+            Completion::Value(value) => assert_eq!(value, "passed"),
+            Completion::Throw { name, message } => panic!("{name}: {message}"),
+        }
+        assert!(crate::jit::property_probe::HINT_SUCCESSES.with(|n| n.get()) > 0);
+        assert!(
+            super::compact::ARRAY_SUCCESSES.with(|n| n.get()) > 0,
+            "compact array hint never executed"
+        );
+    }
 }
