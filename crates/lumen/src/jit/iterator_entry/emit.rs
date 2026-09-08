@@ -32,6 +32,9 @@ impl Drop for Native {
     }
 }
 impl Native {
+    pub(super) fn code_len(&self) -> usize {
+        self.len
+    }
     pub(super) unsafe fn run(&self, i: &mut Interp, env: &Env, iterator: &Value) -> Option<Value> {
         if self.refresh.replace(false) {
             let chunk = self.source.upgrade()?;

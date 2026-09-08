@@ -224,6 +224,8 @@ mod tests {
             run(&mut engine, "var it=make();var values=drain(it);if(it.state.cursor!==3)throw 'cursor';it=null;$262.gc();if(values.length!==3||values[0].x!==7||values[1].x!==8||values[2].x!==9)throw 'owners';");
             super::super::COUNTS.with(|v| {
                 assert_eq!(v.borrow().0.get("executed"), Some(&2));
+                assert_eq!(v.borrow().0.get("native-compiled"), Some(&1));
+                assert!(v.borrow().0.get("native-code-bytes").copied().unwrap_or(0) > 0);
             });
         }
     }

@@ -4,11 +4,14 @@ use crate::interpreter::{Abrupt, Interp};
 use crate::value::{Callable, Object, Value};
 use std::{
     cell::RefCell,
-    collections::BTreeMap,
     rc::{Rc, Weak},
 };
 
 mod classification;
+mod diagnostics;
+#[cfg(test)]
+use diagnostics::COUNTS;
+use diagnostics::{record, record_amount};
 mod execution;
 use classification::{Outcome, Version};
 
@@ -62,6 +65,29 @@ impl Feedback {
         }
     }
 
+    fn compile_native(
+        &self,
+        interp: &Interp,
+        next: &Value,
+        outcome: &Outcome,
+    ) -> Option<crate::jit::iterator_entry::Entry> {
+        if !self.execute {
+            return None;
+        }
+        let started = self.log.then(std::time::Instant::now);
+        let entry = execution::compile_entry(interp, next, outcome);
+        if let Some(started) = started {
+            record_amount("native-compile-ns", started.elapsed().as_nanos() as u64);
+            if let Some(entry) = &entry {
+                record("native-compiled");
+                record_amount("native-code-bytes", entry.code_len() as u64);
+            } else {
+                record("native-declined");
+            }
+        }
+        entry
+    }
+
     fn observe(&self, pc: usize, interp: &Interp, next: &Value) {
         let Ok(index) = self.sites.binary_search_by_key(&pc, |(pc, _)| *pc) else {
             return;
@@ -90,11 +116,7 @@ impl Feedback {
             site.callee = Rc::downgrade(object);
             site.version = version;
             site.outcome = classification::classify(&user.func);
-            site.native = if self.execute {
-                execution::compile_entry(interp, next, &site.outcome)
-            } else {
-                None
-            };
+            site.native = self.compile_native(interp, next, &site.outcome);
             #[cfg(test)]
             REPLANS.with(|n| n.set(n.get() + 1));
         }
@@ -138,26 +160,6 @@ pub(super) fn fallback(
     next: Value,
 ) -> Result<Option<Value>, Abrupt> {
     execution::step(chunk, pc, interp, iterator, next)
-}
-
-struct Counts(BTreeMap<String, u64>);
-impl Drop for Counts {
-    fn drop(&mut self) {
-        for (status, count) in &self.0 {
-            eprintln!("[iterator-entry-feedback] {count} {status}");
-        }
-    }
-}
-thread_local! {static COUNTS:RefCell<Counts>=const {RefCell::new(Counts(BTreeMap::new()))};}
-fn record(status: &str) {
-    let _ = COUNTS.try_with(|counts| {
-        let mut counts = counts.borrow_mut();
-        if let Some(count) = counts.0.get_mut(status) {
-            *count += 1;
-        } else {
-            counts.0.insert(status.into(), 1);
-        }
-    });
 }
 
 #[cfg(test)]
@@ -248,7 +250,10 @@ mod tests {
             c.borrow()
                 .0
                 .iter()
-                .filter(|(key, _)| !matches!(key.as_str(), "executed" | "entry-miss"))
+                .filter(|(key, _)| {
+                    !matches!(key.as_str(), "executed" | "entry-miss")
+                        && !key.starts_with("native-")
+                })
                 .map(|(_, count)| *count)
                 .sum()
         })

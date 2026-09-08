@@ -3508,3 +3508,33 @@ is archived as `iterator-entry-code-reuse-design.md`; repeated compilation is
 currently a hypothesis, not an attributed timing cause. Independent artifact and
 ownership review is in `iterator-native-independent-review.md`. The within-2×
 goal remains unmet.
+
+### Iterator compilation cost diagnostic (2026-09-08)
+
+Feedback-enabled native compilation now counts successful/declined preparations,
+cumulative emitted code bytes and preparation nanoseconds. Timing collection and
+counter updates occur only with feedback logging; the timed comparisons above
+used no logging. Existing integration coverage checks one generated compilation
+and positive emitted bytes alongside two successful native entries.
+
+The instrumented release verifies the unchanged 10,000-parse workload and reports
+10,000 successful compilations, 125,800,000 cumulative code bytes, 125,066,604 ns
+in native preparation, and the same 260,000 generated entries / 540,000 misses.
+Cumulative code is not peak resident memory. Preparation time includes entry
+eligibility, lexical guards, cache copying, assembly and executable allocation;
+it is diagnostic evidence, not an isolated causal estimate of the parser regression.
+
+This supports investigating reuse across fresh closures sharing bytecode. Such
+reuse must retain live callee/version/realm checks, update captured scope records
+without rooting old closures, and reject incompatible binding paths before entry.
+It does not justify enabling the current backend or predict a measured speedup.
+
+The 21 focused tests and full 814-test suite pass; Clippy matches the baseline
+error-message multiset. Instrumented binary SHA-256:
+`cdbaa43304b3d493d9574c6d612b08e7c8172aa99ab107d478022c1a7638c100`.
+Source ZIP/hashes, exact patch, validation logs and diagnostic driver/results are
+archived as `iterator-native-setup-*` in the external optimizer directory.
+
+The instrumented binary/source archive precedes a behavior-preserving extraction
+of the counters into `iterator_entry/diagnostics.rs`. The final extracted source
+was separately validated by `iterator-native-setup-final-*` test and Clippy logs.

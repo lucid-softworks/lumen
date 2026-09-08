@@ -55,6 +55,23 @@ pub(crate) fn compile(plan: &Candidate, chunk: &Rc<Chunk>, env: &Env) -> Option<
 }
 
 impl Entry {
+    pub(crate) fn code_len(&self) -> usize {
+        #[cfg(all(
+            target_arch = "aarch64",
+            any(target_os = "macos", target_os = "linux", target_os = "windows")
+        ))]
+        {
+            self.native.code_len()
+        }
+        #[cfg(not(all(
+            target_arch = "aarch64",
+            any(target_os = "macos", target_os = "linux", target_os = "windows")
+        )))]
+        {
+            0
+        }
+    }
+
     /// Caller has performed the normal depth/GC poll and validated live callee,
     /// selected code version, realm and no-activation eligibility. Env and iterator
     /// remain owned; no callback or GC may overlap this native invocation.
