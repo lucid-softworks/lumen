@@ -3147,3 +3147,61 @@ The retained bbe471f binary remains 9.667× behind Node and 11.509× behind Bun 
 classic score, and 15.134× / 23.706× by Djot runtime in this batch. There is no
 new retained engine improvement from this experiment; the within-2× goal remains
 unmet. Further work needs to remove larger combined allocation and call costs.
+
+
+### Partial iterator entry coverage (2026-09-08, diagnostic)
+
+After rejecting the boxed import layout, the next investigation targets combined
+call, allocation and result-consumption costs. An external diagnostic copy of the
+verified Djot workload counts the custom EventParser iterator's branches. It runs
+on retained bbe471f with inherited LUMEN flags removed and preserves all 10,000
+full HTML equality checks (3,160,000 characters). The counters change generated
+code and overhead; elapsed output is not accepted benchmark evidence.
+
+| Iterator outcome | Calls | Share of all calls |
+| --- | ---: | ---: |
+| Queued return immediately at entry | 260,000 | 56.52% |
+| Queued return after cold parsing | 80,000 | 17.39% |
+| Final-drain return | 110,000 | 23.91% |
+| Completed | 10,000 | 2.17% |
+| Total | 460,000 | 100% |
+
+There are 90,000 cold invocations and 90,000 cold-loop passes: 80,000 end in the
+queued return and 10,000 in final drain. Both reconciliation identities pass.
+Only the 260,000 immediate queued returns qualify for the proposed entry-prefix
+slice. Counting all queued returns would incorrectly claim 73.91% coverage.
+
+A separate diagnostic of the original, unmodified workload dumps the retained
+callee's actual bytecode and also passes all HTML checks. The callee has 483 ops;
+the candidate entry region occupies PCs 0–35. Branches at PCs 4 and 19 leave for
+completion/cold parsing. PC 5 performs a local TDZ reset; PC 25 writes the numeric
+iterator state. PCs 26–32 then resolve names, read properties and fetch the yielded
+element, followed by MakeObject at 34 and Return at 35.
+
+This ordering makes restart-after-write unsafe. A first implementation must prove
+all guards and value acquisition can precede the numeric commit without changing
+alias, getter, proxy or exception behavior; otherwise it needs an exact callee
+continuation with reconstructed state. Existing whole-function inline admission
+uses the entire callee size and requires global or shared closure environments for
+free names. Raising its budget alone does not implement the required captured
+entry region. Existing RegionIr side exits describe one frame's locals and stack,
+so they do not by themselves prove cross-frame fallback correctness.
+
+The measured immediate-return frequency supports investigating a bounded partial
+inline region and virtual returned record. It is not a measured compiler hit rate,
+allocation reduction or speedup. No production engine change is retained here,
+and the within-2× goal remains unmet. Source/binary/driver hashes, instrumented
+source, counts and original bytecode are archived in the external optimizer
+directory as `djot-next-paths.*`, `diagnose-djot-next-paths.py` and
+`partial-iterator-original-*`.
+
+
+Independent owner review recommends a proof-only partial-region planner as the
+next implementation step. It must represent the numeric write as a pending effect,
+forward later reads of that exact entry, prove other reads disjoint, and preserve
+the original IEEE754 Add/Sub operations rather than simplifying `(old + 1) - 1`.
+Acquire the yielded owner before the final commit; reject any remaining fallible
+operation. IterStepL also needs dedicated callee feedback because its implicit
+next call is not represented in ordinary Call/CallWithThis inline feedback.
+The detailed API review and rejection conditions are archived in
+`partial-iterator-entry-review.md`.
