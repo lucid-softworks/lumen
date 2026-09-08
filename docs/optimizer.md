@@ -2743,3 +2743,56 @@ validation remain archived under `borrowed-gc-count-*` and
 `lumen-borrowed-gc-count-*` in the external optimizer directory. A fresh retained
 engine profile should reassess remaining application costs before another GC
 change; removed operations alone were not enough to justify this candidate.
+
+### Fresh retained parser profile and iterator-result target (2026-09-08)
+
+After rejecting borrowed GC counting, a fresh diagnostic profiles the retained
+bbe471f executable, verified against its recorded binary hash. Forty thousand
+parses verify 12,640,000 HTML characters. The sampler starts after two seconds
+and records six seconds; engine and sampler exit zero. Instrumented elapsed time
+is not benchmark evidence. Independent tree analysis reconciles 5,130 samples
+from one main thread, with no negative or unaccounted exclusive residuals.
+
+Regex execution has 432 ancestry samples (8.42%), partitioned without overlap
+into matching 103 (2.01%), result-array/property construction 169 (3.29%) and other
+execution descendants 160 (3.12%). GC has 661 ancestry samples (12.88%), including
+216 direct collector samples; these are not additive or an estimate of removable
+counting overhead. Name-path helpers have 207 exclusive samples (4.04%). Separate
+disjoint leaf categorization assigns 494 samples (9.63%) to destruction and 398
+(7.76%) to allocator code. Symbol inlining and category boundaries limit causal
+attribution; these totals do not predict gains from one allocation change.
+
+All 1,160 unknown native-code leaves (22.61%) map into the same-process JIT ranges.
+The largest generated chunk contributes 197 samples (3.84% of the whole profile),
+so there is no single tiny arithmetic site dominating execution. Mapped families
+include CallWithThis 152, GetPropLocal 97, GetProp 88, GetMethod 86 and LoadName 54.
+These are last-start instruction spans, not perfect opcode boundaries: the final
+ReturnUndef span can include outlined tails and must not be treated as return cost.
+
+Helper attribution uses the nearest JIT ancestor above the helper boundary and
+return address minus four. It distinguishes direct helper leaves from ancestry
+that includes descendant JavaScript. The input/options parser's IterStepL212 has
+52 direct destruction samples and 16 direct dispatch samples; its much larger
+dispatch ancestry is not dispatcher self time. The main parser's IterStepL179 has
+27 direct property samples. A large call48 allocation/destruction attribution
+overlaps collection and cannot be assigned to that JavaScript callee's allocations.
+
+Source inspection resolves a concrete remaining protocol path. Djot's
+`EventParser[Symbol.iterator]` returns a custom object with `next()`, which returns
+fresh `{value: ..., done: false}` results consumed by `for (const event of parser)`.
+`Interp::iterator_step` in eval.rs still calls generic `get_member` for `done` and,
+when false, `value`. The retained array-iterator specialization does not apply to
+this custom iterator. A bounded next candidate is a pure own-data result probe:
+ordinary receiver checks, existing truthiness for done, no value access when done,
+and exact ordered fallback for missing/accessor/exotic cases. Cloning the selected
+value first avoids mixing protocol lookup optimization with unique-owner mutation.
+This is a proposal, not an implemented or measured improvement.
+
+A native deeper-name-cache design is also archived, but template binding storage
+needs a stable owner-defined native view; generation zero alone does not prove its
+Rust enum layout. Iterator-result lookup is therefore the next implementation
+priority. Profile maps, raw samples, reproducible analyzers, independent analysis,
+JIT attribution and binary validation are archived under
+`djot-inline-reads-current-*`, `djot-inline-jit-*` and related scripts in the external
+optimizer directory. This diagnostic changes the next action, not the measured
+Node/Bun gap or the within-2× completion status.
