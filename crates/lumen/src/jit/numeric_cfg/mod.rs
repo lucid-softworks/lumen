@@ -59,6 +59,7 @@ thread_local! {
 
 #[cfg(test)]
 fn record_entry(a: &mut Asm) {
+    super::numeric_loops::record_entry(a);
     // Engine/Chunk are Rc-based and cannot move between threads. This code and its TLS cell
     // therefore share a lifetime and thread; the counter introduces no shared-memory race.
     record_counter(a, ENTRIES.with(|entries| entries.as_ptr() as usize));

@@ -95,6 +95,11 @@ mod numeric_expr;
     target_arch = "aarch64",
     any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
+mod numeric_loops;
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 mod packed_element;
 #[cfg(all(
     target_arch = "aarch64",
@@ -1568,14 +1573,16 @@ pub fn compile(
             }
         }
     }
-    let mut fast: u32 = std::env::var("LUMEN_JIT_FAST")
+    let template_fast: u32 = std::env::var("LUMEN_JIT_FAST")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(u32::MAX);
-    // Hidden inline owners are not modeled by loop-region publication yet.
-    if chunk.has_inline_closures() {
-        fast &= !(1 << 15);
-    }
+    // Complex regions can consume inline call setup. Numeric-only regions preserve it.
+    let fast = if chunk.has_inline_closures() {
+        template_fast & !(1 << 15)
+    } else {
+        template_fast
+    };
     let array_intrinsics_on = std::env::var_os("LUMEN_JIT_NO_ARRAY_INTRINSICS").is_none();
     let function_call_intrinsic_on =
         std::env::var_os("LUMEN_JIT_NO_FUNCTION_CALL_INTRINSIC").is_none();
@@ -1723,10 +1730,8 @@ pub fn compile(
             );
         }
         a.bind(write_fallback_labels[pc]);
-        if !chunk.has_inline_closures() {
-            // Mixed object/numeric expressions retain their original templates on every guard miss.
-            numeric_expr::try_emit(&mut a, chunk, &cfg, pc, &pc_labels, &mut targeted, layout);
-        }
+        // Expressions only publish operands; hidden callees remain in their owning locals.
+        numeric_expr::try_emit(&mut a, chunk, &cfg, pc, &pc_labels, &mut targeted, layout);
         // A web-trace regexp workload is dominated by tiny loops whose body is exactly
         // `re.exec(strings[i])` with the result discarded. Let one guarded Rust entry process
         // the dense string range; a declined guard falls through to these untouched templates.
@@ -2029,30 +2034,30 @@ pub fn compile(
                 }
             }
             if !emitted_region {
-                emitted_region = numeric_cfg::try_emit(
+                numeric_loops::try_emit(
                     &mut a,
                     chunk,
                     &cfg,
                     layout,
+                    fast,
                     pc,
-                    &pc_labels,
-                    &mut targeted,
+                    (&pc_labels, &mut targeted),
                 );
             }
-            if !emitted_region {
-                if let Some(plan) = plan_loop(chunk, ops, pc, &targeted, layout, fast, &cfg) {
-                    let plain_h = emit_loop_chain(&mut a, layout, &plan, &pc_labels);
-                    a.bind(plain_h);
-                    // Bails jump to interior pc labels, so the plain region below must never fuse
-                    // across them: mark every interior pc targeted (all fusions respect that).
-                    for p in pc + 1..=plan.jump_pc {
-                        targeted[p] = true;
-                    }
-                    // Fall through: the plain template for this op (and the rest of the region)
-                    // emits as usual.
-                }
-            }
         }
+        if chunk.has_inline_closures() && template_fast & 32768 != 0 && rc_ok && targeted[pc] {
+            numeric_loops::try_emit(
+                &mut a,
+                chunk,
+                &cfg,
+                layout,
+                template_fast,
+                pc,
+                (&pc_labels, &mut targeted),
+            );
+        }
+        // Region restrictions must not disable ordinary instruction fast paths.
+        let fast = template_fast;
         // Local identity/nullish comparison feeding a branch. Reading the two frame slots
         // non-owningly avoids two Value clones, their stack traffic, the equality helper, and
         // both refcount drops for hot `if (object != excluded)` loops. Unsupported/coercing
@@ -21787,6 +21792,8 @@ fn emit_loop_chain(
     // ---- rotated loop ----------------------------------------------------------------------
     emit_pass!(0..plan.cond_len, exit_a, Vec::new());
     a.bind(body_l);
+    #[cfg(test)]
+    numeric_loops::record_entry(a);
     emit_pass!(
         plan.cond_len..plan.chain.len(),
         exit_b,

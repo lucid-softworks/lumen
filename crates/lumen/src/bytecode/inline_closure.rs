@@ -127,6 +127,19 @@ thread_local! {
     static HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// Scoped override for execution tests of optimizations composed with shared inlines.
+#[cfg(test)]
+pub(crate) fn test_with_enabled(run: impl FnOnce()) {
+    struct Reset(Option<bool>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            OVERRIDE.with(|value| value.set(self.0));
+        }
+    }
+    let _reset = Reset(OVERRIDE.with(|value| value.replace(Some(true))));
+    run();
+}
+
 #[cfg(test)]
 mod tests {
     use super::{HITS, OVERRIDE};

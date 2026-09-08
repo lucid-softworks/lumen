@@ -27,9 +27,10 @@ ownership. Snapshots own no strong references and the physical frame ABI stays
 
 Native guards first try the original weak-pinned identity and environment checks;
 fresh instances call a Rust predicate to validate the broader proof. Calls within
-these inlines use checked helpers, and affected chunks exclude loop regions and
-mixed object/numeric regions whose ownership publication does not yet model the
-hidden callee. These conservative choices limit whole-application gains. This is
+these inlines use checked helpers. Complex call-spanning and speculative-write
+regions remain restricted; a subsequent [numeric-region follow-up](closure-numeric-regions.md)
+restores numeric-only loops and field expressions that preserve the hidden callee.
+The measurements below describe the earlier revision. This is
 an experimental call-path improvement, not a claim of Node/Bun parity.
 
 The fixture warms one sibling closure pair, then measures 1.6 million calls across
