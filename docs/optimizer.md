@@ -3047,3 +3047,103 @@ Moving the rare present payload behind Box could shrink scope binding storage wh
 preserving physical Env ownership and clone behavior. Actual layout size, GC edge
 accounting, imported-binding clone costs and application timings must be checked.
 This is a proposal; no import-layout change is implemented here.
+
+
+### Boxed import metadata (2026-09-08, rejected)
+
+Binding's rare live-import tuple moves from `Option<(Env, String)>` to
+`Option<Box<(Env, String)>>`. The binding type and its tests move into the focused
+`interpreter/binding.rs` module; existing interpreter type paths remain re-exported.
+On this 64-bit host, before/after probes measure Binding at 56/32 bytes and the
+optional import field at 32/8 bytes. This is a 42.86% reduction in each binding's
+storage, not a measured reduction in whole-engine memory or execution time.
+
+Each present import still owns exactly one physical exporter Env handle. Cloning a
+Binding clones its Box and exporter handle independently, preserving GC accounting.
+Both collector scope passes borrow the tuple through `as_deref()` and retain their
+existing physical-edge count/mark behavior, including uninitialized bindings and
+simultaneous object values. Import-read snapshots use `as_deref().cloned()` so they
+retain the previous Env/String clone behavior without adding a temporary Box per
+read. Linking a present import and cloning an imported Binding add Box allocations;
+ordinary bindings avoid the inline tuple space. Existing JIT offsets and captured
+binding strides derive from the new owner layout.
+
+Four focused tests verify size and physical clone ownership; rooted/unrooted import
+cycles, TDZ and object edges through collection; live aliases/default imports and
+reexports across GC; readonly imports; and imported typeof TDZ followed by exporter
+initialization. Runtime fixtures cover interpreter, bytecode and JIT tiers. Full
+validation passes 760 unit and 34 integration tests. Formatting/module checks pass;
+Clippy matches the existing error-message multiset exactly.
+
+A proposed cyclic-module TDZ fixture exposed an existing discrepancy: retained Lumen
+and the candidate complete it, while installed Node and Bun throw. The original
+fixture, comparison outputs and failed test are preserved under
+`boxed-import-existing-*` and `boxed-import-tdz-fixture`. The direct imported-TDZ test
+passes independently of that module-cycle behavior. This experiment does not claim
+to fix that existing discrepancy.
+
+This is a compile-time layout change with no runtime off variant. Comparison drivers
+use retained bbe471f, the candidate, Node v24.18.0 and Bun 1.3.14 in three rotated
+rounds: 36 verified workload runs and 12 classic-suite runs. Scope kernels create
+2,000 escaping captured closures or churn 2,000 mutable captured scopes and validate
+every warmup/calibration/timed invocation. An additional 12 cold-process module runs
+load 2,000 imported mutable bindings and verify a live export update; their metric
+includes process startup, loading, checks and exit, without clearing filesystem caches.
+
+
+Expanded conformance, including module-code tests, matches retained/candidate exactly:
+26,606 passes, two known failures, zero skips and identical full failure lists.
+Differential testing agrees on 1,996 cases with four budget skips. Prechecks validate
+both scope kernels and the module fixture on all four engines before timing.
+
+The 36 workload runs are complete:
+
+| Workload (lower is better) | Retained | Candidate | Node | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| Escaping closures, µs/2,000 | 1580.00 | 1560.00 | 28.40 | 25.60 |
+| Mutable scopes, µs/2,000 | 1320.00 | 1320.00 | 9.47 | 12.80 |
+| Djot 10,000 parses, ms | 3390.00 | 3391.00 | 224.00 | 143.00 |
+| Delta 5,000 iterations, ms | 8270.00 | 8296.00 | 197.00 | 299.00 |
+
+Escaping closures improve 1.27%, with one winning pair and two ties. Mutable scopes
+are flat in every pair. Djot's median regresses 0.03%, with mixed pairs (+0.27%,
+-0.18%, +2.45%). Delta regresses 0.31%, with all three pairs worse (+0.49%, +0.07%,
++0.60%). These results do not establish a repeatable application speed gain from the
+smaller layout. All 60 timing runs are now complete.
+
+
+| Classic suite (higher is better) | Retained | Candidate | Node | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| Richards | 23659 | 23455 | 66082 | 72027 |
+| DeltaBlue | 3908 | 3941 | 154399 | 111250 |
+| Crypto | 23959 | 23941 | 92331 | 120252 |
+| RayTrace | 6499 | 6480 | 135196 | 308501 |
+| EarleyBoyer | 3620 | 3577 | 147387 | 160007 |
+| RegExp | 1650 | 1629 | 22410 | 30791 |
+| Splay | 9942 | 10015 | 81092 | 94790 |
+| NavierStokes | 38584 | 38655 | 70271 | 71457 |
+| Score (version 7) | 8677 | 8682 | 83882 | 99867 |
+
+The classic composite changes +0.058%, with mixed pairs (-1.239%, -0.069%,
++0.058%). RayTrace and RegExp lose in every pair; Splay wins in every pair.
+
+| Cold module process (lower is better) | Retained | Candidate | Node | Bun |
+| --- | ---: | ---: | ---: | ---: |
+| Wall time, ms | 18.943417 | 19.291917 | 26.101958 | 15.156875 |
+
+Cold module time regresses 1.840% at the median, with mixed pairs (-3.972%,
++3.298%, -1.458%). This measures startup, module loading, validation and exit;
+it does not establish warm execution parity with either engine.
+
+Rejected for this speed goal: the deterministic storage reduction produces no
+repeatable classic-suite or parser gain, and Delta is slower in every pair.
+All candidate source changes were restored to HEAD after verifying every measured
+Rust source hash. The complete measured source ZIP, rejected source copies and
+patch, raw timing rows, drivers, validation logs and independent all-60-run audit
+are preserved under `/Volumes/XEX-VM/codex-builds/lumen-optimizer/boxed-import-*`.
+No build, test or diagnostic run overlapped accepted timings.
+
+The retained bbe471f binary remains 9.667× behind Node and 11.509× behind Bun by
+classic score, and 15.134× / 23.706× by Djot runtime in this batch. There is no
+new retained engine improvement from this experiment; the within-2× goal remains
+unmet. Further work needs to remove larger combined allocation and call costs.
