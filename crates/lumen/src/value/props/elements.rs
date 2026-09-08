@@ -1,62 +1,9 @@
-//! Dense element storage, packed array construction, and array length access.
-use super::shapes::{fn_key, shape_transition, ARRAY_LENGTH_SHAPE, SHAPE_EMPTY};
-use super::storage::{DenseBuffers, DenseStorage, InlinePacked, INLINE_PACKED_CAPACITY};
+//! Dense element storage and array length access.
+
 use super::{Props, MIRROR_HOLE, MIRROR_NO_HOLES, MIRROR_OK, NO_SLOT};
 use crate::value::{index_key, Property, Value};
-use std::cell::Cell;
 
 impl Props {
-    /// Construct a small dense array map directly from moved JIT stack values.
-    ///
-    /// # Safety
-    /// `items..items+len` contains initialized `Value`s relinquished by the caller.
-    pub(crate) unsafe fn packed_array_from_raw(items: *mut Value, len: usize) -> Props {
-        debug_assert!(len <= 32);
-        let inline = len <= INLINE_PACKED_CAPACITY;
-        let mut packed = Vec::with_capacity(if inline { 0 } else { len });
-        if !inline {
-            for index in 0..len {
-                packed.push(Property::plain(unsafe { items.add(index).read() }));
-            }
-        }
-        let length_key = fn_key(0);
-        let shape = ARRAY_LENGTH_SHAPE.with(|cached| {
-            let shape = cached.get();
-            if shape != 0 {
-                shape
-            } else {
-                let shape = shape_transition(SHAPE_EMPTY, &length_key);
-                cached.set(shape);
-                shape
-            }
-        });
-        Props {
-            entries: vec![(
-                length_key,
-                Property::data(Value::Num(len as f64), true, false, false),
-            )],
-            shape,
-            elems: DenseStorage(Some(Box::new(DenseBuffers {
-                index: None,
-                packed: (!inline).then(|| Box::new(packed)),
-                inline_packed: if inline {
-                    unsafe { InlinePacked::from_raw(items, len) }
-                } else {
-                    InlinePacked::default()
-                },
-                elems: Vec::new(),
-                mirror: Vec::new(),
-            }))),
-            mirror_flags: 0,
-            mirror_holes: 0,
-            proto_flag: Cell::new(false),
-            has_far: Cell::new(false),
-            elem_mode: Cell::new(true),
-            proto_slot: Cell::new(NO_SLOT),
-            len_slot: Cell::new(0),
-        }
-    }
-
     /// Reserve the exact backing storage for a dense array whose initial length is known.
     /// `entries` needs one additional slot for the array's own `length` property. Small literals
     /// use the keyless packed representation: it avoids allocating/cloning one decimal string key

@@ -16,13 +16,16 @@ impl InlinePacked {
         slots: [const { std::mem::MaybeUninit::uninit() }; INLINE_PACKED_CAPACITY],
     };
 
-    pub(in crate::value) unsafe fn from_raw(items: *mut Value, len: usize) -> InlinePacked {
-        debug_assert!(len <= INLINE_PACKED_CAPACITY);
+    pub(super) fn from_values(values: impl ExactSizeIterator<Item = Value>) -> InlinePacked {
+        assert!(values.len() <= INLINE_PACKED_CAPACITY);
         let mut packed = InlinePacked::default();
-        for index in 0..len {
-            packed.slots[index].write(Property::plain(unsafe { items.add(index).read() }));
+        for value in values {
+            let index = packed.len as usize;
+            assert!(index < INLINE_PACKED_CAPACITY);
+            packed.slots[index].write(Property::plain(value));
+            // Count every initialized owner immediately, including during unwinding.
+            packed.len += 1;
         }
-        packed.len = len as u8;
         packed
     }
 

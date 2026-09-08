@@ -4,6 +4,7 @@
 //! Control flow uses [`Abrupt`] threaded through `Result`: expressions can only ever raise
 //! `Throw`, while statements additionally produce `Return`/`Break`/`Continue` completions.
 
+mod arrays;
 mod bindings;
 mod constructor_body;
 mod this_binding;
@@ -2013,62 +2014,6 @@ impl Interp {
         let buf = self.array_buffers.get_mut(&info.buffer)?;
         let ptr = unsafe { buf.as_mut_ptr().add(info.offset) };
         Some((code, byte_len, ptr))
-    }
-
-    pub fn make_array(&self, items: Vec<Value>) -> Value {
-        let obj = Object::new(Some(self.array_proto.clone()));
-        let len = items.len();
-        let numeric = items.iter().all(|v| matches!(v, Value::Num(_)));
-        {
-            let mut b = obj.borrow_mut();
-            b.props.mark_array();
-            b.props.reserve_dense_exact(len, numeric);
-        }
-        obj.borrow_mut().exotic = Exotic::Array;
-        {
-            let mut b = obj.borrow_mut();
-            for v in items {
-                b.props.push_dense(Property::plain(v));
-            }
-            b.props.insert(
-                "length",
-                Property::data(Value::Num(len as f64), true, false, false),
-            );
-        }
-        Value::Obj(obj)
-    }
-
-    /// Build an array by moving `len` initialized values directly from a JIT operand stack.
-    ///
-    /// # Safety
-    /// `items` must point to `len` live, non-overlapping `Value`s. This method consumes every
-    /// value exactly once; the caller must reset its stack pointer to `items` before returning.
-    pub(crate) unsafe fn make_array_from_raw(&self, items: *mut Value, len: usize) -> Value {
-        if len <= 32 {
-            let obj = Object::new_with_parts(
-                Some(self.array_proto.clone()),
-                unsafe { Props::packed_array_from_raw(items, len) },
-                Exotic::Array,
-            );
-            return Value::Obj(obj);
-        }
-        let obj = Object::new(Some(self.array_proto.clone()));
-        let numeric = (0..len).all(|k| matches!(unsafe { &*items.add(k) }, Value::Num(_)));
-        {
-            let mut b = obj.borrow_mut();
-            b.props.mark_array();
-            b.props.reserve_dense_exact(len, numeric);
-            b.exotic = Exotic::Array;
-            for k in 0..len {
-                b.props
-                    .push_dense(Property::plain(unsafe { items.add(k).read() }));
-            }
-            b.props.insert(
-                "length",
-                Property::data(Value::Num(len as f64), true, false, false),
-            );
-        }
-        Value::Obj(obj)
     }
 
     /// Build the generator/iterator object whose `next`/`return`/`throw` drive its coroutine (stored

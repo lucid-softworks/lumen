@@ -2458,3 +2458,101 @@ were independently audited. Source, timing rows, summaries, diagnostic logs and
 validation are archived under `mixed-read-proofs-*` and `lumen-mixed-read-proofs-*`
 in the external optimizer directory. The follow-up dense-element layout design
 is still only a proposal; its small static load savings are not a measured gain.
+
+### Builtin array construction from owned values (2026-09-08)
+
+A fresh profile of f6ac3e6 runs 40,000 fully verified Djot parses and samples six
+seconds after a two-second startup delay, with same-process JIT maps. Engine and
+sampler exit zero; the output verifies 12,640,000 HTML characters. One main-thread
+root contains 4,638 samples, and exclusive residuals reconcile to that total.
+Regex execution has 463 ancestry samples (9.98%), partitioned without overlap
+into matching 95 (2.05%), `make_array`/`set_data` construction 215 (4.64%), and
+other descendants 153 (3.30%). GC ancestry is 630 (13.58%), including 198 direct
+collection samples; these must not be added. Array-iterator builtin ancestry is
+108 (2.33%), while the fast-yield helper has 94 (2.03%). Older iterator ancestry
+figures no longer establish the current bottleneck. Inlining can hide helper
+boundaries, and these counts do not measure individual allocation latency.
+
+The profile exposes an existing construction mismatch. Small JIT array literals
+already use a direct packed constructor, but builtin-created arrays use repeated
+insertion and separately allocated packed buffers. Regex capture-index pairs and
+`Object.entries` pairs are examples. `Interp::make_array` now routes lengths
+1–32 through a shared owned-value constructor. Lengths 1–10 use existing inline
+packed storage; lengths 11–32 retain the existing heap-packed representation.
+Empty arrays and lengths above 32 retain the previous construction path.
+`LUMEN_NO_COMPACT_BUILTIN_ARRAYS=1`, read once per process, disables this selection.
+
+Array construction moves into `interpreter/arrays.rs`; packed property-map
+construction moves into `value/props/array_builder.rs`. The existing raw JIT
+constructor delegates through the same bounded builder. Its initialized values
+are moved exactly once. The safe constructor consumes an exact-size iterator,
+and inline storage advances its initialized length after each write so unwinding
+releases completed elements. The length shape, descriptors, prototypes, hole
+semantics, indexed ordering and GC edges retain their existing representation.
+Regex strings and observable result properties are still materialized normally.
+
+There is a known performance tradeoff: some generated element reads recognize
+heap-packed storage but not inline storage. A new small builtin array can take
+the existing helper fallback until mutation or numeric-region preparation
+promotes its storage. Rust lookup, reflection and GC already support both forms.
+Direct native reads of inline packed elements are a separate proposed follow-up,
+not part of this change or its measured gains.
+
+Validation passes 754 unit and 34 integration tests, including 103 focused array
+tests. The two new runtime tests also pass with the feature disabled. New tests
+cover storage boundaries, duplicate owners, construction unwinding, holes versus
+Undefined, reflection, growth/truncation, getter changes, GC-held aliases, regex
+capture descriptors and Unicode indices. Expanded before/after conformance adds
+all Array and RegExp tests: both binaries pass 26,007/26,009 with identical full
+failure lists (the two existing lexical-arguments/dynamic-import failures).
+Differential testing agrees on 1,996 cases with four budget skips. Formatting and
+new-module audits pass; Clippy exactly matches the existing error-message
+multiset, rather than passing cleanly.
+
+Sixty sequential timing runs cover three rotated rounds of the retained before
+binary, candidate disabled/enabled, Node v24.18.0 and Bun 1.3.14. All outputs are
+verified; source archives, executable hashes, schedules and raw rows are kept.
+The primary comparison is before versus enabled, including the shared raw
+constructor refactor. No builds, tests or profiling overlap these timings.
+
+| Workload (lower is better) | Before | Disabled | Enabled | Node | Bun |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Capture indices, µs/2,000 calls | 1460 | 1460 | 1340 | 200 | 140 |
+| Capture strings, µs/2,000 calls | 760 | 780 | 760 | 52.8 | 11 |
+| Object entries, µs/2,000 calls | 890 | 910 | 810 | 154.29 | 108.89 |
+| String split, µs/2,000 calls | 386.67 | 386.67 | 380 | 34.8 | 18.13 |
+| Djot 10,000 verified parses, ms | 3526 | 3530 | 3460 | 230 | 145 |
+| Delta 5,000 verified iterations, ms | 8257 | 8310 | 8326 | 197 | 307 |
+
+Before/enabled capture-index time improves 8.22% and object-entry time improves
+8.99%, with all three pairs improving. Capture strings are flat; split improves
+1.72%, with two improving pairs and one tie. Djot improves 1.87%, with all pairs
+improving 1.87–2.61%. Its third round is slower across every engine; all rows
+remain included without assigning a host-level cause. Standalone Delta regresses
+0.84%, with every pair slower (0.52–3.15%). Disabled/enabled parser time improves
+1.98%; the larger third-round disabled comparison is not the primary evidence.
+
+| Classic benchmark (higher is better) | Before | Disabled | Enabled | Node | Bun |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Richards | 23504 | 23635 | 23501 | 65814 | 72298 |
+| DeltaBlue | 3947 | 3908 | 3947 | 152138 | 109531 |
+| Crypto | 23852 | 23937 | 24033 | 92204 | 119913 |
+| RayTrace | 6364 | 6460 | 6441 | 136010 | 307317 |
+| EarleyBoyer | 3600 | 3644 | 3648 | 146671 | 158336 |
+| RegExp | 1629 | 1650 | 1655 | 22729 | 30730 |
+| Splay | 10284 | 9812 | 9958 | 80562 | 95727 |
+| NavierStokes | 37656 | 37581 | 38173 | 70420 | 71606 |
+| Score (version 7) | 8661 | 8660 | 8674 | 83669 | 99588 |
+
+The composite median improves only 0.15%, with mixed pairs (-0.13%, -1.00%,
++4.04%); this is not a consistent overall-suite gain. Splay's median declines
+3.17%, also with mixed pairs (-4.91%, -3.68%, +4.54%). The change is retained for
+repeatable parser, capture-index and object-entry gains, with these regressions
+preserved. Current composite ratios are 9.65× Node / 11.48× Bun; Djot time ratios
+are 15.04× / 23.86×. The within-2× goal remains unmet. These ratios describe these
+workloads, not general engine equivalence, and gains from separate experimental
+batches must not be added into a cumulative percentage.
+
+Evidence is archived under `compact-builtin-arrays-*` and
+`lumen-compact-builtin-arrays-*` in the external optimizer directory, including
+the fresh profile, conformance comparison, source snapshots and validation logs.

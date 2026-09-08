@@ -4,6 +4,7 @@ use shapes::SHAPE_EMPTY;
 use std::rc::Rc;
 pub(in crate::value) use storage::DenseStorage;
 mod access;
+mod array_builder;
 mod elements;
 mod mirror;
 mod mutation;
