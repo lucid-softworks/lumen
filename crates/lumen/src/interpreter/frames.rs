@@ -122,3 +122,43 @@ impl Interp {
         roots
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{bytecode::Tier, Completion, Engine};
+
+    #[test]
+    fn fresh_activation_closure_reflects_the_actual_cached_call_target() {
+        let source = r#"
+            function inspect() { eval(''); return inspect.caller; }
+            function factory() {
+                return function() {
+                    let captured = 1;
+                    function inner() { return captured; }
+                    if (inner() !== 1) throw 'capture';
+                    return inspect();
+                };
+            }
+            function invoke(f) { return f(); }
+            const first = factory();
+            for (let i = 0; i < 500; i++) {
+                if (invoke(first) !== first) throw 'warm caller';
+            }
+            for (let i = 0; i < 10; i++) {
+                const next = factory();
+                if (invoke(next) !== next) throw 'fresh caller';
+            }
+            'passed'
+        "#;
+        for tier in [Tier::Bytecode, Tier::Jit] {
+            let mut engine = Engine::new();
+            engine.set_tier(tier);
+            engine.set_tier_threshold(0);
+            match engine.eval(source, false).unwrap() {
+                Completion::Value(value) => assert_eq!(value, "passed"),
+                Completion::Throw { name, message } => panic!("{name}: {message}"),
+            }
+            assert!(engine.interp.fn_frames.is_empty());
+        }
+    }
+}

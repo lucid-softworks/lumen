@@ -5362,7 +5362,11 @@ impl Interp {
                         }
                     }
                 }
-                let ic = found?;
+                let mut ic = found?;
+                // The cached code belongs to the shared AST, but reflection and the
+                // frame's lifetime proof must identify the live closure on the stack.
+                ic.callee = key;
+                ic.env = ep;
                 return Some(unsafe { self.call_jit_env_committed(ic, ep, this_slot, args, argc) });
             }
         };

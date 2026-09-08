@@ -3772,3 +3772,26 @@ Sources, binaries, raw results and independent helper analysis are archived as
 `inline-admission-targets-*`; the initial build with a subsequently fixed lint
 issue is separately preserved as `inline-admission-targets-pre-lint-*`.
 No runtime optimization or measured speedup is claimed for this increment.
+
+
+### Fresh activation-call reflection identity (2026-09-08)
+
+Review for wider closure reuse exposed an existing correctness error in the
+Function-keyed activation-call retry. It supplied the fresh closure's environment
+but retained the cached closure's identity when pushing the physical reflection
+frame. After warming one closure, invoking a fresh instance could therefore
+return the earlier closure from a callee's `caller` property.
+
+The retry now updates its local copied cache entry with the actual callee and
+live environment before commitment. The shared cache and eligibility stay
+unchanged. A regression warms an anonymous activation-bearing closure, then
+checks reflection through fresh instances in bytecode and JIT tiers. The saved
+pre-fix release reproduces `fresh caller`; the fixed regression passes. Named
+function expressions would bail out of compilation and would not exercise this
+bug, so the regression deliberately uses an anonymous function expression.
+
+An isolated export of the parent plus exactly the two changed interpreter files
+passes all 821 tests and matches the existing Clippy error-message baseline.
+Independent ownership review confirms the physical frame now follows the
+actual operand-stack callee. Evidence is saved under `fresh-caller-*`; this
+correctness prerequisite does not claim a measured speed improvement.
