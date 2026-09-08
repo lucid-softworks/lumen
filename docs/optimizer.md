@@ -2556,3 +2556,49 @@ batches must not be added into a cumulative percentage.
 Evidence is archived under `compact-builtin-arrays-*` and
 `lumen-compact-builtin-arrays-*` in the external optimizer directory, including
 the fresh profile, conformance comparison, source snapshots and validation logs.
+
+### Rejected empty-literal storage omission (2026-09-08)
+
+A candidate removed the unused dense-storage box from raw JIT `[]` construction,
+leaving existing mutations to allocate it lazily. It preserved array length,
+shape, descriptors and mirror flags, with an independent process disable switch.
+Native reads already check absent storage, and array objects remain excluded
+from named-property creation ICs by the outer ordinary-object type guard.
+
+The candidate passed 756 unit and 34 integration tests, including actual compiled
+omission counters, owned/raw construction, lazy growth, ownership, prototype
+accessors, freezing and GC cycles. All six focused construction tests also passed
+with omission disabled. Expanded conformance matched the retained binary exactly:
+26,007 passes, two known failures, zero skips and identical full failure lists.
+Differential testing agreed on 1,996 cases with four budget skips. Formatting and
+module audit passed; Clippy matched its existing error-message multiset.
+
+Forty-five sequential verified timing runs used three rotated rounds of the
+retained 498896d binary, candidate disabled/enabled, Node v24.18.0 and Bun 1.3.14.
+No builds, tests or profiling overlapped timing. The primary comparison includes
+the whole change, using the retained executable rather than only flag-off.
+
+| Workload (lower is better) | Retained | Disabled | Candidate | Node | Bun |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Retained empty arrays, µs/2,000 | 124.44 | 133.33 | 120 | 9.8 | 8.27 |
+| Empty arrays with named property, µs/2,000 | 232 | 242.5 | 228 | 12 | 23.2 |
+| Empty arrays immediately pushed, µs/2,000 | 300 | 310 | 305 | 20.8 | 10.4 |
+| Djot 10,000 verified parses, ms | 3516 | 3523 | 3517 | 230 | 145 |
+| Delta 5,000 verified iterations, ms | 8304 | 8386 | 8331 | 195 | 306 |
+
+Empty-array retention improves 3.57% with all pairs improving 3.57–5.88%; adding a
+named property improves 1.72% with two wins and one tie. Immediate push regresses
+1.67%, with two losses and one tie. Djot has no gain: its median increases 0.03%,
+with all pairs slower by 0.03–0.95%. Delta's median increases 0.33%, with mixed
+pairs (-0.05%, +1.03%, +0.33%). The larger disabled/enabled allocation gain does not
+represent the full change against the retained binary.
+
+The candidate is rejected: a targeted allocation win does not compensate for
+absent parser/application progress and the immediate-growth regression. Its
+source and test additions are archived, and production code is restored exactly
+to 498896d. The planned classic-suite runs are unnecessary for this rejection and
+were not started; no new classic-suite claim follows from this experiment.
+Sources, binaries, hashes, schedules, raw results and validation logs remain under
+`empty-array-sidecar-*` and `lumen-empty-array-sidecar-*` in the external optimizer
+directory. Native reads of inline packed values are the next candidate, with
+confirmed Djot capture-index reads currently falling back to helpers.
