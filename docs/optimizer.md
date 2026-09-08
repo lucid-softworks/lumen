@@ -3667,3 +3667,65 @@ later receiver/shadowing/lowering checks still follow the lexical rejection.
 `inline-admission-review.md` records this limitation and the required precise
 site/target eligibility plus call-frequency diagnostic; no cross-environment
 inlining implementation is justified by the event total alone.
+
+
+### Exact lexical inline admission diagnostics (2026-09-08)
+
+The existing planner is extracted into `bytecode/inline_plan.rs`, with unchanged
+gate order, shared budget, recursion depth, base-code selection and adjacent-only
+PIC deduplication. `LUMEN_INLINE_ADMISSION=1` enables structured rejection records
+in the owning diagnostics module. Records include original PIC way, closure and
+Function identities, definition environments, full source text, caller Chunk,
+call PC/argc/receiver shape, free names, slots, current budget and inline cost.
+Identities are process-local diagnostics, never retained roots. The flag is read
+once per planner invocation; disabled records do not format source or JSON.
+
+The unchanged 10,000-parse workload verifies all HTML and reproduces the retained
+d1d65c9 tier log exactly, alongside 21 valid JSON rejection records. These map to
+four Function ASTs and unique original source locations. Thirteen records fit
+the budget individually; eight already fail it. All recorded call sites meet the
+argument/receiver bounds. No reported slot overlap is an exact proof of lexical
+visibility or final splice eligibility.
+
+| Target | Source line | Caller / site | Ways | Budget / cost |
+| --- | ---: | --- | ---: | ---: |
+| topContainer | 2,194 | handleEvent / 5 | 2 | 185 / 18 |
+| addBlockAttributes | 2,152 | pushContainer / 0 | 3 | 303 / 38 |
+| topContainer | 2,194 | main parse / 4 | 4 | 18 / 18 |
+| popContainer | 2,181 | main parse / 5 | 4 | 18 / 26 |
+| addChildToTip | 2,209 | main parse / 6 | 4 | 18 / 19 |
+| topContainer | 2,194 | main parse / 7 | 4 | 18 / 18 |
+
+The repeated main-parse budget is not independent capacity: its 18 remaining
+operations can fund only one 18-op way, not all eight individually fitting ways.
+Accepted ways, final splice filtering and runtime guard coverage need separate
+attribution before declaring any target solely blocked by lexical access.
+
+A separately derived diagnostic inserts entry counters into those four uniquely
+matched helper bodies. Lumen, Node and Bun all verify the full 10,000-parse HTML
+output and agree on 350,000 topContainer, 160,000 addBlockAttributes, 160,000
+popContainer and 270,000 addChildToTip entries. These aggregate every caller and
+closure instance; instrumentation changes the compiled bodies. They are neither
+inline-miss counts nor an estimate of obtainable time savings. Exact derived
+source, original/derived hashes, target mapping, patch and outputs are archived
+as `inline-admission-body-counts-*`.
+
+Source inspection confirms exact-object inline guards are shared through
+once-published code2, while these local closures are recreated per parse. But the
+two handleEvent and three pushContainer rejections may be old PIC ways while a
+current same-environment way is already admitted. The current rejected-only
+records do not establish that relationship. Main parse also requires distinguishing
+its definition environment from its active captured-binding environment. The
+next diagnostic must identify accepted and emitted targets before changing guard
+identity or adding a separate lexical context. `inline-admission-identity-review.md`
+records these constraints; no cross-environment optimization is enabled here.
+
+Both ordinary and diagnostic-enabled suites pass 820 tests. Clippy matches the
+baseline error-message multiset; enabled conformance matches 26,606 passes and
+two known failures, and differential seeds 1..2001 yield 1,996 agreements / four
+budget skips. Independent review verifies extraction semantics and ownership.
+The new release SHA-256 is
+`883f230b6571e1c68ce3795f9613f697021d792c0f664ea5cb2135fcc9c8c8d3`.
+Build/source archives, validation, detailed records and analysis use
+`inline-admission-details-*`. This is diagnostic infrastructure, not a measured
+engine speedup, and the within-2× goal remains unmet.
