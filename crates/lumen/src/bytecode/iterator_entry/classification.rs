@@ -80,12 +80,15 @@ mod tests {
             .interp
             .make_function(function.clone(), engine.interp.global_env.clone());
         let feedback = Feedback {
+            log: true,
+            execute: false,
             sites: vec![(
                 12,
                 RefCell::new(Site {
                     callee: Weak::new(),
                     version: Version::Cold,
                     outcome: Outcome::Cold,
+                    native: None,
                 }),
             )],
         };

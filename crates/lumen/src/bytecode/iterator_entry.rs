@@ -1,4 +1,4 @@
-//! Opt-in proof feedback only. No candidate is executed or treated as a queued hit.
+//! Opt-in iterator entry feedback and experimental native execution.
 use super::{Chunk, Op};
 use crate::interpreter::{Abrupt, Interp};
 use crate::value::{Callable, Object, Value};
@@ -9,15 +9,19 @@ use std::{
 };
 
 mod classification;
+mod execution;
 use classification::{Outcome, Version};
 
 struct Site {
     callee: Weak<RefCell<Object>>,
     version: Version,
     outcome: Outcome,
+    native: Option<crate::jit::iterator_entry::Entry>,
 }
 
 pub(super) struct Feedback {
+    log: bool,
+    execute: bool,
     sites: Vec<(usize, RefCell<Site>)>,
 }
 
@@ -26,10 +30,13 @@ impl Feedback {
         let enabled = std::env::var_os("LUMEN_ITERATOR_ENTRY_FEEDBACK").is_some();
         #[cfg(test)]
         let enabled = enabled || FORCE.with(|v| v.get());
-        if !enabled {
+        let execute = execution::enabled();
+        if !enabled && !execute {
             return None;
         }
         Some(Box::new(Self {
+            log: enabled,
+            execute,
             sites: ops
                 .iter()
                 .enumerate()
@@ -41,6 +48,7 @@ impl Feedback {
                             callee: Weak::new(),
                             version: Version::Cold,
                             outcome: Outcome::Cold,
+                            native: None,
                         }),
                     )
                 })
@@ -48,26 +56,32 @@ impl Feedback {
         }))
     }
 
+    fn record(&self, status: &str) {
+        if self.log {
+            record(status);
+        }
+    }
+
     fn observe(&self, pc: usize, interp: &Interp, next: &Value) {
         let Ok(index) = self.sites.binary_search_by_key(&pc, |(pc, _)| *pc) else {
             return;
         };
         let Value::Obj(object) = next else {
-            record("non-user");
+            self.record("non-user");
             return;
         };
         let mut site = self.sites[index].1.borrow_mut();
         let object_ref = object.borrow();
         let Callable::User(user) = &object_ref.call else {
-            record("non-user");
+            self.record("non-user");
             return;
         };
         if !interp.ordinary_get_ptr(Rc::as_ptr(object) as usize) || !object_ref.ic_plain.get() {
-            record("nonordinary-callee");
+            self.record("nonordinary-callee");
             return;
         }
         if !same_realm(interp, &user.env) {
-            record("foreign-realm");
+            self.record("foreign-realm");
             return;
         }
         let version = classification::version(&user.func);
@@ -76,20 +90,25 @@ impl Feedback {
             site.callee = Rc::downgrade(object);
             site.version = version;
             site.outcome = classification::classify(&user.func);
+            site.native = if self.execute {
+                execution::compile_entry(interp, next, &site.outcome)
+            } else {
+                None
+            };
             #[cfg(test)]
             REPLANS.with(|n| n.set(n.get() + 1));
         }
         match &site.outcome {
-            Outcome::Cold => record("cold-uncompiled"),
+            Outcome::Cold => self.record("cold-uncompiled"),
             Outcome::Accepted(plan, label) => {
                 let _ = plan.return_pc;
-                record(label);
+                self.record(label);
             }
             Outcome::Rejected(reason, label) => {
                 let _ = reason.pc;
-                record(label);
+                self.record(label);
             }
-            Outcome::Unsupported(reason) => record(reason),
+            Outcome::Unsupported(reason) => self.record(reason),
         }
     }
 }
@@ -97,7 +116,11 @@ impl Feedback {
 fn same_realm(interp: &Interp, env: &crate::interpreter::Env) -> bool {
     let mut current = env.clone();
     for _ in 0..64 {
-        let parent = current.borrow().parent.clone();
+        let Ok(scope) = current.try_borrow() else {
+            return false;
+        };
+        let parent = scope.parent.clone();
+        drop(scope);
         match parent {
             Some(parent) => current = parent,
             None => return Rc::ptr_eq(&current, &interp.global_env),
@@ -114,11 +137,7 @@ pub(super) fn fallback(
     iterator: Value,
     next: Value,
 ) -> Result<Option<Value>, Abrupt> {
-    let result = interp.iterator_step(&iterator, &next)?;
-    if let Some(feedback) = &chunk.iterator_entry_feedback {
-        feedback.observe(pc, interp, &next);
-    }
-    Ok(result)
+    execution::step(chunk, pc, interp, iterator, next)
 }
 
 struct Counts(BTreeMap<String, u64>);
@@ -185,7 +204,7 @@ mod tests {
                 )
                 .unwrap();
             assert!(matches!(result, Completion::Value(_)));
-            assert_eq!(COUNTS.with(|c| c.borrow().0.values().sum::<u64>()), 3);
+            assert_eq!(observations(), 3);
             let original = get(&mut engine, "original");
             let drive = get(&mut engine, "drive");
             let Value::Obj(original) = original else {
@@ -219,9 +238,20 @@ mod tests {
             assert!(matches!(result, Completion::Value(_)));
             // Three intrinsic yielded steps bypass fallback; exhaustion still observes native next.
             if std::env::var_os("LUMEN_NO_ARRAY_ITERATOR_STEP").is_none() {
-                assert_eq!(COUNTS.with(|c| c.borrow().0.values().sum::<u64>()), 1);
+                assert_eq!(observations(), 1);
             }
         }
+    }
+
+    fn observations() -> u64 {
+        COUNTS.with(|c| {
+            c.borrow()
+                .0
+                .iter()
+                .filter(|(key, _)| !matches!(key.as_str(), "executed" | "entry-miss"))
+                .map(|(_, count)| *count)
+                .sum()
+        })
     }
 
     fn engine(tier: Tier) -> Engine {
@@ -271,12 +301,16 @@ mod tests {
                         callee: Weak::new(),
                         version: Version::Cold,
                         outcome: Outcome::Cold,
+                        native: None,
                     }),
                 )
             })
             .collect();
-        Rc::get_mut(&mut chunk).unwrap().iterator_entry_feedback =
-            Some(Box::new(Feedback { sites }));
+        Rc::get_mut(&mut chunk).unwrap().iterator_entry_feedback = Some(Box::new(Feedback {
+            log: true,
+            execute: false,
+            sites,
+        }));
         chunk
     }
 

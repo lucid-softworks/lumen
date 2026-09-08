@@ -6,6 +6,7 @@
 
 mod arrays;
 mod bindings;
+pub(crate) mod call_entry;
 mod constructor_body;
 mod this_binding;
 pub(crate) use bindings::BindingLayout;

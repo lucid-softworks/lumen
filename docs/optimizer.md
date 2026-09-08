@@ -3418,3 +3418,93 @@ must have an explicit owner independent of weak callee identity. This is a desig
 not implemented machine code or evidence of a future speedup. The follow-up
 should leave ordinary `call()` unchanged; the rejected reference tests provide
 a starting point for ownership, alias, safepoint and fallback validation.
+
+
+### Generated iterator entry experiment (2026-09-08, candidate)
+
+`LUMEN_ITERATOR_ENTRY_NATIVE` opts into standalone ARM64 code for admitted
+iterator entry prefixes. Other targets decline this optimization. The ordinary
+`Interp::call` implementation is unchanged. An iterator-only boundary performs
+normal depth checking and one GC poll before a fresh callee/version/realm check
+and native attempt; misses invoke the original next body without another poll.
+
+The generated frame holds borrowed scalar/Object values in bounded spill slots.
+Captured-name guards use the live definition environment, property reads use
+owned cache copies with live receiver/data guards, and dense reads require actual
+Arrays with valid own length and present own elements. The original numeric
+operation sequence and Boolean branch guards are preserved. The only mutation
+is a deferred writable ordinary numeric field; post-store reads forward only on
+physical entry equality. All fallible checks precede yielded Object ownership
+acquisition and commit. NaN stores use canonical packed bits.
+
+The executable owns its property cache storage and weak references to its source
+Chunk and captured scopes, avoiding closure/Chunk retention cycles. After a miss,
+cache copies refresh from a briefly upgraded live Chunk. Native names use a bounded
+checked helper for live binding metadata. Nonzero scope generations can wrap,
+so these paths also re-resolve every name position before using a binding; only
+all-zero paths use a cached binding address. Structural mutations never restore
+zero. An emitted-code test simulates generation revival, intermediate shadowing,
+and replacement of holder storage to verify stale pointers are not followed.
+
+Twenty-one focused tests and 780 unit / 34 integration tests pass with the flag
+disabled by default; focused integration tests explicitly enable native execution
+in both VM and JIT consumers. Tests include actual yielded owners surviving GC,
+weak cache reclamation, selected-code invalidation, exact/disjoint aliases,
+2^53 rounding, NaN, negative zero, readonly/accessor/proxy/hole misses and unchanged
+state on rejection. All JavaScript fixture assertions check completion explicitly.
+The three iterator-call tests verify depth, poll count, errors and proper tails.
+
+Formatting and strict audits of all 11 affected focused modules pass. Clippy's
+error-message multiset matches the pre-existing baseline exactly. Initial fixture
+warmup failures, a test-only Debug formatting error and one needless borrow lint
+were corrected and their original logs archived. The full 814-test suite also
+passes with native entries enabled globally. Expanded conformance matches baseline
+totals and complete failure lists: 26,606 passes, two known failures, zero skips.
+Differential testing agrees on 1,996 seeds with four budget skips.
+
+The release binary verifies all 10,000 Djot outputs (3,160,000 HTML characters).
+Diagnostics show 260,000 successful generated entries and 540,000 misses. Misses
+comprise the same 200,000 admitted-parser ordinary calls and 340,000 non-user calls
+seen in the reference experiment; do not add these classifications again. The
+kernel also verifies actual generated-code hits. These diagnostic counters are
+successful entries, not instruction counts or elapsed-time evidence.
+
+Release binary SHA-256:
+`724032fb566a3144bb0a75ea28c1640d6058877604b7b82d9bc18cb3fd8b5392`.
+Source hashes/ZIPs, binaries, all validation logs and diagnostic drivers/results
+are archived as `iterator-native-*` in the external optimizer directory.
+
+All 60 controlled runs complete: three rotated rounds of retained f056c51, the
+same candidate binary off/on, Node 24.18.0 and Bun 1.3.14. Every timing run strips
+inherited LUMEN flags and disables feedback. Medians:
+
+| Workload | Retained | Candidate off | Candidate on | Node | Bun |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| QueuedObjects, µs / 2,000 verified yields | 270 | 280 | 176.667 | 4.4 | 5.2 |
+| Djot, ms / 10,000 verified parses | 3,439 | 3,436 | 3,601 | 224 | 141 |
+| DeltaBlue, ms / 5,000 iterations | 8,240 | 8,196 | 8,277 | 199 | 305 |
+| Classic composite score, higher is better | 8,748 | 8,660 | 8,681 | 83,759 | 99,955 |
+
+Native execution reduces kernel time 34.568% against retained and 36.905% against
+off, with improvements in every paired round. Djot increases 4.711% / 4.802%,
+with regressions in every pair. Delta increases 0.449% against retained (mixed).
+Classic composite score falls 0.7659% against retained in all pairs
+(-5.6772%, -0.7659%, -0.3659%); Richards, EarleyBoyer and RegExp also lose in
+all pairs, while the other components are mixed. All rows remain included.
+
+Disabled mode is not cost-free: kernel time rises 3.704% and classic score falls
+1.0059%, both consistently. Disabled parser time falls 0.0872% with mixed pairs;
+Delta falls 0.5340% with improvements in all pairs. The default-off candidate's
+classic score gap is 9.672× Node / 11.542× Bun; Djot takes 15.339× / 24.369×
+as long. These workload-specific ratios do not establish overall engine parity.
+
+**Experimental foundation only, not approved for default enablement.** The native
+backend and regression tests are retained behind the opt-in flag for continued
+work. Its kernel gain establishes useful generated execution, but parser and
+classic regressions prevent calling this a broad performance improvement. The
+next work must address disabled-path overhead and measure compilation/setup cost
+before deciding whether code reuse across fresh closures is justified. The design
+is archived as `iterator-entry-code-reuse-design.md`; repeated compilation is
+currently a hypothesis, not an attributed timing cause. Independent artifact and
+ownership review is in `iterator-native-independent-review.md`. The within-2×
+goal remains unmet.
