@@ -10,6 +10,7 @@
 // while representation variants and verifier accessors are consumed by the next stages.
 #![allow(dead_code)]
 
+pub(crate) mod iterator_entry;
 pub(crate) mod liveness;
 
 use crate::bytecode::{Chunk, Op, UpdKind};

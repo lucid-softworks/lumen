@@ -3205,3 +3205,45 @@ operation. IterStepL also needs dedicated callee feedback because its implicit
 next call is not represented in ordinary Call/CallWithThis inline feedback.
 The detailed API review and rejection conditions are archived in
 `partial-iterator-entry-review.md`.
+
+
+### Partial iterator entry analysis (2026-09-08, proof-only foundation)
+
+A focused `jit_ir/iterator_entry` analysis models a bounded callee entry path,
+fallthrough branch conditions, symbolic values, one deferred property write and a
+nonescaping iterator-result record. Its output is a candidate with unresolved
+runtime obligations, not permission to execute a specialized step. Production
+iterator dispatch remains unchanged; no runtime path invokes this analysis yet.
+
+Post-write own-property reads require exact entry-address forwarding or a proof
+of disjointness. Dense reads require real Array storage and guarded initialized
+elements; arithmetic retains ordered numeric operations. All runtime guards,
+root acquisition and normal call safepoint/depth policy must be handled before a
+future final write. Existing caller slots retain the iterator and captured next;
+the future adapter must resolve inputs in that next function's live environment.
+
+
+Four focused tests pass: the recorded 483-op callee's 0–35 entry prefix, a renamed
+fixture compiled from JavaScript, alias requirements for differently named reads,
+and rejection of calls, multiple stores, backward/invalid branches, stack underflow,
+handlers, closures, unsupported record keys, non-false done values and over-budget
+entries. Tests preserve JumpIfFalsePeek/Pop behavior and the ordered Add/Sub nodes.
+Binary operand Number guards are distinct from a Number guard on the store RHS:
+a comparison can have numeric operands while producing a Boolean value.
+
+Validation passes 760 unit and 34 integration tests. Formatting and strict audits
+of both new modules pass with zero structural signals. Clippy's full error-message
+multiset matches the existing baseline; it is not lint-clean. The oversized parent
+jit_ir module retains its three baseline structural signals and gains only module
+wiring. A test-fixture ParseError formatting compile error was corrected before the
+successful run; the initial failure log remains archived.
+
+Independent review found no blocker to this non-executing analysis. Its output is
+not an executable proof or a cross-frame continuation recipe. Dedicated IterStepL
+feedback, live captured-environment guards, prepared property writes, native code,
+success/fallback counters and off/on application benchmarks remain to be implemented.
+The next integration must observe the captured next actually invoked, retain weak
+callee ownership, and preserve normal depth/GC checks before borrowed probes.
+Detailed reviews and validation logs are archived as `iterator-entry-*` under the
+external optimizer directory. This commit makes no new runtime speedup claim;
+the measured Node/Bun gaps and the within-2× goal remain unchanged.
