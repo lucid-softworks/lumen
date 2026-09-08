@@ -55,6 +55,11 @@ mod inline_frames;
     target_arch = "aarch64",
     any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
+mod inline_guard_coverage;
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 mod inline_method;
 #[cfg(all(
     target_arch = "aarch64",
@@ -1541,6 +1546,7 @@ pub fn compile(
         return None;
     }
     let cfg = crate::jit_ir::Cfg::build(chunk).ok()?;
+    let guard_coverage = inline_guard_coverage::Compilation::begin(chunk);
     let max_stack = cfg.jit_stack_capacity();
     let last_uses = crate::jit_ir::liveness::LastUses::build(chunk, &cfg);
     // Debug: `LUMEN_JIT_DUMP=<substr>` prints the op stream of chunks whose leading slot names
@@ -3043,39 +3049,16 @@ pub fn compile(
             // Speculative-inline guard: the callee (argc+1 deep) must be the pinned function —
             // a tag compare and a pointer compare; mismatch branches to the generic call.
             Op::InlineGuard(t, target) => {
-                let it = chunk.jit_inline_target(*t);
-                // A Value::Obj payload holds the STORED Rc pointer (the RcBox base), not
-                // `Rc::as_ptr` — read the expected stored word out of an Option<Gc> exactly
-                // like `value::jit_layout` probes it. A dead callee (or an unprobed layout)
-                // degrades to the generic call unconditionally.
-                let stored = it.pin.upgrade().filter(|_| layout.valid).map(|o| {
-                    let some: Option<crate::value::Gc> = Some(o);
-                    unsafe { *(&some as *const Option<crate::value::Gc> as *const usize) }
-                });
-                match stored {
-                    None => a.b(pc_labels[*target as usize]),
-                    Some(s) => {
-                        if it.expected_env != 0 {
-                            a.ldr_imm(11, 19, 40); // ctx.env_raw
-                            a.mov_imm64(12, it.expected_env as u64);
-                            a.cmp_reg_x(11, 12);
-                            a.b_cond(C_NE, pc_labels[*target as usize]);
-                        }
-                        let dm = (it.argc as i32 + 1) * 16;
-                        a.ldurb(9, 20, -dm);
-                        a.cmp_imm_w(9, 8);
-                        a.b_cond(C_NE, pc_labels[*target as usize]);
-                        a.ldur(9, 20, -dm + 8);
-                        a.mov_imm64(10, s as u64);
-                        a.cmp_reg_x(9, 10);
-                        a.b_cond(C_NE, pc_labels[*target as usize]);
-                        if it.check_this {
-                            a.ldurb(9, 20, -dm - 16);
-                            a.cmp_imm_w(9, 8);
-                            a.b_cond(C_NE, pc_labels[*target as usize]);
-                        }
-                    }
-                }
+                let id = guard_coverage
+                    .as_ref()
+                    .and_then(|coverage| coverage.ordinary(pc));
+                inline_guard_coverage::emit(
+                    &mut a,
+                    layout,
+                    chunk.jit_inline_target(*t),
+                    pc_labels[*target as usize],
+                    id,
+                );
             }
             // Calls take the dedicated helper: same contract as the generic one, minus the full
             // op dispatch (they dominate helper traffic in call-heavy code). With bit 524288,
@@ -3703,6 +3686,9 @@ pub fn compile(
                     insn * 4
                 );
             }
+        }
+        if let Some(coverage) = &guard_coverage {
+            coverage.installed();
         }
         Some(JitCode {
             needs_global: ops

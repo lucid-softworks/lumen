@@ -3795,3 +3795,47 @@ passes all 821 tests and matches the existing Clippy error-message baseline.
 Independent ownership review confirms the physical frame now follows the
 actual operand-stack callee. Evidence is saved under `fresh-caller-*`; this
 correctness prerequisite does not claim a measured speed improvement.
+
+
+### Actual native inline-guard outcomes (2026-09-08)
+
+`LUMEN_JIT_INLINE_GUARD_COVERAGE=1` instruments the ordinary native InlineGuard
+emitter without changing its predicates or optimizer selection. Disabled code
+retains the original instruction sequence. Enabled branches count after choosing
+hit/miss, preserving caller-save integer and scalar floating-point registers.
+Globally unique numeric IDs join copied compilation metadata to thread-local
+counts; no engine objects or TLS addresses are embedded in the counters. The
+first execution on a thread may allocate diagnostic storage with Rust's
+allocator. Totals are reported at thread teardown, so unfinished threads and
+abnormal process termination cannot be assumed fully reported.
+
+Final-op listings, installed/template flags, callee identities and source support
+attribution. Generic coverage is explicitly ordinary-only: native regions and
+method fusion can bypass this template. For the two parser targets below,
+independent review excludes those alternatives against their complete final
+opcode listings and selected-region logs. Neither has adjacent method fusion;
+the first has no loop and the second's only backedge is after its guard.
+
+| Native site | Hits | Misses |
+| --- | ---: | ---: |
+| handleEvent → topContainer, PC65 | 13 | 159,952 |
+| pushContainer → addBlockAttributes, PC9 | 7 | 159,744 |
+
+All 10,000 parser results are verified. These are actual executions of these two
+compiled predicates, not counts of all helper calls. The counters do not identify
+which predicate failed or timestamp each closure instance. The overwhelming
+fallback rate supports investigating fresh-closure code reuse; source lifecycle
+and static guards suggest that cause without proving a miss-reason breakdown.
+A Function-keyed physical-call retry offers a smaller experiment than widening
+inline guards, which additionally requires dynamic inline-frame ownership.
+
+Both emitted diagnostic tests pass: guard decisions/counts (including dead pins)
+and all caller-save scalar registers across the counting helper, including a
+second OS thread running the same machine code. Ordinary and enabled full suites
+pass 823 tests; Clippy matches its existing baseline. Enabled conformance retains
+26,606 passes and the same two known failures; differential fuzzing reports
+1,996 agreements and four budget skips. Release SHA-256:
+`fe3e00f1272b5eaf1d8fff013eeb6f4741ee60932891a4d4a8329f9a98d88633`.
+Source archives, binaries, counts and independent completeness review are saved
+under `inline-guard-coverage-*`. Instrumented elapsed time is not a performance
+result, and no speedup is claimed for this diagnostic increment.
