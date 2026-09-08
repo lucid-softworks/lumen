@@ -2930,3 +2930,120 @@ into generated code. It must also reject conflicting live RefCell borrows. This
 preserves the current checks without guessing Rust enum storage or widening the
 binding-map mutation contract. The helper's residual cost must be measured in the
 full before/after comparison.
+
+
+### Native exact name paths (2026-09-08, rejected)
+
+The rejected candidate moved exact lexical scope traversal into generated AArch64 code.
+Each name cache owns a stable 144-byte record in a fixed boxed slice. Existing
+NamePath weak owners keep cached scope identities from being recycled. Fill clears
+publication before replacing weak owners and publishes a count only after all exact
+guards and the binding pointer are installed; layout/global paths remain inactive.
+The same record storage exists with `LUMEN_JIT_NO_NATIVE_NAME_PATHS=1`, so the retained
+binary comparison includes allocation and publication costs absent from the off/on
+comparison.
+
+On a direct NameIc miss, an outlined probe checks the live complete chain: identity,
+nonnegative RefCell borrow state, absence of a with ancestor, and VarMap generation
+at every hop. Owner-probed parent offsets and Rc conversion walk only strongly owned
+live ancestors; cached weak identities are never dereferenced. A small checked Rust
+helper validates live initialized/import state and rejects BigInt, then returns a
+borrowed Value pointer. The existing decoder acquires output ownership and supplies
+Undefined for free-name call receivers. No callback, GC or output mutation precedes
+a failing guard. Direct NameIc hits retain their original instruction path.
+
+Direct machine-code tests exercise late publication, scope mutation/removal, changed
+ancestors, shared/exclusive borrows, with state, TDZ, import mutation, eight scopes
+and over-depth invalidation. An all-tier JavaScript fixture uses stable eval-created
+ancestors to ensure actual native hits, checks live scalar and owned values, GC and
+call receivers, and confirms zero hits with the feature disabled. Tests pass:
+764 unit plus 34 integration. Formatting and the four-module structural audit pass;
+Clippy's error-message multiset matches the existing baseline exactly.
+
+Expanded retained/candidate conformance matches: 26,007 passes, two known failures,
+zero skips and identical full failure lists. Differential testing agrees on 1,996
+cases with four budget skips. Candidate binary/source hashes, reviews, test outputs
+and comparison drivers are archived under `native-name-path-*` in the external optimizer directory.
+
+
+The initial focused timing batch stopped after five runs: Bun's module execution
+context did not expose eval-created `var` bindings used by the fixture. All original
+rows, driver, workload, source snapshot and terminal failure are preserved in
+`native-name-path-failed-eval-context`. The corrected fixture explicitly creates a
+sloppy function with the standard Function constructor, then validates on retained
+Lumen, candidate Lumen, Node and Bun before a fresh timing batch. The failed batch
+is excluded from comparisons and is not silently replaced or treated as a timeout.
+
+
+The corrected 45-run workload batch uses three rotated rounds of retained bbe471f,
+candidate off/on, Node v24.18.0 and Bun 1.3.14. All outputs are strictly verified;
+no builds, tests or profiling overlap the accepted timings.
+
+| Workload (lower is better) | Retained | Disabled | Enabled | Node | Bun |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Numeric lookup, µs/2,000 iterations | 98.00 | 100.00 | 100.00 | 152.50 | 115.56 |
+| Object lookup, µs/2,000 iterations | 120.00 | 120.00 | 110.00 | 228.00 | 168.57 |
+| Call lookup, µs/2,000 iterations | 162.86 | 165.00 | 140.00 | 393.33 | 313.33 |
+| Djot 10,000 verified parses, ms | 3391.00 | 3398.00 | 3421.00 | 225.00 | 142.00 |
+| Delta 5,000 verified iterations, ms | 8283.00 | 8245.00 | 8274.00 | 194.00 | 301.00 |
+
+Full-change object and call medians improve 8.33% and 14.04%, with all three pairs
+improving. Numeric lookup regresses 2.04%, with all three pairs worse; same-binary
+off/on is exactly flat on that kernel. This does not establish native execution
+coverage for every kernel.
+
+Djot's median regresses 0.88%, with mixed pairs (-0.27%, +1.03%, -0.49%). Delta's
+median improves 0.11%, also mixed (-0.25%, -0.11%, +3.26%). All raw rows remain,
+including Delta's slower third-round disabled/enabled measurements. No causal host
+load explanation is assumed. These kernel wins alone do not justify retention.
+
+
+All 15 classic runs are complete:
+
+| Classic score (higher is better) | Retained | Disabled | Enabled | Node | Bun |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Richards | 23443 | 23603 | 23649 | 66025 | 72803 |
+| DeltaBlue | 3974 | 3934 | 3910 | 152805 | 109967 |
+| Crypto | 23902 | 23962 | 23943 | 92019 | 119488 |
+| RayTrace | 6499 | 6441 | 6351 | 135566 | 306651 |
+| EarleyBoyer | 3592 | 3565 | 3629 | 147434 | 159991 |
+| RegExp | 1655 | 1629 | 1640 | 22570 | 30700 |
+| Splay | 9917 | 9746 | 9746 | 80472 | 95214 |
+| NavierStokes | 38436 | 38139 | 38469 | 70490 | 71826 |
+| Score (version 7) | 8670 | 8658 | 8640 | 83705 | 99635 |
+
+The composite declines 0.35%, with every pair worse (-0.36%, -0.74%, -0.02%).
+RayTrace declines 2.28%, Splay 1.72%, and RegExp 0.91%, each with all pairs worse.
+Richards improves 0.88% and Crypto 0.17%, each with all pairs better. These gains
+and focused object/call wins do not offset inconsistent parser results and the
+composite regression. The implementation is archived and rejected; production source
+is restored exactly to the retained implementation. No new engine gain is claimed.
+
+
+A separately built diagnostic after all timing runs verifies 12,000,361 accepted
+native binding reads in the full Djot workload. The same diagnostic binary with the
+feature disabled records zero; Delta also records zero. All three runs exit normally
+and satisfy their output checks. These counts exactly match the earlier eligible
+exact-only parser category, so the intended paths were reached. They do not establish
+a speedup: the retained/candidate timing comparison still rejects this implementation.
+
+Diagnostic binary hash:
+`42c16515a7d955ef00fb7ac43cd5dd2916106e6d2653e23e7bc62748dd70ae62`.
+Instrumentation counts only accepted binding checks after TDZ/import/BigInt rejection.
+The source was restored byte-for-byte and every Rust hash matched the measured build
+before the rejected source was archived. The complete measured source snapshot,
+all eight changed/new source files, tracked patch, raw timings, test logs, independent
+audits and coverage artifacts are preserved in the external optimizer directory.
+No diagnostic build or run overlapped a timing run.
+
+Current retained-binary gaps in this batch are 9.65× Node / 11.49× Bun by classic
+score, and 15.07× / 23.88× by Djot runtime (3391 ms against 225 ms and 142 ms).
+These workload-specific ratios do not show a new retained improvement; the within-2×
+goal remains unmet.
+
+The next bounded memory-layout experiment comes from owner review: ordinary Binding
+values currently reserve inline space for `Option<(Env, String)>` import metadata.
+Moving the rare present payload behind Box could shrink scope binding storage while
+preserving physical Env ownership and clone behavior. Actual layout size, GC edge
+accounting, imported-binding clone costs and application timings must be checked.
+This is a proposal; no import-layout change is implemented here.
