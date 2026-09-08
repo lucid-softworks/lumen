@@ -9,9 +9,9 @@ use std::{
 
 mod classification;
 mod diagnostics;
+use diagnostics::record;
 #[cfg(test)]
 use diagnostics::COUNTS;
-use diagnostics::{record, record_amount};
 mod execution;
 use classification::{Outcome, Version};
 
@@ -37,25 +37,29 @@ impl Feedback {
         if !enabled && !execute {
             return None;
         }
+        let sites: Vec<_> = ops
+            .iter()
+            .enumerate()
+            .filter(|(_, op)| matches!(op, Op::IterStepL(..)))
+            .map(|(pc, _)| {
+                (
+                    pc,
+                    RefCell::new(Site {
+                        callee: Weak::new(),
+                        version: Version::Cold,
+                        outcome: Outcome::Cold,
+                        native: None,
+                    }),
+                )
+            })
+            .collect();
+        if sites.is_empty() {
+            return None;
+        }
         Some(Box::new(Self {
             log: enabled,
             execute,
-            sites: ops
-                .iter()
-                .enumerate()
-                .filter(|(_, op)| matches!(op, Op::IterStepL(..)))
-                .map(|(pc, _)| {
-                    (
-                        pc,
-                        RefCell::new(Site {
-                            callee: Weak::new(),
-                            version: Version::Cold,
-                            outcome: Outcome::Cold,
-                            native: None,
-                        }),
-                    )
-                })
-                .collect(),
+            sites,
         }))
     }
 
@@ -63,29 +67,6 @@ impl Feedback {
         if self.log {
             record(status);
         }
-    }
-
-    fn compile_native(
-        &self,
-        interp: &Interp,
-        next: &Value,
-        outcome: &Outcome,
-    ) -> Option<crate::jit::iterator_entry::Entry> {
-        if !self.execute {
-            return None;
-        }
-        let started = self.log.then(std::time::Instant::now);
-        let entry = execution::compile_entry(interp, next, outcome);
-        if let Some(started) = started {
-            record_amount("native-compile-ns", started.elapsed().as_nanos() as u64);
-            if let Some(entry) = &entry {
-                record("native-compiled");
-                record_amount("native-code-bytes", entry.code_len() as u64);
-            } else {
-                record("native-declined");
-            }
-        }
-        entry
     }
 
     fn observe(&self, pc: usize, interp: &Interp, next: &Value) {
@@ -116,7 +97,16 @@ impl Feedback {
             site.callee = Rc::downgrade(object);
             site.version = version;
             site.outcome = classification::classify(&user.func);
-            site.native = self.compile_native(interp, next, &site.outcome);
+            let reused = self.execute
+                && site
+                    .native
+                    .as_mut()
+                    .is_some_and(|entry| execution::rebind_entry(entry, interp, next));
+            if reused {
+                self.record("native-reused");
+            } else {
+                site.native = execution::compile_entry(self, interp, next, &site.outcome);
+            }
             #[cfg(test)]
             REPLANS.with(|n| n.set(n.get() + 1));
         }
@@ -152,6 +142,7 @@ fn same_realm(interp: &Interp, env: &crate::interpreter::Env) -> bool {
 }
 
 /// Original captured Values remain owned across reentrant next/done/value calls.
+#[inline]
 pub(super) fn fallback(
     chunk: &Chunk,
     pc: usize,
@@ -159,7 +150,15 @@ pub(super) fn fallback(
     iterator: Value,
     next: Value,
 ) -> Result<Option<Value>, Abrupt> {
-    execution::step(chunk, pc, interp, iterator, next)
+    let feedback = chunk.iterator_entry_feedback.as_deref();
+    if let Some(feedback) = feedback.filter(|f| f.execute) {
+        return execution::step(feedback, pc, interp, iterator, next);
+    }
+    let result = interp.iterator_step(&iterator, &next)?;
+    if let Some(feedback) = feedback {
+        feedback.observe(pc, interp, &next);
+    }
+    Ok(result)
 }
 
 #[cfg(test)]

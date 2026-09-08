@@ -55,6 +55,25 @@ pub(crate) fn compile(plan: &Candidate, chunk: &Rc<Chunk>, env: &Env) -> Option<
 }
 
 impl Entry {
+    /// Reuse this allocation only for the identical selected source Chunk. Failed
+    /// preparation leaves the previous closure's guarded entry unchanged.
+    pub(crate) fn rebind(&mut self, chunk: &Rc<Chunk>, env: &Env) -> bool {
+        #[cfg(all(
+            target_arch = "aarch64",
+            any(target_os = "macos", target_os = "linux", target_os = "windows")
+        ))]
+        {
+            self.native.rebind(chunk, env)
+        }
+        #[cfg(not(all(
+            target_arch = "aarch64",
+            any(target_os = "macos", target_os = "linux", target_os = "windows")
+        )))]
+        {
+            let _ = (chunk, env);
+            false
+        }
+    }
     pub(crate) fn code_len(&self) -> usize {
         #[cfg(all(
             target_arch = "aarch64",

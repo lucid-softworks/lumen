@@ -15,8 +15,22 @@ struct ScopeGuard {
 /// Weak owners prevent identity reuse without rooting any captured environment graph.
 pub(super) struct Guard {
     scopes: Vec<ScopeGuard>,
-    binding: *const Binding,
+    name: String,
+    metadata: Box<Metadata>,
     resolver: Option<Box<Resolver>>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ScopeMetadata {
+    identity: usize,
+    generation: u64,
+}
+
+#[repr(C)]
+struct Metadata {
+    scopes: [ScopeMetadata; 8],
+    argument: usize,
 }
 
 struct Resolver {
@@ -52,9 +66,24 @@ pub(super) fn prepare(env: &Env, name: &str) -> Option<Guard> {
                     scopes: scopes.iter().map(|scope| scope.identity.clone()).collect(),
                 })
             });
+            let mut metadata = Box::new(Metadata {
+                scopes: [ScopeMetadata::default(); 8],
+                argument: resolver
+                    .as_ref()
+                    .map_or(binding as *const Binding as usize, |resolver| {
+                        (&**resolver as *const Resolver) as usize
+                    }),
+            });
+            for (target, scope) in metadata.scopes.iter_mut().zip(&scopes) {
+                *target = ScopeMetadata {
+                    identity: scope.identity.as_ptr() as usize,
+                    generation: u64::from(scope.generation),
+                };
+            }
             return Some(Guard {
                 scopes,
-                binding,
+                name: name.to_owned(),
+                metadata,
                 resolver,
             });
         }
@@ -93,8 +122,10 @@ pub(super) fn emit(a: &mut Asm, guard: &Guard, env_reg: u32, fail: usize) {
     assert!(supported());
     let l = layout::layout();
     a.mov(9, env_reg);
-    for (index, scope) in guard.scopes.iter().enumerate() {
-        a.mov_imm64(10, scope.identity.as_ptr() as usize as u64);
+    a.mov_imm64(12, (&*guard.metadata as *const Metadata) as usize as u64);
+    for index in 0..guard.scopes.len() {
+        let record = (index * std::mem::size_of::<ScopeMetadata>()) as u32;
+        a.ldr_imm(10, 12, record);
         a.cmp_reg_x(9, 10);
         a.b_cond(C_NE, fail);
         a.ldr_imm(10, 9, l.borrow_flag as u32);
@@ -103,7 +134,11 @@ pub(super) fn emit(a: &mut Asm, guard: &Guard, env_reg: u32, fail: usize) {
         a.ldrb_imm(10, 9, l.under_with as u32);
         a.cbnz(10, false, fail);
         a.ldr_w_imm(10, 9, l.generation as u32);
-        a.mov_imm64(11, u64::from(scope.generation));
+        a.ldr_imm(
+            11,
+            12,
+            record + std::mem::offset_of!(ScopeMetadata, generation) as u32,
+        );
         a.cmp_reg_w(10, 11);
         a.b_cond(C_NE, fail);
         if index + 1 != guard.scopes.len() {
@@ -112,13 +147,12 @@ pub(super) fn emit(a: &mut Asm, guard: &Guard, env_reg: u32, fail: usize) {
             a.add_imm(9, 9, l.rc_data_offset as u32);
         }
     }
-    if let Some(resolver) = &guard.resolver {
-        a.mov_imm64(0, (&**resolver as *const Resolver) as usize as u64);
+    a.ldr_imm(0, 12, std::mem::offset_of!(Metadata, argument) as u32);
+    if guard.resolver.is_some() {
         a.mov_imm64(16, resolve_binding as *const () as usize as u64);
     } else {
         // Structural mutation never restores generation zero, so this allocation cannot
         // have moved after preparing a path whose every generation remains zero.
-        a.mov_imm64(0, guard.binding as usize as u64);
         a.mov_imm64(16, checked_binding as *const () as usize as u64);
     }
     a.blr(16);
@@ -320,3 +354,6 @@ mod tests {
         assert!(probe().is_null()); // stale cached binding is never followed
     }
 }
+
+mod rebind;
+pub(super) use rebind::{commit_rebind, prepare_rebind};

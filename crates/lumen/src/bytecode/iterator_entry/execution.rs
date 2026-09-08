@@ -1,5 +1,5 @@
 //! Experimental call/result elision through the existing logical call boundary.
-use super::{classification, same_realm, Chunk, Feedback, Outcome};
+use super::{classification, same_realm, Feedback, Outcome};
 use crate::interpreter::{call_entry::EntryResult, Abrupt, Interp};
 use crate::value::{Callable, Value};
 use std::rc::Rc;
@@ -12,14 +12,13 @@ pub(super) fn enabled() -> bool {
 }
 
 pub(super) fn step(
-    chunk: &Chunk,
+    feedback: &Feedback,
     pc: usize,
     interp: &mut Interp,
     iterator: Value,
     next: Value,
 ) -> Result<Option<Value>, Abrupt> {
-    let feedback = chunk.iterator_entry_feedback.as_deref();
-    let result = if let Some(feedback) = feedback.filter(|f| f.execute) {
+    let result = {
         // Owned caller operands survive the poll. No cached heap address is borrowed yet.
         match interp.call_iterator_entry(
             next.clone(),
@@ -38,12 +37,8 @@ pub(super) fn step(
             EntryResult::Yielded(value) => return Ok(Some(value)),
             EntryResult::Ordinary(result) => consume(interp, result)?,
         }
-    } else {
-        interp.iterator_step(&iterator, &next)?
     };
-    if let Some(feedback) = feedback {
-        feedback.observe(pc, interp, &next);
-    }
+    feedback.observe(pc, interp, &next);
     Ok(result)
 }
 
@@ -86,6 +81,29 @@ fn try_cached(
 }
 
 pub(super) fn compile_entry(
+    feedback: &Feedback,
+    interp: &Interp,
+    next: &Value,
+    outcome: &Outcome,
+) -> Option<crate::jit::iterator_entry::Entry> {
+    if !feedback.execute {
+        return None;
+    }
+    let started = feedback.log.then(std::time::Instant::now);
+    let entry = prepare_entry(interp, next, outcome);
+    if let Some(started) = started {
+        super::diagnostics::record_amount("native-compile-ns", started.elapsed().as_nanos() as u64);
+        if let Some(entry) = &entry {
+            feedback.record("native-compiled");
+            super::diagnostics::record_amount("native-code-bytes", entry.code_len() as u64);
+        } else {
+            feedback.record("native-declined");
+        }
+    }
+    entry
+}
+
+fn prepare_entry(
     interp: &Interp,
     next: &Value,
     outcome: &Outcome,
@@ -108,6 +126,29 @@ pub(super) fn compile_entry(
         .or_else(|| user.func.code.get())?
         .as_ref()?;
     crate::jit::iterator_entry::compile(plan, chunk, &env)
+}
+
+pub(super) fn rebind_entry(
+    entry: &mut crate::jit::iterator_entry::Entry,
+    interp: &Interp,
+    next: &Value,
+) -> bool {
+    let Some(env) = entry_environment(interp, next) else {
+        return false;
+    };
+    let Value::Obj(object) = next else {
+        return false;
+    };
+    let Ok(object) = object.try_borrow() else {
+        return false;
+    };
+    let Callable::User(user) = &object.call else {
+        return false;
+    };
+    let Some(Some(chunk)) = user.func.code2.get().or_else(|| user.func.code.get()) else {
+        return false;
+    };
+    entry.rebind(chunk, &env)
 }
 
 fn entry_environment(i: &Interp, next: &Value) -> Option<crate::interpreter::Env> {
@@ -228,6 +269,41 @@ mod tests {
                 assert!(v.borrow().0.get("native-code-bytes").copied().unwrap_or(0) > 0);
             });
         }
+    }
+
+    #[test]
+    fn fresh_captures_reuse_code_and_yield_their_own_values() {
+        let _enabled = Enabled::new();
+        for tier in [Tier::Bytecode, Tier::Jit] {
+            super::super::COUNTS.with(|v| v.borrow_mut().0.clear());
+            let mut engine = Engine::new();
+            engine.set_tier(tier);
+            engine.set_tier_threshold(0);
+            run(&mut engine, SOURCE);
+            run(&mut engine, "for(var n=0;n<20;n++){var it=make();it.state.items[0].x=n;it.state.items[1].x=n+100;var values=drain(it);if(values.length!==3||values[0].x!==n||values[1].x!==n+100||it.state.cursor!==3)throw 'capture';it=null;values=null;$262.gc();}");
+            super::super::COUNTS.with(|v| {
+                let counts = v.borrow();
+                assert_eq!(counts.0.get("native-compiled"), Some(&1));
+                assert_eq!(counts.0.get("native-reused"), Some(&19));
+                assert_eq!(counts.0.get("executed"), Some(&40));
+            });
+        }
+    }
+
+    #[test]
+    fn reuse_switches_back_to_still_live_captures() {
+        let _enabled = Enabled::new();
+        let mut engine = Engine::new();
+        engine.set_tier(Tier::Jit);
+        engine.set_tier_threshold(0);
+        run(&mut engine, SOURCE);
+        run(&mut engine, "function one(it){for(var value of it)return value;}var a=make(),b=make();a.state.items[0].x=10;a.state.items[1].x=11;b.state.items[0].x=20;b.state.items[1].x=21;for(var n=0;n<20;n++){a.state.cursor=0;b.state.cursor=0;if(one(a).x!==10||one(a).x!==11||one(b).x!==20||one(b).x!==21)throw 'switched capture';}");
+        super::super::COUNTS.with(|v| {
+            let counts = v.borrow();
+            assert_eq!(counts.0.get("native-compiled"), Some(&1));
+            assert_eq!(counts.0.get("native-reused"), Some(&39));
+            assert_eq!(counts.0.get("executed"), Some(&40));
+        });
     }
 
     #[test]

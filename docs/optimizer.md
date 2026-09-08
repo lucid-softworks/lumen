@@ -3538,3 +3538,66 @@ archived as `iterator-native-setup-*` in the external optimizer directory.
 The instrumented binary/source archive precedes a behavior-preserving extraction
 of the counters into `iterator_entry/diagnostics.rs`. The final extracted source
 was separately validated by `iterator-native-setup-final-*` test and Clippy logs.
+
+
+### Same-site native iterator code reuse (2026-09-08)
+
+The disabled experimental backend now reuses an executable across fresh closures
+with the identical selected bytecode Chunk. Rebinding prepares all lexical paths
+before changing any metadata, retains stable executable/cache/metadata addresses,
+and transfers weak scope ownership without rooting the old captured environment.
+Different Chunks, lexical depths or binding-helper modes reject reuse. Every
+native attempt still checks live callee identity, selected version, realm and
+eligibility after the ordinary single depth/GC poll. Nonzero lexical generations
+retain fresh name resolution, including generation-wrap protection.
+
+The ordinary disabled fallback again calls the small iterator-step path directly.
+Enabled chunks without iterator sites no longer allocate empty feedback records.
+The integration tests exercise fresh captures, switching back to still-live
+captures, selected-code invalidation and yielded-object ownership. Native tests
+also check unchanged executable addresses, failed late preparation leaving the
+old entry usable, incompatible Chunks, TDZ and old environment reclamation.
+
+The unchanged verified 10,000-parse diagnostic reports one compilation, 9,999
+reuses, 12,472 emitted bytes and the same 260,000 successful native entries /
+540,000 misses. Its compilation timer excludes rebind preparation; the 17,125 ns
+single-compilation value is not the total preparation cost or a speedup estimate.
+All HTML output checks pass. Both disabled and enabled suites pass 819 tests,
+including 26 focused tests. Clippy matches the existing error-message multiset;
+it is not clean. Enabled conformance matches the saved baseline exactly at
+26,606 passes and two known failures; differential seeds 1..2001 produce 1,996
+agreements and four budget skips.
+
+The saved release binary SHA-256 is
+`6f0843494eadcb594230bc96bdb7e19a05992bea51233f9a5b74eed9f4ba0ae7`.
+Build/source archives, validation, diagnostics, controlled timing artifacts and
+independent review use `iterator-reuse-*` in the external optimizer directory.
+
+Three rotated rounds compare saved feedback-only `f056c51`, this candidate with
+native execution off/on, Node 24.18.0 and Bun 1.3.14. All 60 measurements are
+retained, with strict outputs, unchanged workloads, CPU snapshots and exact
+source/binary hashes. No feedback logging, build, test or profile overlaps them.
+
+| Metric (median) | Before | Off | On | Node | Bun |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| QueuedObjects µs / 2,000 verified yields | 270 | 270 | 168.5714 | 4.4 | 5.2 |
+| Djot ms / 10,000 verified parses | 3,427 | 3,423 | 3,504 | 229 | 147 |
+| DeltaBlue ms / 5,000 | 8,353 | 8,327 | 8,408 | 196 | 314 |
+| Classic score, higher is better | 8,691 | 8,669 | 8,693 | 83,608 | 99,932 |
+
+Native-on kernel time improves 37.566% against before, with all three paired
+rounds faster. Djot regresses 2.247% and DeltaBlue regresses 0.658%, with all
+three before/on pairs slower for each. Classic score changes only +0.023%, with
+mixed pair directions. On/off parser and DeltaBlue directions are also mixed.
+These data do not justify default enablement or a broad engine speedup claim.
+Repeated compilation is eliminated, but its removal has not made the full parser
+faster than the pre-experiment baseline. Do not subtract results from the earlier
+native batch to claim a controlled old-native/new-native gain.
+
+Disabled kernel time matches before in all three rounds. Disabled classic score
+is 0.253% lower by medians with mixed paired directions; it is not a proven
+zero-overhead configuration. The current default remains 9.644× behind Node /
+11.528× behind Bun by classic score and takes 14.948× / 23.286× their Djot time.
+The within-2× goal remains unmet. Further investigation targets ordinary misses
+that unnecessarily enter the native call wrapper and duplicated live eligibility
+checks; their timing benefit is not yet measured.

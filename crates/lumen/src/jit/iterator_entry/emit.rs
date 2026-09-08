@@ -32,6 +32,33 @@ impl Drop for Native {
     }
 }
 impl Native {
+    /// Rebind only metadata owned by this exact selected Chunk. All fallible
+    /// preparation finishes before the first old guard or cache is changed.
+    pub(super) fn rebind(&mut self, chunk: &Rc<Chunk>, env: &Env) -> bool {
+        if self.source.as_ptr() != Rc::as_ptr(chunk) {
+            return false;
+        }
+        let mut prepared = Vec::with_capacity(self._names.len());
+        for guard in &self._names {
+            prepared.push(match guard {
+                Some(guard) => match names::prepare_rebind(guard, env) {
+                    Some(replacement) => Some(replacement),
+                    None => return false,
+                },
+                None => None,
+            });
+        }
+        for (guard, replacement) in self._names.iter_mut().zip(prepared) {
+            if let (Some(guard), Some(replacement)) = (guard, replacement) {
+                names::commit_rebind(guard, replacement);
+            }
+        }
+        for cache in &self.caches {
+            copy_cache(chunk, cache);
+        }
+        self.refresh.set(false);
+        true
+    }
     pub(super) fn code_len(&self) -> usize {
         self.len
     }
@@ -182,4 +209,93 @@ fn cache_matches(chunk: &Chunk, index: u32, name: &str, store: bool) -> bool {
         Op::SetPropDrop(n, c) if store => c == index && chunk.jit_name(n) == name,
         _ => false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        ast::Stmt,
+        bytecode,
+        interpreter::{new_scope, Binding},
+        jit_ir::iterator_entry,
+        parser, Engine,
+    };
+
+    fn chunk() -> Rc<Chunk> {
+        let parsed = parser::parse_script(
+            "function next(){return {value:first+second,done:false};}",
+            false,
+        )
+        .unwrap_or_else(|_| panic!("fixture syntax"));
+        let Stmt::FuncDecl(function) = &parsed[0] else {
+            panic!("function")
+        };
+        bytecode::compile(function).expect("compiled fixture")
+    }
+    fn environment(engine: &Engine, first: f64, second: Option<f64>) -> Env {
+        let env = new_scope(Some(engine.interp.global_env.clone()));
+        env.borrow_mut()
+            .vars
+            .insert("first", Binding::data(Value::Num(first), true, true));
+        if let Some(second) = second {
+            env.borrow_mut()
+                .vars
+                .insert("second", Binding::data(Value::Num(second), true, true));
+        }
+        env
+    }
+    #[test]
+    fn rebind_preserves_code_and_releases_old_captured_environment() {
+        let mut engine = Engine::new();
+        let chunk = chunk();
+        let plan = iterator_entry::analyze(&chunk).unwrap();
+        let old = environment(&engine, 7.0, Some(11.0));
+        let old_weak = Rc::downgrade(&old);
+        let mut native = compile(&plan, &chunk, &old).expect("native code");
+        let memory = native.mem;
+        let iterator = Value::Obj(Object::new(None));
+        assert!(matches!(
+            unsafe { native.run(&mut engine.interp, &old, &iterator) },
+            Some(Value::Num(18.0))
+        ));
+        let fresh = environment(&engine, 19.0, Some(23.0));
+        assert!(native.rebind(&chunk, &fresh));
+        assert_eq!(native.mem, memory);
+        assert!(matches!(
+            unsafe { native.run(&mut engine.interp, &fresh, &iterator) },
+            Some(Value::Num(42.0))
+        ));
+        assert!(unsafe { native.run(&mut engine.interp, &old, &iterator) }.is_none());
+        drop(old);
+        assert!(old_weak.upgrade().is_none());
+        let weak_chunk = Rc::downgrade(&chunk);
+        drop(chunk);
+        assert!(weak_chunk.upgrade().is_none());
+    }
+    #[test]
+    fn failed_late_name_preparation_and_other_chunk_preserve_old_entry() {
+        let mut engine = Engine::new();
+        let source = chunk();
+        let plan = iterator_entry::analyze(&source).unwrap();
+        let old = environment(&engine, 2.0, Some(3.0));
+        let mut native = compile(&plan, &source, &old).unwrap();
+        let memory = native.mem;
+        let iterator = Value::Obj(Object::new(None));
+        let incomplete = environment(&engine, 100.0, None);
+        assert!(!native.rebind(&source, &incomplete));
+        assert_eq!(native.mem, memory);
+        assert!(matches!(
+            unsafe { native.run(&mut engine.interp, &old, &iterator) },
+            Some(Value::Num(5.0))
+        ));
+        let other = chunk();
+        let fresh = environment(&engine, 10.0, Some(20.0));
+        assert!(!native.rebind(&other, &fresh));
+        assert_eq!(native.mem, memory);
+        assert!(matches!(
+            unsafe { native.run(&mut engine.interp, &old, &iterator) },
+            Some(Value::Num(5.0))
+        ));
+    }
 }
