@@ -9,9 +9,9 @@ use crate::value::Value;
 /// operands below `sp` are receiver, callee and key, and are consumed on every exit.
 pub(crate) unsafe extern "C" fn read(ctx: *mut JitCtx, packed: u32, sp: *mut Value) -> SpFlag {
     let ctx = unsafe { &mut *ctx };
-    let interp = unsafe { &mut *ctx.interp };
     let chunk = unsafe { &*ctx.chunk };
-    chunk.record_inline_location(interp, (packed & 0xffff) as usize);
+    unsafe { chunk.record_jit_inline_location(ctx, (packed & 0xffff) as usize) };
+    let interp = unsafe { &mut *ctx.interp };
     let base = unsafe { sp.sub(3) };
     interp.depth += 1;
     let result = if interp.depth > MAX_EVAL_DEPTH {

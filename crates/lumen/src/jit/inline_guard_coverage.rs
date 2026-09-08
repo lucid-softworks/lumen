@@ -5,6 +5,26 @@ use super::{asm::Asm, C_NE};
 use crate::{bytecode::InlineTarget, value::JitLayout};
 pub(super) use registry::Compilation;
 
+/// A shared-Function guard reads only live operands and declines before any binding.
+pub(super) fn emit_closure(a: &mut Asm, pc: u32, target: usize, id: Option<u64>) {
+    let miss = id.map_or(target, |_| a.new_label());
+    a.mov(0, 19);
+    a.movz(1, pc, 0);
+    a.mov(2, 20);
+    a.ldr_imm(16, 21, (super::H_INLINE_CLOSURE * 8) as u32);
+    a.blr(16);
+    a.cbz(0, true, miss);
+    if let Some(id) = id {
+        let done = a.new_label();
+        counters::emit(a, id, true);
+        a.b(done);
+        a.bind(miss);
+        counters::emit(a, id, false);
+        a.b(target);
+        a.bind(done);
+    }
+}
+
 /// Disabled emission has the original guards and destinations, with no counter call.
 pub(super) fn emit(
     a: &mut Asm,

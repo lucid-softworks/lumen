@@ -19,8 +19,8 @@ pub(crate) unsafe extern "C" fn set_add(ctx: *mut JitCtx, pc: u32, sp: *mut Valu
 
 unsafe fn insert<const SET: bool>(ctx: *mut JitCtx, pc: u32, sp: *mut Value) -> SpFlag {
     let ctx = unsafe { &mut *ctx };
+    unsafe { (&*ctx.chunk).record_jit_inline_location(ctx, pc as usize) };
     let interp = unsafe { &mut *ctx.interp };
-    unsafe { &*ctx.chunk }.record_inline_location(interp, pc as usize);
     let base = unsafe { sp.sub(if SET { 3 } else { 4 }) };
     let mut args_moved = false;
     let mut receiver_moved = false;

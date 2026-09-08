@@ -161,6 +161,7 @@ impl Planner<'_> {
                 obj,
                 free_names,
                 expected_env: expected_env(shared_closure, callee_env as usize),
+                shared_lexical: shared_closure && !global_closure,
                 nested,
             });
         }

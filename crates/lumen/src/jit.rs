@@ -484,6 +484,7 @@ pub(crate) fn helper_table() -> [usize; N_HELPERS] {
         crate::bytecode::collection_lookup::read as *const () as usize,
         crate::bytecode::collection_insert::map_set as *const () as usize,
         crate::bytecode::collection_insert::set_add as *const () as usize,
+        crate::bytecode::inline_closure::check_native as *const () as usize,
     ]
 }
 
@@ -652,7 +653,8 @@ pub const H_LOAD_CACHED_NAME: usize = 26;
 pub const H_COLLECTION_LOOKUP: usize = 27;
 pub const H_COLLECTION_MAP_SET: usize = 28;
 pub const H_COLLECTION_SET_ADD: usize = 29;
-pub const N_HELPERS: usize = 30;
+pub const H_INLINE_CLOSURE: usize = 30;
+pub const N_HELPERS: usize = 31;
 
 /// ARM64 condition codes used by the inline templates.
 #[cfg(all(
@@ -1566,10 +1568,14 @@ pub fn compile(
             }
         }
     }
-    let fast: u32 = std::env::var("LUMEN_JIT_FAST")
+    let mut fast: u32 = std::env::var("LUMEN_JIT_FAST")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(u32::MAX);
+    // Hidden inline owners are not modeled by loop-region publication yet.
+    if chunk.has_inline_closures() {
+        fast &= !(1 << 15);
+    }
     let array_intrinsics_on = std::env::var_os("LUMEN_JIT_NO_ARRAY_INTRINSICS").is_none();
     let function_call_intrinsic_on =
         std::env::var_os("LUMEN_JIT_NO_FUNCTION_CALL_INTRINSIC").is_none();
@@ -1696,27 +1702,31 @@ pub fn compile(
             a.bind(write_fallback_labels[pc]);
             continue;
         }
-        mixed_loop::try_emit(
-            &mut a,
-            chunk,
-            &cfg,
-            pc,
-            &write_fallback_labels,
-            &mut targeted,
-            layout,
-        );
-        guarded_write_region::try_emit(
-            &mut a,
-            chunk,
-            &cfg,
-            pc,
-            (&pc_labels, &write_fallback_labels),
-            &mut targeted,
-            layout,
-        );
+        if !chunk.has_inline_closures() {
+            mixed_loop::try_emit(
+                &mut a,
+                chunk,
+                &cfg,
+                pc,
+                &write_fallback_labels,
+                &mut targeted,
+                layout,
+            );
+            guarded_write_region::try_emit(
+                &mut a,
+                chunk,
+                &cfg,
+                pc,
+                (&pc_labels, &write_fallback_labels),
+                &mut targeted,
+                layout,
+            );
+        }
         a.bind(write_fallback_labels[pc]);
-        // Mixed object/numeric expressions retain their original templates on every guard miss.
-        numeric_expr::try_emit(&mut a, chunk, &cfg, pc, &pc_labels, &mut targeted, layout);
+        if !chunk.has_inline_closures() {
+            // Mixed object/numeric expressions retain their original templates on every guard miss.
+            numeric_expr::try_emit(&mut a, chunk, &cfg, pc, &pc_labels, &mut targeted, layout);
+        }
         // A web-trace regexp workload is dominated by tiny loops whose body is exactly
         // `re.exec(strings[i])` with the result discarded. Let one guarded Rust entry process
         // the dense string range; a declined guard falls through to these untouched templates.
@@ -1778,7 +1788,7 @@ pub fn compile(
         // IdleTask's dominant release arm is a whole-function guarded transaction. Success
         // returns directly; a declined guard lands on the untouched pc0 template so accessors,
         // coercions, partial effects, and the one final hold retain exact bytecode behavior.
-        if pc == 0 && rc_ok {
+        if pc == 0 && rc_ok && !chunk.has_inline_closures() {
             if let Some(plan) = plan_scheduler_idle_release(chunk, ops, &cfg, layout, fast) {
                 let plain_h = emit_scheduler_idle_release_region(&mut a, layout, &plan, l_ret_ok);
                 a.bind(plain_h);
@@ -3052,13 +3062,22 @@ pub fn compile(
                 let id = guard_coverage
                     .as_ref()
                     .and_then(|coverage| coverage.ordinary(pc));
-                inline_guard_coverage::emit(
-                    &mut a,
-                    layout,
-                    chunk.jit_inline_target(*t),
-                    pc_labels[*target as usize],
-                    id,
-                );
+                if chunk.inline_closure_target(*t) {
+                    inline_guard_coverage::emit_closure(
+                        &mut a,
+                        pc as u32,
+                        pc_labels[*target as usize],
+                        id,
+                    );
+                } else {
+                    inline_guard_coverage::emit(
+                        &mut a,
+                        layout,
+                        chunk.jit_inline_target(*t),
+                        pc_labels[*target as usize],
+                        id,
+                    );
+                }
             }
             // Calls take the dedicated helper: same contract as the generic one, minus the full
             // op dispatch (they dominate helper traffic in call-heavy code). With bit 524288,
@@ -3071,7 +3090,7 @@ pub fn compile(
                 if chunk.has_inline_frames() {
                     inline_frames::record(&mut a, ilayout, chunk.inline_location(pc));
                 }
-                let inline_probe = fast & 524288 != 0;
+                let inline_probe = fast & 524288 != 0 && !chunk.dynamic_inline_location(pc);
                 let slow = a.new_label();
                 let done = a.new_label();
                 if inline_probe {
