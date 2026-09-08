@@ -3932,3 +3932,25 @@ change in execution coverage, not evidence of a whole-engine speedup. Same-input
 Djot reference medians are 224 ms for Node and 141 ms for Bun, leaving the
 within-2x objective unmet. See the [implementation and validation report](shared-closure-inlining.md)
 and its checked-in raw samples for the complete comparison and inherited failures.
+
+### Restore numeric regions around shared-closure inlines (2026-09-08)
+
+`fb5995a` narrows the previous chunk-wide restriction. Existing numeric CFG and
+linear loops preserve the canonical hidden callee owner and materialize numeric
+state on side exits. Numeric field expressions only publish terminal operands,
+so they are restored too. Complex call-spanning/speculative-write regions remain
+restricted; ordinary instruction templates retain their requested fast mask.
+
+Three rotated comparisons recover standalone NavierStokes from 36693 to 38951,
+versus 38842 with inlining off. Full classic score changes from 8557 to 8642,
+versus 8641 off. The shared-closure fixture remains faster than Off (56 vs 100 ms).
+Djot remains roughly flat with Inline; Combined measures 3448 ms against Node's
+222 and Bun's 144 ms. Both switches remain opt-in; the within-2x objective is unmet.
+
+All 300 sampled fluid-field values after 150 frames agree exactly with Node/Bun.
+The new tests exercise native loops, bounded continuations, getter side exits,
+GC, inline identity and exceptions. A fresh 5104-sample parser profile continues
+to show material allocation, destruction and collector work, with no single
+small arithmetic site explaining the application gap. See the
+[numeric-region report](closure-numeric-regions.md) for complete measurements,
+profile limitations, validation and the checked-in raw report.

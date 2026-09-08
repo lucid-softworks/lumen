@@ -1,0 +1,7449 @@
+{
+  "date": "2026-09-08",
+  "machine": "Apple M4 / macOS arm64",
+  "implementation_commit": "fb5995a",
+  "baseline_binary_commit": "835d2fd",
+  "candidate_sha256": "a5e6c5ec99e6dea22bf74ebce9fe2348daeeb61433fb620154a55e8c608802d3",
+  "baseline_sha256": "142a99f3a6d34f54851eaec598021a3ac04d6ef1965e84957a5b0fb0030cd9f1",
+  "workload_sha256": {
+    "navier": "c4ea433e337a38dde25c9258b99de270cd91b81a5d7a6c77b50658f10376935a",
+    "shared": "573b0376c57e279007dc29ace220a50ff716800102e4db0a86f0c66f3498589d",
+    "djot": "55ebab9bfc306f8dea3843fd9699ecdb3fa2c709d8e9943a7d52967e35058608",
+    "classic": "077a1dd6ea48ddd00471cff26f1556a7caecb0992fd206d348db7cdeeac9e4fb"
+  },
+  "mode_environment": {
+    "retained-inline": {
+      "LUMEN_JIT_INLINE_CLOSURES": "1"
+    },
+    "off": {},
+    "inline": {
+      "LUMEN_JIT_INLINE_CLOSURES": "1"
+    },
+    "combined": {
+      "LUMEN_JIT_INLINE_CLOSURES": "1",
+      "LUMEN_JIT_REFRESH_CLOSURE_CACHE": "1"
+    }
+  },
+  "method": "Three sequential fresh-process rounds per workload; rotate retained-inline, off, inline, combined. No task builds/tests/sampling overlap timing; unrelated host activity is not controlled.",
+  "metrics": {
+    "navier": {
+      "retained-inline": {
+        "samples": [
+          37100,
+          36693,
+          36397
+        ],
+        "median": 36693
+      },
+      "off": {
+        "samples": [
+          38732,
+          39208,
+          38842
+        ],
+        "median": 38842
+      },
+      "inline": {
+        "samples": [
+          39248,
+          38951,
+          38139
+        ],
+        "median": 38951
+      },
+      "combined": {
+        "samples": [
+          38803,
+          39356,
+          39287
+        ],
+        "median": 39287
+      }
+    },
+    "shared": {
+      "retained-inline": {
+        "samples": [
+          54,
+          54,
+          55
+        ],
+        "median": 54
+      },
+      "off": {
+        "samples": [
+          100,
+          114,
+          100
+        ],
+        "median": 100
+      },
+      "inline": {
+        "samples": [
+          56,
+          56,
+          55
+        ],
+        "median": 56
+      },
+      "combined": {
+        "samples": [
+          55,
+          55,
+          54
+        ],
+        "median": 55
+      }
+    },
+    "djot": {
+      "retained-inline": {
+        "samples": [
+          3478,
+          3489,
+          3508
+        ],
+        "median": 3489
+      },
+      "off": {
+        "samples": [
+          3431,
+          3484,
+          3496
+        ],
+        "median": 3484
+      },
+      "inline": {
+        "samples": [
+          3497,
+          3500,
+          3549
+        ],
+        "median": 3500
+      },
+      "combined": {
+        "samples": [
+          3448,
+          3430,
+          3454
+        ],
+        "median": 3448
+      }
+    },
+    "classic": {
+      "retained-inline": {
+        "samples": [
+          8591,
+          8557,
+          8526
+        ],
+        "median": 8557
+      },
+      "off": {
+        "samples": [
+          8641,
+          8653,
+          8632
+        ],
+        "median": 8641
+      },
+      "inline": {
+        "samples": [
+          8684,
+          8287,
+          8642
+        ],
+        "median": 8642
+      },
+      "combined": {
+        "samples": [
+          8715,
+          8655,
+          8692
+        ],
+        "median": 8692
+      }
+    }
+  },
+  "classic_components": {
+    "Richards": {
+      "retained-inline": {
+        "samples": [
+          23392,
+          23408,
+          23476
+        ],
+        "median": 23408
+      },
+      "off": {
+        "samples": [
+          22473,
+          23386,
+          23441
+        ],
+        "median": 23386
+      },
+      "inline": {
+        "samples": [
+          23334,
+          23512,
+          23638
+        ],
+        "median": 23512
+      },
+      "combined": {
+        "samples": [
+          23407,
+          23409,
+          23406
+        ],
+        "median": 23407
+      }
+    },
+    "DeltaBlue": {
+      "retained-inline": {
+        "samples": [
+          3923,
+          3941,
+          3822
+        ],
+        "median": 3923
+      },
+      "off": {
+        "samples": [
+          3947,
+          3901,
+          3881
+        ],
+        "median": 3901
+      },
+      "inline": {
+        "samples": [
+          3980,
+          3831,
+          3908
+        ],
+        "median": 3908
+      },
+      "combined": {
+        "samples": [
+          3941,
+          3901,
+          3934
+        ],
+        "median": 3934
+      }
+    },
+    "Crypto": {
+      "retained-inline": {
+        "samples": [
+          24029,
+          23921,
+          23864
+        ],
+        "median": 23921
+      },
+      "off": {
+        "samples": [
+          23882,
+          24013,
+          23823
+        ],
+        "median": 23882
+      },
+      "inline": {
+        "samples": [
+          23998,
+          23862,
+          23750
+        ],
+        "median": 23862
+      },
+      "combined": {
+        "samples": [
+          23925,
+          24030,
+          23929
+        ],
+        "median": 23929
+      }
+    },
+    "RayTrace": {
+      "retained-inline": {
+        "samples": [
+          6473,
+          6419,
+          6438
+        ],
+        "median": 6438
+      },
+      "off": {
+        "samples": [
+          6560,
+          6521,
+          6374
+        ],
+        "median": 6521
+      },
+      "inline": {
+        "samples": [
+          6380,
+          6265,
+          6480
+        ],
+        "median": 6380
+      },
+      "combined": {
+        "samples": [
+          6460,
+          6345,
+          6499
+        ],
+        "median": 6460
+      }
+    },
+    "EarleyBoyer": {
+      "retained-inline": {
+        "samples": [
+          3546,
+          3593,
+          3572
+        ],
+        "median": 3572
+      },
+      "off": {
+        "samples": [
+          3567,
+          3547,
+          3598
+        ],
+        "median": 3567
+      },
+      "inline": {
+        "samples": [
+          3602,
+          3199,
+          3584
+        ],
+        "median": 3584
+      },
+      "combined": {
+        "samples": [
+          3658,
+          3655,
+          3648
+        ],
+        "median": 3655
+      }
+    },
+    "RegExp": {
+      "retained-inline": {
+        "samples": [
+          1624,
+          1628,
+          1619
+        ],
+        "median": 1624
+      },
+      "off": {
+        "samples": [
+          1630,
+          1613,
+          1632
+        ],
+        "median": 1630
+      },
+      "inline": {
+        "samples": [
+          1634,
+          1497,
+          1631
+        ],
+        "median": 1631
+      },
+      "combined": {
+        "samples": [
+          1640,
+          1632,
+          1637
+        ],
+        "median": 1637
+      }
+    },
+    "Splay": {
+      "retained-inline": {
+        "samples": [
+          9852,
+          9551,
+          9657
+        ],
+        "median": 9657
+      },
+      "off": {
+        "samples": [
+          9934,
+          9909,
+          9950
+        ],
+        "median": 9934
+      },
+      "inline": {
+        "samples": [
+          9885,
+          9127,
+          9657
+        ],
+        "median": 9657
+      },
+      "combined": {
+        "samples": [
+          9991,
+          9885,
+          10032
+        ],
+        "median": 9991
+      }
+    },
+    "NavierStokes": {
+      "retained-inline": {
+        "samples": [
+          36618,
+          36322,
+          36285
+        ],
+        "median": 36322
+      },
+      "off": {
+        "samples": [
+          38732,
+          38803,
+          38173
+        ],
+        "median": 38732
+      },
+      "inline": {
+        "samples": [
+          39099,
+          37766,
+          38765
+        ],
+        "median": 38765
+      },
+      "combined": {
+        "samples": [
+          38951,
+          38359,
+          37990
+        ],
+        "median": 38359
+      }
+    }
+  },
+  "validation": {
+    "engine_off": 804,
+    "engine_on": 804,
+    "workspace_passed": 1090,
+    "workspace_ignored": 2,
+    "excluded_preexisting_runtime_targets": [
+      "http2_client",
+      "http2_secure_client",
+      "http2_server"
+    ],
+    "test262_both_modes": {
+      "passed": 20438,
+      "failed": 1,
+      "failure": "async: TestError: TestError: The import of C"
+    },
+    "differential_inline": {
+      "agreements": 1996,
+      "budget_skips": 4,
+      "seeds": [
+        1,
+        2000
+      ]
+    },
+    "clippy": "Identical error-message multiset: 86 lib / 88 lib-test errors, no new diagnostics.",
+    "format_and_focused_structure_audit": "pass"
+  },
+  "profile": {
+    "mode": "combined",
+    "metadata": {
+      "pid": 75359,
+      "engine_code": 0,
+      "sample_code": 0,
+      "sample_stdout": "",
+      "sample_stderr": "Sampling process 75359 for 6 seconds with 1 millisecond of run time between samples\nSampling completed, processing symbols...\nSample analysis of process 75359 written to file /private/tmp/lumen-loop-work/djot-inline-reads-current.sample\n",
+      "binary_sha256": "a5e6c5ec99e6dea22bf74ebce9fe2348daeeb61433fb620154a55e8c608802d3",
+      "workload_sha256": "279eac084e33011b6b2e409eaffc547b5544a661e25001a008378cc8cd9bb773",
+      "note": "Untimed diagnostic40k iterations, verifies every HTML output. Sample starts after2seconds for6seconds. Instrumented timings invalid."
+    },
+    "analysis": {
+      "disjoint_leaf_groups": {
+        "gc_scan_leaf": 323,
+        "allocator_leaf": 415,
+        "other_native_leaf": 2344,
+        "destruction_leaf": 479,
+        "hash_leaf": 102,
+        "name_path_leaf": 181,
+        "generated_code": 1260
+      },
+      "sample_sha256": "6a606a0adc345ae4745d79c3fe2ab87699835d9ca6d27825c41b75e66d2e814a",
+      "roots": [
+        {
+          "samples": 5104,
+          "frame": "Thread_44892006   DispatchQueue_1: com.apple.main-thread  (serial)"
+        }
+      ],
+      "total": 5104,
+      "patterns": {
+        "regexp_exec": "11regexp_exec(?:s|\\s)",
+        "matcher": "exec_text_shared|exec_text_discard_shared|Matcher.*run_inner",
+        "array_construction": "make_array|set_data",
+        "gc": "gc_collect",
+        "name_path": "name_path",
+        "iterator_builtin": "builtins14array_iterator(?:4fast|8baseline|4next)|array_iter_next",
+        "iterator_step": "13iterator_step",
+        "iterator_fast": "array_iterator_step.*try_yield",
+        "destructure_fast": "array_destructure.*try_dense",
+        "string_slice": "ReText.*5slice|substring|slice_ascii"
+      },
+      "ancestry": {
+        "regexp_exec": {
+          "inclusive_union": 394,
+          "exclusive": 38
+        },
+        "matcher": {
+          "inclusive_union": 89,
+          "exclusive": 65
+        },
+        "array_construction": {
+          "inclusive_union": 284,
+          "exclusive": 24
+        },
+        "gc": {
+          "inclusive_union": 690,
+          "exclusive": 234
+        },
+        "name_path": {
+          "inclusive_union": 201,
+          "exclusive": 184
+        },
+        "iterator_builtin": {
+          "inclusive_union": 89,
+          "exclusive": 6
+        },
+        "iterator_step": {
+          "inclusive_union": 3297,
+          "exclusive": 6
+        },
+        "iterator_fast": {
+          "inclusive_union": 119,
+          "exclusive": 22
+        },
+        "destructure_fast": {
+          "inclusive_union": 11,
+          "exclusive": 4
+        },
+        "string_slice": {
+          "inclusive_union": 11,
+          "exclusive": 5
+        }
+      },
+      "regex_disjoint": {
+        "matcher": 89,
+        "other_exec_descendants": 163,
+        "result_array_or_property_construction": 142
+      },
+      "exclusive_symbols": [
+        [
+          "???",
+          1260
+        ],
+        [
+          "_RNvMs7_NtCsfgzI5BEk3KS_5lumen11interpreterNtB5_6Interp10gc_collect",
+          234
+        ],
+        [
+          "_RINvNtCslWxY2MhVcag_4core3ptr9drop_glueNtNtCsfgzI5BEk3KS_5lumen5value5ValueEBF_",
+          216
+        ],
+        [
+          "_RNvMs0_NtNtCsfgzI5BEk3KS_5lumen8bytecode9name_pathNtB7_5Chunk13name_path_hit",
+          137
+        ],
+        [
+          "_platform_memcmp",
+          116
+        ],
+        [
+          "_RNvMNtNtNtCsfgzI5BEk3KS_5lumen5value5props6accessNtB4_5Props3get",
+          108
+        ],
+        [
+          "_xzm_free",
+          101
+        ],
+        [
+          "_xzm_xzone_malloc_tiny",
+          98
+        ],
+        [
+          "_platform_memmove",
+          87
+        ],
+        [
+          "_RNvMs4_NtCsfgzI5BEk3KS_5lumen5valueNtB5_6Object14new_with_parts",
+          84
+        ],
+        [
+          "_tlv_get_addr",
+          74
+        ],
+        [
+          "_RNvMNtCsfgzI5BEk3KS_5lumen5valueNtB2_11PackedValue4pack",
+          73
+        ],
+        [
+          "_RNvMs_NtNtCsfgzI5BEk3KS_5lumen8bytecode13inline_framesNtB6_5Chunk26record_jit_inline_location",
+          72
+        ],
+        [
+          "_RINvNtCslWxY2MhVcag_4core3ptr9drop_glueTINtNtCs6KVRSXc8uZF_5alloc2rc2RceENtNtCsfgzI5BEk3KS_5lumen5value8PropertyEEB1d_",
+          71
+        ],
+        [
+          "_RNvNtCsfgzI5BEk3KS_5lumen8bytecode14jit_exec_inner",
+          66
+        ],
+        [
+          "_RINvMs1_NtCs7oNAfGD06J0_9hashbrown3mapINtB6_7HashMapINtNtCs6KVRSXc8uZF_5alloc2rc2RceEjINtNtCslWxY2MhVcag_4core4hash18BuildHasherDefaultNtNtCsfgzI5BEk3KS_5lumen8fasthash8FxHasherEE3geteEB2d_",
+          59
+        ],
+        [
+          "_RNvMs6_NtCs6KVRSXc8uZF_5alloc2rcINtB5_2RcINtNtCslWxY2MhVcag_4core4cell7RefCellNtNtCsfgzI5BEk3KS_5lumen5value6ObjectEE9drop_slowB1i_",
+          56
+        ],
+        [
+          "_RNvXs_NtCsfgzI5BEk3KS_5lumen9fastallocNtB4_10ClassAllocNtNtNtCslWxY2MhVcag_4core5alloc6global11GlobalAlloc5alloc",
+          53
+        ],
+        [
+          "_RINvYNtNtNtCs7mRY9FNn263_3std4hash6random11RandomStateNtNtCslWxY2MhVcag_4core4hash11BuildHasher8hash_oneRjECsfgzI5BEk3KS_5lumen",
+          50
+        ],
+        [
+          "_RNvXs3_NtNtCslWxY2MhVcag_4core4hash3sipINtB5_6HasherNtB5_11Sip13RoundsENtB7_6Hasher5writeCsfgzI5BEk3KS_5lumen",
+          50
+        ],
+        [
+          "_RINvMNtNtNtCsfgzI5BEk3KS_5lumen5value5props8mutationNtB5_5Props6insertReEB9_",
+          49
+        ],
+        [
+          "_RNvNtNtCsfgzI5BEk3KS_5lumen5value8gc_edges16object_refs_into",
+          47
+        ],
+        [
+          "_RNvNtCsfgzI5BEk3KS_5lumen8bytecode8jit_exec",
+          47
+        ],
+        [
+          "_RNvMs7_NtCsfgzI5BEk3KS_5lumen11interpreterNtB5_6Interp19obj_scope_refs_into",
+          42
+        ],
+        [
+          "_RNvMs7_NtCsfgzI5BEk3KS_5lumen11interpreterNtB5_6Interp18run_compiled_chunk",
+          42
+        ],
+        [
+          "_RNvNtNtNtCsfgzI5BEk3KS_5lumen8bytecode9name_path3jit11load_cached",
+          40
+        ],
+        [
+          "_free",
+          37
+        ],
+        [
+          "_RNvMs7_NtCsfgzI5BEk3KS_5lumen11interpreterNtB5_6Interp14get_from_chain",
+          37
+        ],
+        [
+          "_RNvMNtNtCsfgzI5BEk3KS_5lumen11interpreter11cached_callNtB4_6Interp15call_jit_cached",
+          37
+        ],
+        [
+          "_RNvMs3_NtCsfgzI5BEk3KS_5lumen5regexNtB5_5Regex16exec_text_shared",
+          35
+        ],
+        [
+          "_RNvNtCsfgzI5BEk3KS_5lumen8builtins11regexp_exec",
+          35
+        ],
+        [
+          "_RINvMs6_NtCs7oNAfGD06J0_9hashbrown3rawINtB6_8RawTableTINtNtCs6KVRSXc8uZF_5alloc2rc2RceEjEE14reserve_rehashNCINvNtB8_3map11make_hasherBQ_jINtNtCslWxY2MhVcag_4core4hash18BuildHasherDefaultNtNtCsfgzI5BEk3KS_5lumen8fasthash8FxHasherEE0EB32_",
+          35
+        ],
+        [
+          "_RNvNtNtNtCsfgzI5BEk3KS_5lumen5value5props6shapes16shape_transition",
+          34
+        ],
+        [
+          "_RNvNtCsfgzI5BEk3KS_5lumen8bytecode15jit_make_object",
+          34
+        ],
+        [
+          "_RNvMs7_NtCsfgzI5BEk3KS_5lumen11interpreterNtB5_6Interp21call_native_committed",
+          33
+        ],
+        [
+          "_RNvMs7_NtCsfgzI5BEk3KS_5lumen11interpreterNtB5_6Interp13call_dispatch",
+          31
+        ],
+        [
+          "_RNvMs7_NtCsfgzI5BEk3KS_5lumen5regexINtB5_7MatcherRShE9run_innerB7_",
+          30
+        ],
+        [
+          "_RNvMs5_NtCs6KVRSXc8uZF_5alloc7raw_vecNtB5_11RawVecInner11finish_growCsfgzI5BEk3KS_5lumen",
+          28
+        ],
+        [
+          "_RNvMs7_NtCsfgzI5BEk3KS_5lumen11interpreterNtB5_6Interp15get_member_recv",
+          28
+        ],
+        [
+          "_RNvMs7_NtCsfgzI5BEk3KS_5lumen11interpreterNtB5_6Interp10try_ic_set",
+          25
+        ]
+      ],
+      "iterator_builtin_leaves": [
+        [
+          "_RNvMNtNtNtCsfgzI5BEk3KS_5lumen5value5props6accessNtB4_5Props3get",
+          13
+        ],
+        [
+          "_platform_memcmp",
+          11
+        ],
+        [
+          "_RNvNtNtNtCsfgzI5BEk3KS_5lumen5value5props6shapes16shape_transition",
+          7
+        ],
+        [
+          "_RINvMNtNtNtCsfgzI5BEk3KS_5lumen5value5props8mutationNtB5_5Props6insertReEB9_",
+          7
+        ],
+        [
+          "DYLD-STUB$$memcmp",
+          6
+        ],
+        [
+          "_RNvNtNtCsfgzI5BEk3KS_5lumen8builtins14array_iterator4fast",
+          6
+        ],
+        [
+          "_RINvNtCslWxY2MhVcag_4core3ptr9drop_glueNtNtCsfgzI5BEk3KS_5lumen5value5ValueEBF_",
+          6
+        ],
+        [
+          "_RNvXs_NtCsfgzI5BEk3KS_5lumen9fastallocNtB4_10ClassAllocNtNtNtCslWxY2MhVcag_4core5alloc6global11GlobalAlloc5alloc",
+          4
+        ],
+        [
+          "_platform_memmove",
+          4
+        ],
+        [
+          "_xzm_xzone_malloc_tiny",
+          3
+        ],
+        [
+          "_RNvMs4_NtCsfgzI5BEk3KS_5lumen5valueNtB5_6Object14new_with_parts",
+          3
+        ],
+        [
+          "_tlv_get_addr",
+          3
+        ],
+        [
+          "_RNCNvNtNtCsfgzI5BEk3KS_5lumen8builtins14array_iterator9own_state0B7_",
+          2
+        ],
+        [
+          "_RNvMs7_NtCsfgzI5BEk3KS_5lumen11interpreterNtB5_6Interp15get_member_recv",
+          2
+        ],
+        [
+          "_RNvMNtCsfgzI5BEk3KS_5lumen5valueNtB2_11PackedValue4pack",
+          2
+        ],
+        [
+          "_RNvNtCsfgzI5BEk3KS_5lumen5value8set_data",
+          2
+        ],
+        [
+          "_RNvMs7_NtCsfgzI5BEk3KS_5lumen11interpreterNtB5_6Interp10set_member",
+          1
+        ],
+        [
+          "_RINvNtCsfgzI5BEk3KS_5lumen8builtins2abuEB4_",
+          1
+        ],
+        [
+          "_RINvNtCslWxY2MhVcag_4core3ptr9drop_glueNtNtCsfgzI5BEk3KS_5lumen5value11PackedValueEBF_",
+          1
+        ],
+        [
+          "_xzm_xzone_malloc",
+          1
+        ]
+      ],
+      "notes": [
+        "Exclusive residuals subtract immediate children; ancestor unions count each residual once.",
+        "Regex partitions are disjoint and overlap is explicit; construction covers named make_array/set_data ancestry only.",
+        "Inlining can hide helper boundaries; zero symbol counts do not prove no execution.",
+        "Current iterator builtin includes generic exhaustion plus unsuccessful fast paths and direct JS .next calls; no miss-only claim.",
+        "GC ancestry does not identify which allocations caused collection."
+      ]
+    },
+    "jit_attribution": {
+      "total": 5104,
+      "unmapped_unknown": 0,
+      "mapped_unknown": 1260,
+      "exclusive_unknown_sites": [
+        [
+          "106004000 patt 9:ReturnUndef",
+          17
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 482:ReturnUndef",
+          17
+        ],
+        [
+          "101ad8000 subject|i 11:CallWithThis(1, 1)",
+          14
+        ],
+        [
+          "106004000 patt 7:Call(3, 0)",
+          9
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 439:ReturnUndef",
+          8
+        ],
+        [
+          "101ac8000 input|options|parser|handleEvent 219:Call(2, 2)",
+          8
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 35:Jump(37) container|skipCloseUnmatched|tip|(inline",
+          7
+        ],
+        [
+          "101ac8000 input|options|parser|handleEvent 301:ReturnUndef",
+          7
+        ],
+        [
+          "106068000 spec|extra 0:GetPropLocal(0, 0, 0)",
+          6
+        ],
+        [
+          "106168000 spec 19:ReturnUndef",
+          6
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 256:PopHandler",
+          6
+        ],
+        [
+          "101ad8000 subject|i 8:GetMethod(3, 8)",
+          6
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 8:GetProp(4, 8)",
+          6
+        ],
+        [
+          "105fcc000  1:GetProp(1, 4)",
+          6
+        ],
+        [
+          "10607c000 pos|node 2:GetMethod(1, 0)",
+          6
+        ],
+        [
+          "106030000 containers2|event|sp|ep 32:GetMethod(8, 20)",
+          6
+        ],
+        [
+          "106084000 node|_a|%switch%|result 0:GetPropLocal(0, 0, 0)",
+          6
+        ],
+        [
+          "106004000 patt 4:GetPropThis(2, 4)",
+          5
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 22:GetMethod(2, 8)",
+          5
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 25:SetPropDrop(5, 28)",
+          5
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 462:SetPropDrop(5, 444)",
+          5
+        ],
+        [
+          "101ae0000 subject|newpos 15:LoadLocal(1)",
+          5
+        ],
+        [
+          "106030000 containers2|event|sp|ep 13:GetProp(1, 0)",
+          5
+        ],
+        [
+          "106170000 last|ep 8:GetMethod(2, 8)",
+          4
+        ],
+        [
+          "106050000 startpos|endpos|annot 6:CallWithThis(2, 0)",
+          4
+        ],
+        [
+          "106068000 spec|extra 5:SetPropThisDrop(2, 20)",
+          4
+        ],
+        [
+          "106004000 patt 6:GetPropThis(3, 8)",
+          4
+        ],
+        [
+          "1060fc000 spec|m|level 4:CallWithThis(1, 0)",
+          4
+        ],
+        [
+          "106074000 subject|options 16:SetPropThisDrop(3, 16)",
+          4
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 184:Not",
+          4
+        ],
+        [
+          "101918000 cp 2:StrictEq",
+          4
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 75:CallWithThis(1, 2)",
+          4
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 181:StoreLocal(7)",
+          4
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 201:GetMethod(27, 180)",
+          4
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 203:CallWithThis(1, 7)",
+          4
+        ],
+        [
+          "101ae0000 subject|newpos 11:CallWithThis(1, 1)",
+          4
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 438:SetPropDrop(12, 412)",
+          4
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 441:CallWithThis(0, 19)",
+          4
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 207:CallWithThis(1, 9)",
+          4
+        ],
+        [
+          "10602c000 s|startpos|endpos|result 12:GetPropLocal(3, 3, 8)",
+          4
+        ],
+        [
+          "106040000 child|tip [prologue]",
+          4
+        ],
+        [
+          "106040000 child|tip 11:GetElem",
+          4
+        ],
+        [
+          "106054000  10:GetElem",
+          4
+        ],
+        [
+          "106030000 containers2|event|sp|ep 7:StoreLocal(2)",
+          4
+        ],
+        [
+          "106030000 containers2|event|sp|ep 31:GetPropLocal(1, 7, 16)",
+          4
+        ],
+        [
+          "106030000 containers2|event|sp|ep 132:Call(4, 8)",
+          4
+        ],
+        [
+          "106084000 node|_a|%switch%|result 673:CallWithThis(1, 36)",
+          4
+        ],
+        [
+          "106068000 spec|extra 7:SetPropThisDrop(3, 28)",
+          3
+        ],
+        [
+          "106074000 subject|options 25:Const(3)",
+          3
+        ],
+        [
+          "106004000 patt 5:LoadLocal(0)",
+          3
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 23:LoadLocal(4)",
+          3
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 73:GetPropLocal(5, 3, 44)",
+          3
+        ],
+        [
+          "106004000 patt 3:GetProp(1, 0)",
+          3
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 11:GetPropLocal(4, 1, 4) container|skipCloseUnmatched|tip|(inline",
+          3
+        ],
+        [
+          "106168000 spec 6:CallWithThis(1, 0)",
+          3
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 45:GetPropLocal(5, 3, 20)",
+          3
+        ],
+        [
+          "10605c000 container|m|marker|mtask 98:ReturnUndef",
+          3
+        ],
+        [
+          "10627c000 _a|ilparser|(inline callee)|(inline this) 60:StrictEq _a|ilparser|(inline callee)|(inline",
+          3
+        ],
+        [
+          "106170000 last|ep 4:CallWithThis(0, 0)",
+          3
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 199:JumpIfFalse(256)",
+          3
+        ],
+        [
+          "106264000 self|pos|endpos|subject 228:LoadLocal(8)",
+          3
+        ],
+        [
+          "101ad8000 subject|i 12:Not",
+          3
+        ],
+        [
+          "101ad8000 subject|i 21:CallWithThis(1, 2)",
+          3
+        ],
+        [
+          "101ad8000 subject|i 6:LoadNameForCall(2, 0)",
+          3
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 28:LoadName(0, 8)",
+          3
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 38:SetPropDrop(8, 40)",
+          3
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 87:LoadName(0, 19)",
+          3
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 185:JumpIfFalsePeek(191)",
+          3
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 196:GetPropLocal(5, 19, 172)",
+          3
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 197:GetPropLocal(7, 26, 176)",
+          3
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 208:CallWithThis(0, 8)",
+          3
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 293:GetProp(4, 260)",
+          3
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 35:StrictNotEq",
+          3
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 169:CallWithThis(3, 7)",
+          3
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 175:StrictEq",
+          3
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 407:GetElem",
+          3
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 425:CallWithThis(1, 22)",
+          3
+        ],
+        [
+          "105fcc000  10:GetElem",
+          3
+        ],
+        [
+          "10601c000 startpos|endpos|annot|matchIndex 8:StrictNotEq",
+          3
+        ],
+        [
+          "106058000 pos|container 16:ReturnUndef",
+          3
+        ],
+        [
+          "106040000 child|tip 7:LoadName(0, 2)",
+          3
+        ],
+        [
+          "10607c000 pos|node [prologue]",
+          3
+        ],
+        [
+          "106054000  4:JumpIfFalse(13)/5:LoadName(0, 1)",
+          3
+        ],
+        [
+          "106040000 child|tip 13:GetPropLocal(1, 2, 8)",
+          3
+        ],
+        [
+          "106080000 suffixes|startpos|endpos|pos [prologue]",
+          3
+        ],
+        [
+          "106040000 child|tip 1:GetProp(1, 0)",
+          3
+        ],
+        [
+          "106054000  1:GetProp(1, 0)",
+          3
+        ],
+        [
+          "106198000 suffixes|startpos|endpos|pos 5:CallWithThis(0, 0)",
+          3
+        ],
+        [
+          "106198000 suffixes|startpos|endpos|pos 13:LoadName(3, 2)",
+          3
+        ],
+        [
+          "106030000 containers2|event|sp|ep 27:GetPropLocal(1, 7, 12)",
+          3
+        ],
+        [
+          "106030000 containers2|event|sp|ep 12:LoadName(0, 0)",
+          3
+        ],
+        [
+          "106030000 containers2|event|sp|ep 34:CallWithThis(1, 2)",
+          3
+        ],
+        [
+          "106030000 containers2|event|sp|ep 58:StrictNotEq",
+          3
+        ],
+        [
+          "106030000 containers2|event|sp|ep 126:JumpIfFalse(134)",
+          3
+        ],
+        [
+          "106030000 containers2|event|sp|ep 134:ReturnUndef",
+          3
+        ],
+        [
+          "106084000 node|_a|%switch%|result 5:StrictEq",
+          3
+        ],
+        [
+          "1061c4000 node|result|oldtight|child 15:GetPropLocal(0, 2, 12)",
+          3
+        ],
+        [
+          "106084000 node|_a|%switch%|result [prologue]",
+          3
+        ],
+        [
+          "1061c4000 node|result|oldtight|child 4:GetPropThis(0, 0)",
+          3
+        ],
+        [
+          "106254000 tag|node|newlines|extraAttrs 78:CallWithThis(1, 2)",
+          3
+        ],
+        [
+          "106084000 node|_a|%switch%|result 246:CallWithThis(1, 0)",
+          3
+        ],
+        [
+          "106170000 last|ep 1:Tdz(1)",
+          2
+        ],
+        [
+          "106170000 last|ep 18:GetElem",
+          2
+        ],
+        [
+          "1061a0000  16:CallWithThis(3, 1)",
+          2
+        ],
+        [
+          "10627c000 _a|ilparser|(inline callee)|(inline this) 86:CallWithThis(1, 2) _a|ilparser|(inline callee)|(inline",
+          2
+        ],
+        [
+          "106068000 spec|extra 16:LoadLocal(1)",
+          2
+        ],
+        [
+          "106068000 spec|extra 4:GetPropLocal(0, 2, 16)",
+          2
+        ],
+        [
+          "106068000 spec|extra 2:GetPropLocal(0, 1, 8)",
+          2
+        ],
+        [
+          "106068000 spec|extra 3:SetPropThisDrop(1, 12)",
+          2
+        ],
+        [
+          "106068000 spec|extra 11:SetPropThisDrop(5, 40)",
+          2
+        ],
+        [
+          "106068000 spec|extra 17:SetPropThisDrop(8, 52)",
+          2
+        ],
+        [
+          "106074000 subject|options 18:SetPropThisDrop(4, 20)",
+          2
+        ],
+        [
+          "106074000 subject|options 38:LoadName(14, 0)",
+          2
+        ],
+        [
+          "106124000 spec|m|label|value [prologue]",
+          2
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 3:SetPropLocalDrop(1, 0, 0)",
+          2
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 24:CallWithThis(1, 1)",
+          2
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 26:LoadLocal(5)",
+          2
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 28:StrictNotEq",
+          2
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 42:Const(5)",
+          2
+        ],
+        [
+          "106008000 spec|m|sp|ep 9:GetMethod(0, 0)",
+          2
+        ],
+        [
+          "106044000 spec|m|sp|ep 12:CallWithThis(1, 0)",
+          2
+        ],
+        [
+          "106044000 spec|m|sp|ep 83:CallWithThis(1, 6)",
+          2
+        ],
+        [
+          "1060fc000 spec|m|level 39:GetPropLocal(1, 6, 32)",
+          2
+        ],
+        [
+          "1060fc000 spec|m|level 54:ReturnUndef",
+          2
+        ],
+        [
+          "106118000 spec|m 35:ReturnUndef",
+          2
+        ],
+        [
+          "10611c000 spec|m|sp|ep 56:ReturnUndef",
+          2
+        ],
+        [
+          "10612c000 spec|m 4:CallWithThis(1, 0)",
+          2
+        ],
+        [
+          "106130000 marker 5:LoadLocal(0)",
+          2
+        ],
+        [
+          "10613c000 spec|m|rawrow 57:ReturnUndef",
+          2
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 4:LoadThis container|skipCloseUnmatched|tip|(inline",
+          2
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 14:GetMethod(2, 8) container|skipCloseUnmatched|tip|(inline",
+          2
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 25:GetProp(4, 28) container|skipCloseUnmatched|tip|(inline",
+          2
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 58:GetProp(4, 52) container|skipCloseUnmatched|tip|(inline",
+          2
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 84:GetMethod(2, 68) container|skipCloseUnmatched|tip|(inline",
+          2
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 85:InlineGuard(3, 106) container|skipCloseUnmatched|tip|(inline",
+          2
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 89:GetProp(4, 76) container|skipCloseUnmatched|tip|(inline",
+          2
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 95:GetProp(4, 88) container|skipCloseUnmatched|tip|(inline",
+          2
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 136:SetPropDrop(10, 128) container|skipCloseUnmatched|tip|(inline",
+          2
+        ],
+        [
+          "106074000 subject|options 12:SetPropThisDrop(1, 8)",
+          2
+        ],
+        [
+          "106074000 subject|options 37:SetPropThisDrop(13, 56)",
+          2
+        ],
+        [
+          "106168000 spec 15:CallWithThis(3, 1)",
+          2
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 140:CallWithThis(1, 7) container|skipCloseUnmatched|tip|(inline",
+          2
+        ],
+        [
+          "10605c000 container|m|marker|mtask 4:Gt",
+          2
+        ],
+        [
+          "10605c000 container|m|marker|mtask 18:Tdz(3)",
+          2
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 19:LoadLocal(0)",
+          2
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 35:StoreLocal(7)",
+          2
+        ],
+        [
+          "10605c000 container|m|marker|mtask 2:GetPropLocal(0, 1, 4)",
+          2
+        ],
+        [
+          "10605c000 container|m|marker|mtask 3:GetProp(0, 8)",
+          2
+        ],
+        [
+          "10605c000 container|m|marker|mtask 76:CallWithThis(1, 5)",
+          2
+        ],
+        [
+          "10605c000 container|m|marker|mtask 81:CallWithThis(1, 6)",
+          2
+        ],
+        [
+          "10627c000 _a|ilparser|(inline callee)|(inline this) 53:StoreLocal(5) _a|ilparser|(inline callee)|(inline",
+          2
+        ],
+        [
+          "101ad8000 subject|i 19:GetMethod(3, 16)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank [prologue]",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 119:GetProp(10, 120)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 169:StoreLocal(6)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 180:JumpIfFalse(259)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 287:JumpIfFalsePeek(297)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 435:LoadName(0, 78)",
+          2
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 416:Call(3, 21)",
+          2
+        ],
+        [
+          "106010000 cp 2:StrictEq",
+          2
+        ],
+        [
+          "10601c000 startpos|endpos|annot|matchIndex 5:StoreLocal(4)",
+          2
+        ],
+        [
+          "10602c000 s|startpos|endpos|result 8:StoreLocal(3)",
+          2
+        ],
+        [
+          "10602c000 s|startpos|endpos|result 10:JumpIfFalsePeek(15)",
+          2
+        ],
+        [
+          "1061b0000 lastMatched|tip|(inline callee)|(inline this) [prologue]",
+          2
+        ],
+        [
+          "106264000 self|pos|endpos|subject 325:ReturnUndef",
+          2
+        ],
+        [
+          "101918000 cp 8:Return",
+          2
+        ],
+        [
+          "101ad8000 subject|i 10:CallWithThis(1, 0)",
+          2
+        ],
+        [
+          "101ad8000 subject|i 42:ReturnUndef",
+          2
+        ],
+        [
+          "101ae0000 subject|newpos 2:GetPropThis(0, 0)",
+          2
+        ],
+        [
+          "101ae0000 subject|newpos 6:LoadNameForCall(2, 0)",
+          2
+        ],
+        [
+          "101ae0000 subject|newpos 10:CallWithThis(1, 0)",
+          2
+        ],
+        [
+          "101ae0000 subject|newpos 21:ReturnUndef",
+          2
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 70:GetElem",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 1:GetProp(1, 0)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 13:LoadName(0, 3)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 15:LoadName(0, 4)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 16:GetProp(3, 16)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 17:GetProp(4, 20)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 27:GetProp(3, 32)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 36:LoadName(0, 9)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 47:GetMethod(11, 56)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 67:StoreLocal(1)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 69:GetMethod(14, 76)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 70:CallWithThis(0, 1)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 71:Pop",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 164:LoadName(0, 32)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 167:CallWithThis(1, 6)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 182:PushHandler(258)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 188:LoadName(20, 35)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 223:GetElem",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 233:CallWithThis(0, 9)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 234:Pop",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 316:CallWithThis(0, 13)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 344:GetMethod(27, 304)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 362:SetPropLocalDrop(11, 38, 328)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 363:LoadLocal(11)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 408:JumpIfFalsePeek(412)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 422:CallWithThis(2, 18)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 424:LoadName(0, 75)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 440:GetMethod(30, 416)",
+          2
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 459:GetProp(5, 440)",
+          2
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 182:LoadLocal(14)",
+          2
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 195:CallWithThis(3, 8)",
+          2
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 270:CallWithThis(3, 12)",
+          2
+        ],
+        [
+          "105fcc000  0:GetPropThis(0, 0)",
+          2
+        ],
+        [
+          "105fcc000  7:GetProp(1, 16)",
+          2
+        ],
+        [
+          "10601c000 startpos|endpos|annot|matchIndex 11:GetMethod(4, 4)",
+          2
+        ],
+        [
+          "1061b0000 lastMatched|tip|(inline callee)|(inline this) 41:CallWithThis(0, 1) lastMatched|tip|(inline callee)|(inline",
+          2
+        ],
+        [
+          "1061b0000 lastMatched|tip|(inline callee)|(inline this) 58:GetElem lastMatched|tip|(inline callee)|(inline",
+          2
+        ],
+        [
+          "106264000 self|pos|endpos|subject 270:GetPropLocal(24, 11, 128)",
+          2
+        ],
+        [
+          "106264000 self|pos|endpos|subject 275:CallWithThis(4, 13)",
+          2
+        ],
+        [
+          "10628c000 self|pos|endpos|subject 2:LoadName(0, 0)",
+          2
+        ],
+        [
+          "10628c000 self|pos|endpos|subject 19:SetPropLocalDrop(4, 4, 8)",
+          2
+        ],
+        [
+          "106058000 pos|container [prologue]",
+          2
+        ],
+        [
+          "10607c000 pos|node 16:JumpIfFalse(23)",
+          2
+        ],
+        [
+          "106054000  [prologue]",
+          2
+        ],
+        [
+          "105ffc000 node|buffer|child|%iter% 52:ReturnUndef",
+          2
+        ],
+        [
+          "106188000 suffixes|startpos|endpos|pos [prologue]",
+          2
+        ],
+        [
+          "10618c000 suffixes|startpos|endpos|pos [prologue]",
+          2
+        ],
+        [
+          "106198000 suffixes|startpos|endpos|pos [prologue]",
+          2
+        ],
+        [
+          "10623c000 suffixes|startpos|endpos|pos [prologue]",
+          2
+        ],
+        [
+          "106058000 pos|container 9:CallWithThis(1, 0)",
+          2
+        ],
+        [
+          "106080000 suffixes|startpos|endpos|pos 5:Const(0)/6:Add/7:CallWithThis(2, 0)",
+          2
+        ],
+        [
+          "106080000 suffixes|startpos|endpos|pos 19:CallWithThis(1, 1)",
+          2
+        ],
+        [
+          "10616c000 suffixes|startpos|endpos|pos 2:CallWithThis(1, 0)",
+          2
+        ],
+        [
+          "10616c000 suffixes|startpos|endpos|pos 4:ReturnUndef",
+          2
+        ],
+        [
+          "106174000 suffixes|startpos|endpos|pos 13:ReturnUndef",
+          2
+        ],
+        [
+          "10618c000 suffixes|startpos|endpos|pos 4:GetProp(3, 8)",
+          2
+        ],
+        [
+          "10618c000 suffixes|startpos|endpos|pos 34:GetPropLocal(0, 0, 44)",
+          2
+        ],
+        [
+          "1061a4000 suffixes|startpos|endpos|pos 1:LoadNameForCall(0, 0)",
+          2
+        ],
+        [
+          "106200000 suffixes|startpos|endpos|pos 8:SetPropDrop(3, 4)",
+          2
+        ],
+        [
+          "1061e8000 suffixes|startpos|endpos|pos 3:Pop",
+          2
+        ],
+        [
+          "106054000  6:LoadName(0, 2)",
+          2
+        ],
+        [
+          "106030000 containers2|event|sp|ep 59:JumpIfFalse(121)",
+          2
+        ],
+        [
+          "106030000 containers2|event|sp|ep 87:Sub",
+          2
+        ],
+        [
+          "106030000 containers2|event|sp|ep 37:GetPropLocal(1, 7, 24)",
+          2
+        ],
+        [
+          "106030000 containers2|event|sp|ep 49:CallWithThis(1, 4)",
+          2
+        ],
+        [
+          "106030000 containers2|event|sp|ep 65:CallWithThis(0, 5)",
+          2
+        ],
+        [
+          "106030000 containers2|event|sp|ep 79:GetPropLocal(0, 15, 44)",
+          2
+        ],
+        [
+          "106030000 containers2|event|sp|ep 121:LoadName(22, 5)",
+          2
+        ],
+        [
+          "106030000 containers2|event|sp|ep 130:GetPropLocal(1, 4, 96)",
+          2
+        ],
+        [
+          "106084000 node|_a|%switch%|result 15:StrictEq",
+          2
+        ],
+        [
+          "106084000 node|_a|%switch%|result 25:StrictEq",
+          2
+        ],
+        [
+          "106084000 node|_a|%switch%|result 1096:CallWithThis(3, 58)",
+          2
+        ],
+        [
+          "106084000 node|_a|%switch%|result 1149:ReturnUndef",
+          2
+        ],
+        [
+          "1061c4000 node|result|oldtight|child 31:ResetSlots(9, 1)",
+          2
+        ],
+        [
+          "106084000 node|_a|%switch%|result 280:CallWithThis(3, 3)",
+          2
+        ],
+        [
+          "106084000 node|_a|%switch%|result 308:CallWithThis(3, 7)",
+          2
+        ],
+        [
+          "106084000 node|_a|%switch%|result 671:GetMethod(27, 280)",
+          2
+        ],
+        [
+          "1061c4000 node|result|oldtight|child 66:Add",
+          2
+        ],
+        [
+          "1061c4000 node|result|oldtight|child 78:LoadLocal(1)",
+          2
+        ],
+        [
+          "106254000 tag|node|newlines|extraAttrs 37:JumpIfTruePeek(40)",
+          2
+        ],
+        [
+          "106254000 tag|node|newlines|extraAttrs 76:GetMethod(5, 20)",
+          2
+        ],
+        [
+          "106254000 tag|node|newlines|extraAttrs 36:GetPropLocal(8, 2, 8)",
+          2
+        ],
+        [
+          "1061c4000 node|result|oldtight|child 77:SetPropThisDrop(0, 36)",
+          2
+        ],
+        [
+          "106244000 options [prologue]",
+          2
+        ],
+        [
+          "101900000 __toESM|__commonJS|require_lib|import_djot 109:Call(1, 17)",
+          2
+        ],
+        [
+          "105fd0000 subject|i|match|last 2:GetPropThis(0, 0)",
+          1
+        ],
+        [
+          "105fd0000 subject|i|match|last 28:GetPropThis(3, 32)",
+          1
+        ],
+        [
+          "105fd0000 subject|i|match|last 34:GetProp(4, 48)",
+          1
+        ],
+        [
+          "105fd0000 subject|i|match|last 79:GetPropThis(3, 104)",
+          1
+        ],
+        [
+          "105fd0000 subject|i|match|last 116:GetPropThis(3, 160)",
+          1
+        ],
+        [
+          "106170000 last|ep [prologue]",
+          1
+        ],
+        [
+          "106170000 last|ep 14:GetProp(3, 16)",
+          1
+        ],
+        [
+          "106170000 last|ep 15:GetProp(4, 20)",
+          1
+        ],
+        [
+          "106170000 last|ep 19:StoreLocal(0)",
+          1
+        ],
+        [
+          "1061a0000  [prologue]",
+          1
+        ],
+        [
+          "1061a0000  1:GetProp(0, 0)",
+          1
+        ],
+        [
+          "1061a0000  2:GetMethod(1, 4)",
+          1
+        ],
+        [
+          "1061a0000  5:LoadLexicalThis",
+          1
+        ],
+        [
+          "1061a0000  8:GetProp(3, 12)",
+          1
+        ],
+        [
+          "1061a0000  9:Const(0)",
+          1
+        ],
+        [
+          "10627c000 _a|ilparser|(inline callee)|(inline this) 33:StrictEq _a|ilparser|(inline callee)|(inline",
+          1
+        ],
+        [
+          "10627c000 _a|ilparser|(inline callee)|(inline this) 47:CallWithThis(0, 1) _a|ilparser|(inline callee)|(inline",
+          1
+        ],
+        [
+          "10627c000 _a|ilparser|(inline callee)|(inline this) 73:JumpIfFalse(83) _a|ilparser|(inline callee)|(inline",
+          1
+        ],
+        [
+          "10627c000 _a|ilparser|(inline callee)|(inline this) 84:GetMethod(9, 72) _a|ilparser|(inline callee)|(inline",
+          1
+        ],
+        [
+          "106068000 spec|extra 6:GetPropLocal(0, 3, 24)",
+          1
+        ],
+        [
+          "106074000 subject|options 27:SetPropThisDrop(8, 36)",
+          1
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 0:Tdz(4)",
+          1
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 5:StoreLocal(4)",
+          1
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 25:StoreLocal(5)",
+          1
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 36:GetPropLocal(5, 3, 12)",
+          1
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 51:GetPropLocal(5, 3, 28)",
+          1
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 52:LoadLocal(8)",
+          1
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 65:Pop",
+          1
+        ],
+        [
+          "106004000 patt [prologue]",
+          1
+        ],
+        [
+          "106004000 patt 2:LoadName(0, 0)",
+          1
+        ],
+        [
+          "106008000 spec|m|sp|ep 10:LoadName(1, 0)",
+          1
+        ],
+        [
+          "106008000 spec|m|sp|ep 11:CallWithThis(1, 0)",
+          1
+        ],
+        [
+          "106008000 spec|m|sp|ep 15:StrictEq",
+          1
+        ],
+        [
+          "106008000 spec|m|sp|ep 21:GetPropLocal(1, 3, 8)",
+          1
+        ],
+        [
+          "106008000 spec|m|sp|ep 50:CallWithThis(1, 4)",
+          1
+        ],
+        [
+          "106008000 spec|m|sp|ep 52:GetPropLocal(6, 8, 40)",
+          1
+        ],
+        [
+          "106008000 spec|m|sp|ep 69:CallWithThis(1, 5)",
+          1
+        ],
+        [
+          "106008000 spec|m|sp|ep 99:CallWithThis(3, 6)",
+          1
+        ],
+        [
+          "106044000 spec|m|sp|ep 8:Tdz(9)",
+          1
+        ],
+        [
+          "106044000 spec|m|sp|ep 16:StrictEq",
+          1
+        ],
+        [
+          "106044000 spec|m|sp|ep 20:GetPropLocal(1, 2, 4)",
+          1
+        ],
+        [
+          "106044000 spec|m|sp|ep 25:GetProp(4, 12)",
+          1
+        ],
+        [
+          "106044000 spec|m|sp|ep 36:CallWithThis(1, 2)",
+          1
+        ],
+        [
+          "106044000 spec|m|sp|ep 37:StoreLocal(6)",
+          1
+        ],
+        [
+          "106044000 spec|m|sp|ep 66:GetPropLocal(7, 8, 56)",
+          1
+        ],
+        [
+          "106044000 spec|m|sp|ep 87:Tdz(10)",
+          1
+        ],
+        [
+          "106044000 spec|m|sp|ep 89:GetIter",
+          1
+        ],
+        [
+          "106044000 spec|m|sp|ep 107:GetMethod(14, 68)",
+          1
+        ],
+        [
+          "106050000 startpos|endpos|annot 7:LoadName(2, 1)",
+          1
+        ],
+        [
+          "106050000 startpos|endpos|annot 11:CallWithThis(2, 1)",
+          1
+        ],
+        [
+          "1060f8000 spec 1:GetMethod(0, 0)",
+          1
+        ],
+        [
+          "1060f8000 spec 3:CallWithThis(1, 0)",
+          1
+        ],
+        [
+          "1060f8000 spec 14:Pop",
+          1
+        ],
+        [
+          "1060fc000 spec|m|level 6:LoadLocal(1)",
+          1
+        ],
+        [
+          "1060fc000 spec|m|level 7:JumpIfFalsePeek(20)",
+          1
+        ],
+        [
+          "1060fc000 spec|m|level 19:Call(3, 1)",
+          1
+        ],
+        [
+          "1060fc000 spec|m|level 20:JumpIfFalse(52)",
+          1
+        ],
+        [
+          "106118000 spec|m 4:CallWithThis(1, 0)",
+          1
+        ],
+        [
+          "10611c000 spec|m|sp|ep 6:LoadLocal(1)",
+          1
+        ],
+        [
+          "106124000 spec|m|label|value 4:CallWithThis(1, 0)",
+          1
+        ],
+        [
+          "106124000 spec|m|label|value 6:LoadLocal(1)",
+          1
+        ],
+        [
+          "106124000 spec|m|label|value 73:Const(10)",
+          1
+        ],
+        [
+          "106124000 spec|m|label|value 75:ReturnUndef",
+          1
+        ],
+        [
+          "106130000 marker 7:StrictEq",
+          1
+        ],
+        [
+          "106130000 marker 13:JumpIfTruePeek(18)",
+          1
+        ],
+        [
+          "106130000 marker 20:MakeArray(1)",
+          1
+        ],
+        [
+          "106144000 spec|attributeParser|res|container 3:LoadLexicalThis",
+          1
+        ],
+        [
+          "106144000 spec|attributeParser|res|container 5:CallWithThis(1, 0)",
+          1
+        ],
+        [
+          "106144000 spec|attributeParser|res|container 7:StrictEq",
+          1
+        ],
+        [
+          "106150000 spec|m|colons|m2 1:Tdz(2)",
+          1
+        ],
+        [
+          "106150000 spec|m|colons|m2 11:Not",
+          1
+        ],
+        [
+          "106150000 spec|m|colons|m2 12:JumpIfFalse(15)",
+          1
+        ],
+        [
+          "10615c000 spec|m|border|ws 2:GetMethod(0, 0)",
+          1
+        ],
+        [
+          "10615c000 spec|m|border|ws 6:LoadLocal(1)",
+          1
+        ],
+        [
+          "10615c000 spec|m|border|ws 119:ReturnUndef",
+          1
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 6:InlineGuard(0, 81) container|skipCloseUnmatched|tip|(inline",
+          1
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 8:StoreLocal(4) container|skipCloseUnmatched|tip|(inline",
+          1
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 9:Tdz(5) container|skipCloseUnmatched|tip|(inline",
+          1
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 24:GetPropLocal(8, 3, 24) container|skipCloseUnmatched|tip|(inline",
+          1
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 28:GetElem container|skipCloseUnmatched|tip|(inline",
+          1
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 46:Gt container|skipCloseUnmatched|tip|(inline",
+          1
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 49:GetMethod(5, 40) container|skipCloseUnmatched|tip|(inline",
+          1
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 53:GetMethod(2, 44) container|skipCloseUnmatched|tip|(inline",
+          1
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 57:GetPropLocal(10, 3, 48) container|skipCloseUnmatched|tip|(inline",
+          1
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 63:GetPropLocal(10, 3, 60) container|skipCloseUnmatched|tip|(inline",
+          1
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 67:GetElem container|skipCloseUnmatched|tip|(inline",
+          1
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 112:GetPropLocal(0, 7, 96) container|skipCloseUnmatched|tip|(inline",
+          1
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 138:GetMethod(16, 136) container|skipCloseUnmatched|tip|(inline",
+          1
+        ],
+        [
+          "106074000 subject|options [prologue]",
+          1
+        ],
+        [
+          "106074000 subject|options 2:StrictEq",
+          1
+        ],
+        [
+          "106074000 subject|options 7:SetPropThisDrop(0, 0)",
+          1
+        ],
+        [
+          "106074000 subject|options 14:SetPropThisDrop(2, 12)",
+          1
+        ],
+        [
+          "106074000 subject|options 24:SetPropThisDrop(7, 32)",
+          1
+        ],
+        [
+          "106074000 subject|options 33:SetPropThisDrop(11, 48)",
+          1
+        ],
+        [
+          "106068000 spec|extra 1:SetPropThisDrop(0, 4)",
+          1
+        ],
+        [
+          "106068000 spec|extra 9:SetPropThisDrop(4, 36)",
+          1
+        ],
+        [
+          "106068000 spec|extra 13:SetPropThisDrop(6, 44)",
+          1
+        ],
+        [
+          "106050000 startpos|endpos|annot 0:GetPropThis(0, 0)",
+          1
+        ],
+        [
+          "106168000 spec 9:GetMethod(2, 4)",
+          1
+        ],
+        [
+          "106168000 spec 13:GetProp(3, 12)",
+          1
+        ],
+        [
+          "106168000 spec 14:Const(0)",
+          1
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 3:JumpIfFalse(83) container|skipCloseUnmatched|tip|(inline",
+          1
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 12:StoreLocal(5) container|skipCloseUnmatched|tip|(inline",
+          1
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 16:StoreLocal(7) container|skipCloseUnmatched|tip|(inline",
+          1
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 88:GetPropLocal(12, 3, 72) container|skipCloseUnmatched|tip|(inline",
+          1
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 94:GetPropLocal(12, 3, 84) container|skipCloseUnmatched|tip|(inline",
+          1
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 110:Pop container|skipCloseUnmatched|tip|(inline",
+          1
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 114:JumpIfFalse(124) container|skipCloseUnmatched|tip|(inline",
+          1
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 126:GetProp(9, 112) container|skipCloseUnmatched|tip|(inline",
+          1
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee) 133:GetPropThis(14, 124) container|skipCloseUnmatched|tip|(inline",
+          1
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 8:StrictNotEq",
+          1
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 31:Tdz(7)",
+          1
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 39:Gt",
+          1
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 40:JumpIfFalse(68)/41:Tdz(8)",
+          1
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 68:GetPropLocal(5, 3, 40)",
+          1
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 74:Const(8)",
+          1
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 75:GetElem",
+          1
+        ],
+        [
+          "106004000 patt 1:Pop",
+          1
+        ],
+        [
+          "10605c000 container|m|marker|mtask [prologue]",
+          1
+        ],
+        [
+          "10605c000 container|m|marker|mtask 24:CallWithThis(1, 0)",
+          1
+        ],
+        [
+          "10605c000 container|m|marker|mtask 28:StrictEq",
+          1
+        ],
+        [
+          "10605c000 container|m|marker|mtask 34:GetMethod(7, 28)",
+          1
+        ],
+        [
+          "10605c000 container|m|marker|mtask 36:GetPropLocal(1, 9, 36)",
+          1
+        ],
+        [
+          "10605c000 container|m|marker|mtask 40:GetMethod(4, 40)",
+          1
+        ],
+        [
+          "10605c000 container|m|marker|mtask 57:LoadNameForCall(11, 2)",
+          1
+        ],
+        [
+          "10605c000 container|m|marker|mtask 65:GetProp(12, 64)",
+          1
+        ],
+        [
+          "10605c000 container|m|marker|mtask 75:LoadLocal(6)",
+          1
+        ],
+        [
+          "10605c000 container|m|marker|mtask 83:PopHandler",
+          1
+        ],
+        [
+          "10605c000 container|m|marker|mtask 87:GetPropLocal(5, 15, 76)",
+          1
+        ],
+        [
+          "10605c000 container|m|marker|mtask 93:SetPropDrop(12, 84)",
+          1
+        ],
+        [
+          "106194000 container 3:GetProp(0, 8)",
+          1
+        ],
+        [
+          "106194000 container 5:JumpIfTruePeek(12)",
+          1
+        ],
+        [
+          "106194000 container 11:StrictEq",
+          1
+        ],
+        [
+          "1061c0000 container [prologue]",
+          1
+        ],
+        [
+          "1061c0000 container 2:LoadName(1, 0)",
+          1
+        ],
+        [
+          "1061c0000 container 3:CallWithThis(1, 0)",
+          1
+        ],
+        [
+          "1061ec000 container|m 4:CallWithThis(1, 0)",
+          1
+        ],
+        [
+          "1061ec000 container|m 41:ReturnUndef",
+          1
+        ],
+        [
+          "105fd0000 subject|i|match|last 5:JumpIfFalse(10)",
+          1
+        ],
+        [
+          "105fd0000 subject|i|match|last 20:GetPropThis(3, 24)",
+          1
+        ],
+        [
+          "105fd0000 subject|i|match|last 25:StrictEq",
+          1
+        ],
+        [
+          "105fd0000 subject|i|match|last 33:GetPropThis(3, 44)",
+          1
+        ],
+        [
+          "105fd0000 subject|i|match|last 37:GetElem",
+          1
+        ],
+        [
+          "105fd0000 subject|i|match|last 50:CallWithThis(1, 2)",
+          1
+        ],
+        [
+          "105fd0000 subject|i|match|last 81:Const(7)",
+          1
+        ],
+        [
+          "105fd0000 subject|i|match|last 85:GetPropThis(10, 112)",
+          1
+        ],
+        [
+          "106170000 last|ep 5:Pop",
+          1
+        ],
+        [
+          "106170000 last|ep 9:CallWithThis(0, 1)",
+          1
+        ],
+        [
+          "106170000 last|ep 22:Pop",
+          1
+        ],
+        [
+          "106170000 last|ep 36:CallWithThis(3, 2)",
+          1
+        ],
+        [
+          "106170000 last|ep 38:ReturnUndef",
+          1
+        ],
+        [
+          "1061f4000 last|ep 4:CallWithThis(0, 0)",
+          1
+        ],
+        [
+          "1061f4000 last|ep 35:Const(2)",
+          1
+        ],
+        [
+          "1061f4000 last|ep 36:CallWithThis(3, 2)",
+          1
+        ],
+        [
+          "1061f4000 last|ep 37:Pop",
+          1
+        ],
+        [
+          "1061f4000 last|ep 38:ReturnUndef",
+          1
+        ],
+        [
+          "106214000  3:CallWithThis(0, 0)",
+          1
+        ],
+        [
+          "106214000  7:LoadLexicalThis",
+          1
+        ],
+        [
+          "10627c000 _a|ilparser|(inline callee)|(inline this) 2:GetMethod(0, 0) _a|ilparser|(inline callee)|(inline",
+          1
+        ],
+        [
+          "10627c000 _a|ilparser|(inline callee)|(inline this) 4:StoreLocal(2) _a|ilparser|(inline callee)|(inline",
+          1
+        ],
+        [
+          "10627c000 _a|ilparser|(inline callee)|(inline this) 16:GetElem _a|ilparser|(inline callee)|(inline",
+          1
+        ],
+        [
+          "10627c000 _a|ilparser|(inline callee)|(inline this) 22:ResetSlots(2, 1) _a|ilparser|(inline callee)|(inline",
+          1
+        ],
+        [
+          "10627c000 _a|ilparser|(inline callee)|(inline this) 42:Undef _a|ilparser|(inline callee)|(inline",
+          1
+        ],
+        [
+          "10627c000 _a|ilparser|(inline callee)|(inline this) 46:GetMethod(4, 28) _a|ilparser|(inline callee)|(inline",
+          1
+        ],
+        [
+          "10627c000 _a|ilparser|(inline callee)|(inline this) 52:JumpIfFalse(93) _a|ilparser|(inline callee)|(inline",
+          1
+        ],
+        [
+          "10627c000 _a|ilparser|(inline callee)|(inline this) 58:GetPropLocal(4, 5, 32) _a|ilparser|(inline callee)|(inline",
+          1
+        ],
+        [
+          "10627c000 _a|ilparser|(inline callee)|(inline this) 63:GetPropLocal(5, 5, 36) _a|ilparser|(inline callee)|(inline",
+          1
+        ],
+        [
+          "10627c000 _a|ilparser|(inline callee)|(inline this) 65:StrictEq _a|ilparser|(inline callee)|(inline",
+          1
+        ],
+        [
+          "10627c000 _a|ilparser|(inline callee)|(inline this) 76:GetProp(2, 56) _a|ilparser|(inline callee)|(inline",
+          1
+        ],
+        [
+          "10627c000 _a|ilparser|(inline callee)|(inline this) 89:StoreLocal(4) _a|ilparser|(inline callee)|(inline",
+          1
+        ],
+        [
+          "106074000 subject|options 8:GetPropLocal(1, 1, 4)",
+          1
+        ],
+        [
+          "106074000 subject|options 9:JumpIfTruePeek(12)",
+          1
+        ],
+        [
+          "106074000 subject|options 40:ReturnUndef",
+          1
+        ],
+        [
+          "10627c000 _a|ilparser|(inline callee)|(inline this) 39:LoadLocal(1) _a|ilparser|(inline callee)|(inline",
+          1
+        ],
+        [
+          "105fcc000  [prologue]",
+          1
+        ],
+        [
+          "101918000 cp [prologue]",
+          1
+        ],
+        [
+          "101ad8000 subject|i 3:StoreLocal(0)",
+          1
+        ],
+        [
+          "101ad8000 subject|i 9:LoadLocal(1)",
+          1
+        ],
+        [
+          "101ad8000 subject|i 24:JumpIfFalsePeek(34)",
+          1
+        ],
+        [
+          "101ae0000 subject|newpos 3:StoreLocal(0)",
+          1
+        ],
+        [
+          "101ae0000 subject|newpos 4:GetPropThis(1, 4)",
+          1
+        ],
+        [
+          "101ae0000 subject|newpos 13:UpdateLocal(1, IncDiscard)",
+          1
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 37:GetProp(4, 16)",
+          1
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos 78:Const(10)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 0:LoadName(0, 0)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 2:LoadName(2, 1)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 11:JumpIfFalsePeek(19)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 14:GetProp(5, 12)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 32:GetElem",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 41:GetProp(1, 44)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 43:LoadName(0, 12)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 45:SetPropDrop(10, 52)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 48:CallWithThis(0, 0)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 49:Pop",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 53:SetPropDrop(12, 60)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 57:LoadName(0, 15)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 59:GetProp(4, 68)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 64:GetProp(13, 72)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 76:JumpIfFalse(81)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 79:SetPropDrop(12, 84)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 88:GetProp(10, 88)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 118:LoadName(0, 24)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 121:JumpIfFalse(424)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 128:CallWithThis(0, 5)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 129:Pop",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 131:GetProp(1, 128)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 138:LoadName(0, 28)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 142:GetElem",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 149:Not",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 152:GetPropLocal(5, 19, 144)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 154:GetProp(21, 148)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 165:GetMethod(23, 160)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 170:LoadLocal(6)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 174:Tdz(7)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 178:StoreLocal(8)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 179:IterStepL(8, 9)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 183:LoadLocal(5)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 200:LoadLocal(7)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 202:LoadLocal(7)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 206:LoadName(0, 36)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 207:GetMethod(16, 184)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 214:GetProp(13, 188)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 226:GetProp(10, 208)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 236:StoreLocal(4)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 243:GetPropLocal(7, 19, 224)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 253:PopHandler",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 261:LoadName(0, 46)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 263:Not",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 268:GetMethod(14, 236)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 269:CallWithThis(0, 10)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 271:LoadName(0, 48)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 277:LoadName(0, 50)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 278:GetMethod(16, 248)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 282:Not",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 283:JumpIfFalsePeek(287)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 286:Not",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 290:GetProp(12, 252)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 300:JumpIfFalsePeek(306)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 310:LoadName(0, 54)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 312:CallWithThis(0, 12)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 317:StoreLocal(11)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 322:GetPropLocal(11, 19, 280)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 327:LoadLocal(3)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 332:LoadName(0, 57)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 333:GetMethod(31, 288)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 340:Pop",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 343:GetProp(33, 300)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 354:JumpIfFalse(363)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 366:GetPropLocal(11, 19, 332)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 367:LoadName(20, 66)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 368:GetProp(39, 336)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 406:GetProp(29, 376)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 411:Not",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 417:GetMethod(40, 388)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 433:SetPropDrop(1, 408)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 443:LoadName(0, 80)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 447:Gt",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 454:GetProp(4, 436)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 458:LoadName(0, 84)",
+          1
+        ],
+        [
+          "105f60000 idx|container|tip|isBlank 465:LoadName(0, 86)",
+          1
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 4:GetPropThis(1, 4)",
+          1
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 8:JumpIfTruePeek(13)",
+          1
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 24:JumpIfFalse(27)",
+          1
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 26:SetPropThisDrop(2, 24)",
+          1
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 29:LoadLocal(3)",
+          1
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 30:LoadLocal(1)/31:Le/32:JumpIfFalse(437)/33:GetPropThis(3, 28)",
+          1
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 173:LoadLocal(14)",
+          1
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 189:GetMethod(9, 124)",
+          1
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 204:LoadLocal(2)",
+          1
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 205:GetMethod(19, 128)",
+          1
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 206:LoadLocal(3)",
+          1
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 222:LoadName(21, 3)",
+          1
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 228:StrictEq",
+          1
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 229:JumpIfFalse(277)",
+          1
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 233:JumpIfFalsePeek(243)",
+          1
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 266:GetMethod(9, 140)",
+          1
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 299:GetPropLocal(17, 12, 152)",
+          1
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 412:LoadLocal(20)",
+          1
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 417:StoreLocal(21)",
+          1
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos 420:StrictEq",
+          1
+        ],
+        [
+          "105fcc000  2:Const(0)",
+          1
+        ],
+        [
+          "105fcc000  11:Return",
+          1
+        ],
+        [
+          "106010000 cp 8:Return",
+          1
+        ],
+        [
+          "106014000 startpos|endpos|k|%for-in-base% 1:GetPropThis(0, 0)",
+          1
+        ],
+        [
+          "106014000 startpos|endpos|k|%for-in-base% 13:GetPropThis(0, 4)",
+          1
+        ],
+        [
+          "106014000 startpos|endpos|k|%for-in-base% 22:LoadLocal(7)",
+          1
+        ],
+        [
+          "106014000 startpos|endpos|k|%for-in-base% 23:GetElem",
+          1
+        ],
+        [
+          "106014000 startpos|endpos|k|%for-in-base% 42:Const(2)",
+          1
+        ],
+        [
+          "106020000 self|pos|endpos|subject 64:CallWithThis(1, 5)",
+          1
+        ],
+        [
+          "106020000 self|pos|endpos|subject 65:LoadName(3, 5)",
+          1
+        ],
+        [
+          "10602c000 s|startpos|endpos|result [prologue]",
+          1
+        ],
+        [
+          "10602c000 s|startpos|endpos|result 5:GetMethod(2, 4)",
+          1
+        ],
+        [
+          "10602c000 s|startpos|endpos|result 6:LoadLocal(0)",
+          1
+        ],
+        [
+          "10602c000 s|startpos|endpos|result 15:JumpIfFalse(19)",
+          1
+        ],
+        [
+          "10602c000 s|startpos|endpos|result 16:GetPropLocal(3, 3, 12)",
+          1
+        ],
+        [
+          "1061b0000 lastMatched|tip|(inline callee)|(inline this) 2:GetPropThis(0, 0) lastMatched|tip|(inline callee)|(inline",
+          1
+        ],
+        [
+          "1061b0000 lastMatched|tip|(inline callee)|(inline this) 3:StoreLocal(0) lastMatched|tip|(inline callee)|(inline",
+          1
+        ],
+        [
+          "1061b0000 lastMatched|tip|(inline callee)|(inline this) 5:GetMethod(1, 4) lastMatched|tip|(inline callee)|(inline",
+          1
+        ],
+        [
+          "1061b0000 lastMatched|tip|(inline callee)|(inline this) 11:Const(0) lastMatched|tip|(inline callee)|(inline",
+          1
+        ],
+        [
+          "1061b0000 lastMatched|tip|(inline callee)|(inline this) 25:ResetSlots(2, 1) lastMatched|tip|(inline callee)|(inline",
+          1
+        ],
+        [
+          "1061b0000 lastMatched|tip|(inline callee)|(inline this) 30:JumpIfFalsePeek(38) lastMatched|tip|(inline callee)|(inline",
+          1
+        ],
+        [
+          "1061b0000 lastMatched|tip|(inline callee)|(inline this) 38:JumpIfFalse(69) lastMatched|tip|(inline callee)|(inline",
+          1
+        ],
+        [
+          "1061b0000 lastMatched|tip|(inline callee)|(inline this) 49:GetProp(3, 48) lastMatched|tip|(inline callee)|(inline",
+          1
+        ],
+        [
+          "1061b0000 lastMatched|tip|(inline callee)|(inline this) 65:Jump(67) lastMatched|tip|(inline callee)|(inline",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 7:Tdz(10)",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 10:GetPropLocal(0, 0, 0)",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 52:CallWithThis(1, 2)",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 55:Const(4)",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 57:JumpIfFalse(112)/58:Tdz(19)",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 65:GetProp(8, 24)",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 67:Gt",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 96:GetPropLocal(18, 7, 48)",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 98:GetElem",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 101:GetPropLocal(18, 7, 52)",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 122:LoadLocal(0)",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 141:GetProp(8, 68)",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 142:Const(18)",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 144:GetElem",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 158:JumpIfFalsePeek(168)",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 163:Const(21)/164:Add/165:CallWithThis(1, 7)",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 188:JumpIfFalse(197)",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 234:GetPropLocal(0, 25, 96)",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 241:LoadLocal(12)",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 244:GetPropLocal(12, 8, 100)",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 245:Const(31)",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 253:GetElem",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 268:GetMethod(27, 120)",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 284:CallWithThis(3, 14)",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 290:LoadLocal(4)",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 302:GetMethod(30, 140)",
+          1
+        ],
+        [
+          "106264000 self|pos|endpos|subject 306:LoadName(18, 16)",
+          1
+        ],
+        [
+          "106284000 name|startpos|endpos|defaultAnnot 0:GetPropThis(0, 0)",
+          1
+        ],
+        [
+          "106284000 name|startpos|endpos|defaultAnnot 23:CallWithThis(1, 0)",
+          1
+        ],
+        [
+          "106284000 name|startpos|endpos|defaultAnnot 26:GetMethod(11, 32)",
+          1
+        ],
+        [
+          "106284000 name|startpos|endpos|defaultAnnot 30:InlineGuard(0, 64)",
+          1
+        ],
+        [
+          "106284000 name|startpos|endpos|defaultAnnot 58:LoadLocal(10)",
+          1
+        ],
+        [
+          "10628c000 self|pos|endpos|subject 27:GetMethod(5, 12)",
+          1
+        ],
+        [
+          "10628c000 self|pos|endpos|subject 120:Const(17)",
+          1
+        ],
+        [
+          "106298000 pos|(inline callee)|startpos|endpos 11:StoreLocal(1) pos|(inline",
+          1
+        ],
+        [
+          "1062ac000 self|pos|endpos|subject 111:StrictEq",
+          1
+        ],
+        [
+          "1062ac000 self|pos|endpos|subject 121:LoadLocal(3)",
+          1
+        ],
+        [
+          "1062ac000 self|pos|endpos|subject 136:SetPropLocalDrop(18, 4, 64)",
+          1
+        ],
+        [
+          "1062ac000 self|pos|endpos|subject 161:StrictNotEq",
+          1
+        ],
+        [
+          "1062ac000 self|pos|endpos|subject 263:Const(35)/264:Sub/265:Call(3, 14)",
+          1
+        ],
+        [
+          "1062ac000 self|pos|endpos|subject 283:LoadLocal(0)",
+          1
+        ],
+        [
+          "106000000 s|base|i|ident 7:CallWithThis(2, 0)",
+          1
+        ],
+        [
+          "106000000 s|base|i|ident 9:CallWithThis(0, 1)",
+          1
+        ],
+        [
+          "105fc0000 container|k|%for-in-base%|%for-in-keys% 0:LoadName(0, 0)",
+          1
+        ],
+        [
+          "105fc0000 container|k|%for-in-base%|%for-in-keys% 4:GetProp(3, 4)",
+          1
+        ],
+        [
+          "105fc0000 container|k|%for-in-base%|%for-in-keys% 1:GetMethod(1, 0)",
+          1
+        ],
+        [
+          "10607c000 pos|node 13:JumpIfFalsePeek(16)",
+          1
+        ],
+        [
+          "106054000  0:LoadName(0, 0)",
+          1
+        ],
+        [
+          "106054000  17:ReturnUndef",
+          1
+        ],
+        [
+          "105fe4000 suffixes|startpos|endpos|pos 34:GetPropLocal(6, 5, 32)",
+          1
+        ],
+        [
+          "105fe4000 suffixes|startpos|endpos|pos 40:CallWithThis(1, 4)",
+          1
+        ],
+        [
+          "105fe4000 suffixes|startpos|endpos|pos 105:StrictNotEq",
+          1
+        ],
+        [
+          "105fe4000 suffixes|startpos|endpos|pos 108:GetPropLocal(9, 15, 72)",
+          1
+        ],
+        [
+          "105fe4000 suffixes|startpos|endpos|pos 109:GetProp(16, 76)",
+          1
+        ],
+        [
+          "105fe4000 suffixes|startpos|endpos|pos 133:CallWithThis(1, 9)",
+          1
+        ],
+        [
+          "105fe4000 suffixes|startpos|endpos|pos 146:JumpIfFalse(154)",
+          1
+        ],
+        [
+          "105fe4000 suffixes|startpos|endpos|pos 154:GetPropLocal(6, 3, 144)",
+          1
+        ],
+        [
+          "106040000 child|tip 8:GetProp(1, 4)",
+          1
+        ],
+        [
+          "106040000 child|tip 14:GetMethod(3, 12)",
+          1
+        ],
+        [
+          "106040000 child|tip 17:Pop",
+          1
+        ],
+        [
+          "106058000 pos|container 1:MakeArray(0)",
+          1
+        ],
+        [
+          "106058000 pos|container 10:Pop",
+          1
+        ],
+        [
+          "106058000 pos|container 15:Pop",
+          1
+        ],
+        [
+          "10607c000 pos|node 0:Tdz(1)",
+          1
+        ],
+        [
+          "10607c000 pos|node 3:CallWithThis(0, 0)",
+          1
+        ],
+        [
+          "10607c000 pos|node 25:ReturnUndef",
+          1
+        ],
+        [
+          "106080000 suffixes|startpos|endpos|pos 0:Tdz(4)",
+          1
+        ],
+        [
+          "106080000 suffixes|startpos|endpos|pos 1:LoadName(0, 0)",
+          1
+        ],
+        [
+          "106080000 suffixes|startpos|endpos|pos 8:StoreLocal(4)",
+          1
+        ],
+        [
+          "106080000 suffixes|startpos|endpos|pos 9:LoadName(2, 1)",
+          1
+        ],
+        [
+          "106080000 suffixes|startpos|endpos|pos 10:LoadName(3, 2)",
+          1
+        ],
+        [
+          "10616c000 suffixes|startpos|endpos|pos [prologue]",
+          1
+        ],
+        [
+          "106174000 suffixes|startpos|endpos|pos [prologue]",
+          1
+        ],
+        [
+          "106174000 suffixes|startpos|endpos|pos 0:Tdz(4)",
+          1
+        ],
+        [
+          "106174000 suffixes|startpos|endpos|pos 1:LoadNameForCall(0, 0)",
+          1
+        ],
+        [
+          "106174000 suffixes|startpos|endpos|pos 3:CallWithThis(1, 0)",
+          1
+        ],
+        [
+          "106174000 suffixes|startpos|endpos|pos 11:CallWithThis(1, 1)",
+          1
+        ],
+        [
+          "106184000 suffixes|startpos|endpos|pos 2:CallWithThis(1, 0)",
+          1
+        ],
+        [
+          "106184000 suffixes|startpos|endpos|pos 4:ReturnUndef",
+          1
+        ],
+        [
+          "106188000 suffixes|startpos|endpos|pos 5:LoadNameForCall(1, 1)",
+          1
+        ],
+        [
+          "106188000 suffixes|startpos|endpos|pos 8:GetPropLocal(4, 3, 4)",
+          1
+        ],
+        [
+          "106188000 suffixes|startpos|endpos|pos 10:CallWithThis(1, 1)",
+          1
+        ],
+        [
+          "106188000 suffixes|startpos|endpos|pos 11:Pop",
+          1
+        ],
+        [
+          "10618c000 suffixes|startpos|endpos|pos 0:GetPropLocal(0, 0, 0)",
+          1
+        ],
+        [
+          "10618c000 suffixes|startpos|endpos|pos 5:GetProp(0, 12)",
+          1
+        ],
+        [
+          "10618c000 suffixes|startpos|endpos|pos 16:GetProp(4, 28)",
+          1
+        ],
+        [
+          "10618c000 suffixes|startpos|endpos|pos 17:Not",
+          1
+        ],
+        [
+          "10618c000 suffixes|startpos|endpos|pos 30:LoadNameForCall(7, 5)",
+          1
+        ],
+        [
+          "10618c000 suffixes|startpos|endpos|pos 31:LoadLocal(3)",
+          1
+        ],
+        [
+          "10618c000 suffixes|startpos|endpos|pos 32:CallWithThis(1, 5)",
+          1
+        ],
+        [
+          "10618c000 suffixes|startpos|endpos|pos 36:StrictEq",
+          1
+        ],
+        [
+          "10618c000 suffixes|startpos|endpos|pos 40:GetElemLocal(0)",
+          1
+        ],
+        [
+          "10618c000 suffixes|startpos|endpos|pos 49:ReturnUndef",
+          1
+        ],
+        [
+          "106198000 suffixes|startpos|endpos|pos 4:LoadNameForCall(0, 0)",
+          1
+        ],
+        [
+          "106198000 suffixes|startpos|endpos|pos 14:GetProp(4, 4)",
+          1
+        ],
+        [
+          "106198000 suffixes|startpos|endpos|pos 20:LoadName(3, 3)",
+          1
+        ],
+        [
+          "106198000 suffixes|startpos|endpos|pos 25:GetElem",
+          1
+        ],
+        [
+          "106198000 suffixes|startpos|endpos|pos 31:GetProp(4, 16)",
+          1
+        ],
+        [
+          "106198000 suffixes|startpos|endpos|pos 37:JumpIfFalse(41)",
+          1
+        ],
+        [
+          "1061a4000 suffixes|startpos|endpos|pos 6:GetProp(2, 4)",
+          1
+        ],
+        [
+          "1061a4000 suffixes|startpos|endpos|pos 86:LoadNameForCall(10, 4)",
+          1
+        ],
+        [
+          "1061a4000 suffixes|startpos|endpos|pos 88:GetPropLocal(4, 3, 100)",
+          1
+        ],
+        [
+          "1061f8000 node|buffer 13:ReturnUndef",
+          1
+        ],
+        [
+          "106200000 suffixes|startpos|endpos|pos 6:GetProp(2, 0)",
+          1
+        ],
+        [
+          "106200000 suffixes|startpos|endpos|pos 9:LoadNameForCall(1, 2)",
+          1
+        ],
+        [
+          "106200000 suffixes|startpos|endpos|pos 13:SetPropDrop(4, 12)",
+          1
+        ],
+        [
+          "106218000 suffixes|startpos|endpos|pos 0:Tdz(4)",
+          1
+        ],
+        [
+          "106218000 suffixes|startpos|endpos|pos 8:GetProp(2, 4)",
+          1
+        ],
+        [
+          "106218000 suffixes|startpos|endpos|pos 10:GetElem",
+          1
+        ],
+        [
+          "106218000 suffixes|startpos|endpos|pos 72:GetProp(16, 60)",
+          1
+        ],
+        [
+          "106224000 marker|style|numtype|s 10:MakeRegExp(1, 2)",
+          1
+        ],
+        [
+          "10622c000 suffixes|startpos|endpos|pos 2:CallWithThis(1, 0)",
+          1
+        ],
+        [
+          "106234000 suffixes|startpos|endpos|pos 9:CallWithThis(1, 1)",
+          1
+        ],
+        [
+          "10623c000 suffixes|startpos|endpos|pos 0:Tdz(4)",
+          1
+        ],
+        [
+          "1061d0000 subject|options 13:StrictNotEq",
+          1
+        ],
+        [
+          "1061d0000 subject|options 36:Const(6)",
+          1
+        ],
+        [
+          "1061d0000 subject|options 47:SetPropThisDrop(13, 60)",
+          1
+        ],
+        [
+          "1061d0000 subject|options 129:GetProp(17, 144)",
+          1
+        ],
+        [
+          "1061d0000 subject|options 136:GetProp(17, 148)",
+          1
+        ],
+        [
+          "101ac8000 input|options|parser|handleEvent 2:StrictEq",
+          1
+        ],
+        [
+          "101ac8000 input|options|parser|handleEvent 63:LoadCap(3)",
+          1
+        ],
+        [
+          "101ac8000 input|options|parser|handleEvent 166:MakeClosure(88, 106)",
+          1
+        ],
+        [
+          "101ac8000 input|options|parser|handleEvent 214:StoreLocal(9)",
+          1
+        ],
+        [
+          "101ac8000 input|options|parser|handleEvent 218:LoadLocal(9)",
+          1
+        ],
+        [
+          "101ac8000 input|options|parser|handleEvent 278:StoreLocal(7)",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 2:Tdz(4)",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 9:StoreLocal(3)",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 10:Undef",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 11:StoreLocal(4)",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 14:JumpIfFalse(27)",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 28:StoreLocal(5)",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 29:MakeArray(0)",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 30:StoreLocal(6)",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 38:GetMethod(9, 28)",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 40:CallWithThis(1, 3)",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 51:LoadName(11, 3)",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 66:StoreLocal(10)",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 69:GetPropLocal(10, 13, 36)",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 81:Ge",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 82:JumpIfFalsePeek(91)",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 85:GetPropLocal(0, 15, 48)",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 88:GetElemLocal(0)",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 96:StoreLocal(9)",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 100:GetMethod(18, 60)",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 103:Not",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 104:JumpIfFalsePeek(108)",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 106:GetPropLocal(9, 13, 64)",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 116:Not",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 117:JumpIfFalse(121)",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 123:GetElem",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 124:StoreLocal(7)",
+          1
+        ],
+        [
+          "106030000 containers2|event|sp|ep 129:GetPropLocal(1, 3, 92)",
+          1
+        ],
+        [
+          "106054000  7:GetProp(1, 4)",
+          1
+        ],
+        [
+          "106054000  11:Return",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 18:LoadLocal(2)",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 19:Const(3)",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 30:StrictEq",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 35:StrictEq",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 65:StrictEq",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 75:StrictEq",
+          1
+        ],
+        [
+          "1060f4000 s 4:JumpIfFalse(20)",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 8:LoadLocal(2)",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 10:StrictEq",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 20:StrictEq",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 28:LoadLocal(2)",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 70:StrictEq",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 120:StrictEq",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 140:StrictEq",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 159:Const(31)",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 268:CallWithThis(1, 2)",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 824:CallWithThis(2, 46)",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 828:LoadThis",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 830:GetPropLocal(0, 21, 388)",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 836:GetMethod(8, 392)",
+          1
+        ],
+        [
+          "1060f0000 tag|node|extraAttrs|attributes 4:JumpIfTruePeek(7)",
+          1
+        ],
+        [
+          "1060f4000 s 0:LoadName(0, 0)",
+          1
+        ],
+        [
+          "106254000 tag|node|newlines|extraAttrs 66:ToStr",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 1:StoreLocal(2)",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 78:LoadLocal(2)",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 105:StrictEq",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 108:LoadLocal(2)",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 109:Const(21)",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 110:StrictEq",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 124:Const(24)",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 190:StrictEq",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 304:GetMethod(6, 44)",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 645:GetPropLocal(0, 35, 260)",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 1092:GetMethod(6, 584)",
+          1
+        ],
+        [
+          "1061c4000 node|result|oldtight|child 57:LoadLocal(8)",
+          1
+        ],
+        [
+          "1061c4000 node|result|oldtight|child 64:Jump(66)",
+          1
+        ],
+        [
+          "106254000 tag|node|newlines|extraAttrs 1:Tdz(5)",
+          1
+        ],
+        [
+          "106254000 tag|node|newlines|extraAttrs 20:GetMethod(0, 0)",
+          1
+        ],
+        [
+          "106254000 tag|node|newlines|extraAttrs 43:JumpIfFalse(50)",
+          1
+        ],
+        [
+          "106254000 tag|node|newlines|extraAttrs 53:Add",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 33:LoadLocal(2)",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 45:StrictEq",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 276:GetMethod(6, 28)",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 427:GetPropLocal(0, 20, 136)",
+          1
+        ],
+        [
+          "1061c4000 node|result|oldtight|child 3:StoreLocal(1)",
+          1
+        ],
+        [
+          "1061c4000 node|result|oldtight|child 13:SetPropThisDrop(0, 8)",
+          1
+        ],
+        [
+          "1061c4000 node|result|oldtight|child 33:GetPropLocal(8, 4, 20)",
+          1
+        ],
+        [
+          "1061c4000 node|result|oldtight|child 40:Pop",
+          1
+        ],
+        [
+          "106254000 tag|node|newlines|extraAttrs 31:Const(7)",
+          1
+        ],
+        [
+          "106254000 tag|node|newlines|extraAttrs 42:GetPropLocal(8, 3, 12)",
+          1
+        ],
+        [
+          "10629c000 node|extraAttrs|result|attributes 3:StoreLocal(2)",
+          1
+        ],
+        [
+          "10629c000 node|extraAttrs|result|attributes 89:GetPropLocal(0, 0, 40)",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 297:GetMethod(6, 40)",
+          1
+        ],
+        [
+          "106254000 tag|node|newlines|extraAttrs 33:GetPropLocal(8, 1, 4)",
+          1
+        ],
+        [
+          "106254000 tag|node|newlines|extraAttrs 50:Const(8)",
+          1
+        ],
+        [
+          "106254000 tag|node|newlines|extraAttrs 94:ReturnUndef",
+          1
+        ],
+        [
+          "106084000 node|_a|%switch%|result 244:GetMethod(1, 4)",
+          1
+        ],
+        [
+          "1061c4000 node|result|oldtight|child 36:StoreLocal(9)",
+          1
+        ],
+        [
+          "106244000 options 0:Const(0)",
+          1
+        ],
+        [
+          "106244000 options 15:JumpIfTruePeek(18)",
+          1
+        ],
+        [
+          "1062c4000 doc|(inline callee)|node|(inline this) 5:GetMethod(2, 16) doc|(inline callee)|node|(inline",
+          1
+        ]
+      ],
+      "exclusive_unknown_chunks": [
+        [
+          "105f60000 idx|container|tip|isBlank",
+          238
+        ],
+        [
+          "106030000 containers2|event|sp|ep",
+          84
+        ],
+        [
+          "106084000 node|_a|%switch%|result",
+          69
+        ],
+        [
+          "105fa0000 startpos|endpos|subject|pos",
+          55
+        ],
+        [
+          "106258000 container|skipCloseUnmatched|tip|(inline callee)",
+          52
+        ],
+        [
+          "101ae4000 subject|patt|startpos|endpos",
+          46
+        ],
+        [
+          "106004000 patt",
+          44
+        ],
+        [
+          "101ad8000 subject|i",
+          38
+        ],
+        [
+          "106264000 self|pos|endpos|subject",
+          36
+        ],
+        [
+          "106068000 spec|extra",
+          29
+        ],
+        [
+          "10605c000 container|m|marker|mtask",
+          27
+        ],
+        [
+          "106074000 subject|options",
+          25
+        ],
+        [
+          "10627c000 _a|ilparser|(inline callee)|(inline this)",
+          24
+        ],
+        [
+          "101ac8000 input|options|parser|handleEvent",
+          21
+        ],
+        [
+          "1061c4000 node|result|oldtight|child",
+          21
+        ],
+        [
+          "106170000 last|ep",
+          20
+        ],
+        [
+          "101ae0000 subject|newpos",
+          20
+        ],
+        [
+          "106040000 child|tip",
+          20
+        ],
+        [
+          "106254000 tag|node|newlines|extraAttrs",
+          19
+        ],
+        [
+          "106054000 ",
+          18
+        ],
+        [
+          "105fcc000 ",
+          16
+        ],
+        [
+          "10618c000 suffixes|startpos|endpos|pos",
+          16
+        ],
+        [
+          "1061b0000 lastMatched|tip|(inline callee)|(inline this)",
+          15
+        ],
+        [
+          "10607c000 pos|node",
+          15
+        ],
+        [
+          "106044000 spec|m|sp|ep",
+          14
+        ],
+        [
+          "106168000 spec",
+          14
+        ],
+        [
+          "106198000 suffixes|startpos|endpos|pos",
+          14
+        ],
+        [
+          "105fd0000 subject|i|match|last",
+          13
+        ],
+        [
+          "10602c000 s|startpos|endpos|result",
+          13
+        ],
+        [
+          "1060fc000 spec|m|level",
+          12
+        ],
+        [
+          "106080000 suffixes|startpos|endpos|pos",
+          12
+        ],
+        [
+          "106008000 spec|m|sp|ep",
+          10
+        ],
+        [
+          "106058000 pos|container",
+          10
+        ],
+        [
+          "1061a0000 ",
+          8
+        ],
+        [
+          "105fe4000 suffixes|startpos|endpos|pos",
+          8
+        ],
+        [
+          "106050000 startpos|endpos|annot",
+          7
+        ],
+        [
+          "101918000 cp",
+          7
+        ],
+        [
+          "10601c000 startpos|endpos|annot|matchIndex",
+          7
+        ],
+        [
+          "106174000 suffixes|startpos|endpos|pos",
+          7
+        ],
+        [
+          "106124000 spec|m|label|value",
+          6
+        ],
+        [
+          "10628c000 self|pos|endpos|subject",
+          6
+        ],
+        [
+          "1062ac000 self|pos|endpos|subject",
+          6
+        ],
+        [
+          "106188000 suffixes|startpos|endpos|pos",
+          6
+        ],
+        [
+          "106130000 marker",
+          5
+        ],
+        [
+          "1061f4000 last|ep",
+          5
+        ],
+        [
+          "106014000 startpos|endpos|k|%for-in-base%",
+          5
+        ],
+        [
+          "106284000 name|startpos|endpos|defaultAnnot",
+          5
+        ],
+        [
+          "10616c000 suffixes|startpos|endpos|pos",
+          5
+        ],
+        [
+          "1061a4000 suffixes|startpos|endpos|pos",
+          5
+        ],
+        [
+          "106200000 suffixes|startpos|endpos|pos",
+          5
+        ],
+        [
+          "1061d0000 subject|options",
+          5
+        ],
+        [
+          "106218000 suffixes|startpos|endpos|pos",
+          4
+        ],
+        [
+          "106244000 options",
+          4
+        ],
+        [
+          "1060f8000 spec",
+          3
+        ],
+        [
+          "106118000 spec|m",
+          3
+        ],
+        [
+          "10611c000 spec|m|sp|ep",
+          3
+        ],
+        [
+          "106144000 spec|attributeParser|res|container",
+          3
+        ],
+        [
+          "106150000 spec|m|colons|m2",
+          3
+        ],
+        [
+          "10615c000 spec|m|border|ws",
+          3
+        ],
+        [
+          "106194000 container",
+          3
+        ],
+        [
+          "1061c0000 container",
+          3
+        ],
+        [
+          "106010000 cp",
+          3
+        ],
+        [
+          "105fc0000 container|k|%for-in-base%|%for-in-keys%",
+          3
+        ],
+        [
+          "10623c000 suffixes|startpos|endpos|pos",
+          3
+        ],
+        [
+          "10612c000 spec|m",
+          2
+        ],
+        [
+          "10613c000 spec|m|rawrow",
+          2
+        ],
+        [
+          "1061ec000 container|m",
+          2
+        ],
+        [
+          "106214000 ",
+          2
+        ],
+        [
+          "106020000 self|pos|endpos|subject",
+          2
+        ],
+        [
+          "106000000 s|base|i|ident",
+          2
+        ],
+        [
+          "105ffc000 node|buffer|child|%iter%",
+          2
+        ],
+        [
+          "106184000 suffixes|startpos|endpos|pos",
+          2
+        ],
+        [
+          "1061e8000 suffixes|startpos|endpos|pos",
+          2
+        ],
+        [
+          "1060f4000 s",
+          2
+        ],
+        [
+          "10629c000 node|extraAttrs|result|attributes",
+          2
+        ],
+        [
+          "101900000 __toESM|__commonJS|require_lib|import_djot",
+          2
+        ],
+        [
+          "106298000 pos|(inline callee)|startpos|endpos",
+          1
+        ],
+        [
+          "1061f8000 node|buffer",
+          1
+        ],
+        [
+          "106224000 marker|style|numtype|s",
+          1
+        ],
+        [
+          "10622c000 suffixes|startpos|endpos|pos",
+          1
+        ],
+        [
+          "106234000 suffixes|startpos|endpos|pos",
+          1
+        ],
+        [
+          "1060f0000 tag|node|extraAttrs|attributes",
+          1
+        ],
+        [
+          "1062c4000 doc|(inline callee)|node|(inline this)",
+          1
+        ]
+      ],
+      "exclusive_unknown_families": [
+        [
+          "CallWithThis",
+          177
+        ],
+        [
+          "GetPropLocal",
+          111
+        ],
+        [
+          "GetProp",
+          98
+        ],
+        [
+          "ReturnUndef",
+          98
+        ],
+        [
+          "GetMethod",
+          93
+        ],
+        [
+          "LoadName",
+          68
+        ],
+        [
+          "LoadLocal",
+          63
+        ],
+        [
+          "StoreLocal",
+          51
+        ],
+        [
+          "[prologue]",
+          44
+        ],
+        [
+          "StrictEq",
+          42
+        ],
+        [
+          "SetPropThisDrop",
+          36
+        ],
+        [
+          "JumpIfFalse",
+          33
+        ],
+        [
+          "GetPropThis",
+          31
+        ],
+        [
+          "GetElem",
+          31
+        ],
+        [
+          "Const",
+          27
+        ],
+        [
+          "SetPropDrop",
+          27
+        ],
+        [
+          "Call",
+          26
+        ],
+        [
+          "Pop",
+          20
+        ],
+        [
+          "JumpIfFalsePeek",
+          20
+        ],
+        [
+          "Tdz",
+          19
+        ],
+        [
+          "Not",
+          16
+        ],
+        [
+          "StrictNotEq",
+          15
+        ],
+        [
+          "LoadNameForCall",
+          14
+        ],
+        [
+          "Jump",
+          9
+        ],
+        [
+          "JumpIfTruePeek",
+          8
+        ],
+        [
+          "PopHandler",
+          8
+        ],
+        [
+          "SetPropLocalDrop",
+          7
+        ],
+        [
+          "StrictEq _a|ilparser|",
+          5
+        ],
+        [
+          "Gt",
+          5
+        ],
+        [
+          "Return",
+          5
+        ],
+        [
+          "InlineGuard",
+          4
+        ],
+        [
+          "ResetSlots",
+          4
+        ],
+        [
+          "LoadLexicalThis",
+          3
+        ],
+        [
+          "MakeArray",
+          3
+        ],
+        [
+          "Const/Add/CallWithThis",
+          3
+        ],
+        [
+          "JumpIfFalse/LoadName",
+          3
+        ],
+        [
+          "Add",
+          3
+        ],
+        [
+          "LoadThis container|skipCloseUnmatched|tip|",
+          2
+        ],
+        [
+          "GetElem container|skipCloseUnmatched|tip|",
+          2
+        ],
+        [
+          "JumpIfFalse/Tdz",
+          2
+        ],
+        [
+          "PushHandler",
+          2
+        ],
+        [
+          "GetElem lastMatched|tip|",
+          2
+        ],
+        [
+          "GetElemLocal",
+          2
+        ],
+        [
+          "Sub",
+          2
+        ],
+        [
+          "GetIter",
+          1
+        ],
+        [
+          "Gt container|skipCloseUnmatched|tip|",
+          1
+        ],
+        [
+          "Pop container|skipCloseUnmatched|tip|",
+          1
+        ],
+        [
+          "GetElem _a|ilparser|",
+          1
+        ],
+        [
+          "Undef _a|ilparser|",
+          1
+        ],
+        [
+          "UpdateLocal",
+          1
+        ],
+        [
+          "IterStepL",
+          1
+        ],
+        [
+          "LoadLocal/Le/JumpIfFalse/GetPropThis",
+          1
+        ],
+        [
+          "Const/Sub/Call",
+          1
+        ],
+        [
+          "MakeRegExp",
+          1
+        ],
+        [
+          "LoadCap",
+          1
+        ],
+        [
+          "MakeClosure",
+          1
+        ],
+        [
+          "Undef",
+          1
+        ],
+        [
+          "Ge",
+          1
+        ],
+        [
+          "LoadThis",
+          1
+        ],
+        [
+          "ToStr",
+          1
+        ]
+      ],
+      "helper_ancestry_callers": {
+        "destruction": [
+          [
+            "105f60000 idx|container|tip|isBlank 48:CallWithThis(0, 0)",
+            157
+          ],
+          [
+            "101ac8000 input|options|parser|handleEvent 212:IterStepL(10, 11)",
+            46
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 203:CallWithThis(1, 7)",
+            21
+          ],
+          [
+            "106004000 patt 9:ReturnUndef",
+            18
+          ],
+          [
+            "106030000 containers2|event|sp|ep 132:Call(4, 8)",
+            17
+          ],
+          [
+            "1061c4000 node|result|oldtight|child 19:IterStepL(4, 5)",
+            17
+          ],
+          [
+            "105fa0000 startpos|endpos|subject|pos 439:ReturnUndef",
+            16
+          ],
+          [
+            "101ae4000 subject|patt|startpos|endpos 24:CallWithThis(1, 1)",
+            13
+          ],
+          [
+            "106258000 container|skipCloseUnmatched|tip|(inline callee) 50:CallWithThis(0, 2) container|skipCloseUnmatched|tip|(inline",
+            10
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 179:IterStepL(8, 9)",
+            9
+          ],
+          [
+            "106030000 containers2|event|sp|ep 102:CallWithThis(1, 6)",
+            8
+          ],
+          [
+            "106030000 containers2|event|sp|ep 34:CallWithThis(1, 2)",
+            7
+          ],
+          [
+            "1060f4000 s 3:CallWithThis(1, 0)",
+            7
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 75:CallWithThis(1, 2)",
+            6
+          ],
+          [
+            "106254000 tag|node|newlines|extraAttrs 94:ReturnUndef",
+            6
+          ],
+          [
+            "10627c000 _a|ilparser|(inline callee)|(inline this) 51:IterStepL(6, 7) _a|ilparser|(inline callee)|(inline",
+            5
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 361:New(2, 1)",
+            5
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 362:SetPropLocalDrop(11, 38, 328)",
+            5
+          ],
+          [
+            "106030000 containers2|event|sp|ep 115:CallWithThis(1, 7)",
+            5
+          ],
+          [
+            "106030000 containers2|event|sp|ep 74:GenBin(14)",
+            5
+          ],
+          [
+            "1061c4000 node|result|oldtight|child 60:CallWithThis(1, 2)",
+            5
+          ],
+          [
+            "106084000 node|_a|%switch%|result 1149:ReturnUndef",
+            5
+          ],
+          [
+            "1061b0000 lastMatched|tip|(inline callee)|(inline this) 41:CallWithThis(0, 1) lastMatched|tip|(inline callee)|(inline",
+            4
+          ],
+          [
+            "10601c000 startpos|endpos|annot|matchIndex 15:CallWithThis(3, 0)",
+            4
+          ],
+          [
+            "106224000 marker|style|numtype|s 6:CallWithThis(2, 0)",
+            4
+          ]
+        ],
+        "name_path": [
+          [
+            "101ad8000 subject|i 6:LoadNameForCall(2, 0)",
+            17
+          ],
+          [
+            "106050000 startpos|endpos|annot 2:LoadName(2, 0)",
+            11
+          ],
+          [
+            "106004000 patt 2:LoadName(0, 0)",
+            11
+          ],
+          [
+            "101ac8000 input|options|parser|handleEvent 212:IterStepL(10, 11)",
+            9
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 0:LoadName(0, 0)",
+            6
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 2:LoadName(2, 1)",
+            5
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 15:LoadName(0, 4)",
+            5
+          ],
+          [
+            "106050000 startpos|endpos|annot 7:LoadName(2, 1)",
+            4
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 13:LoadName(0, 3)",
+            4
+          ],
+          [
+            "105fa0000 startpos|endpos|subject|pos 222:LoadName(21, 3)",
+            4
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 28:LoadName(0, 8)",
+            4
+          ],
+          [
+            "105fc0000 container|k|%for-in-base%|%for-in-keys% 0:LoadName(0, 0)",
+            4
+          ],
+          [
+            "106044000 spec|m|sp|ep 62:LoadNameForCall(7, 2)",
+            3
+          ],
+          [
+            "106168000 spec 2:LoadName(1, 0)",
+            3
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 188:LoadName(20, 35)",
+            3
+          ],
+          [
+            "101ae0000 subject|newpos 6:LoadNameForCall(2, 0)",
+            3
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 43:LoadName(0, 12)",
+            3
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 140:LoadName(0, 29)",
+            3
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 310:LoadName(0, 54)",
+            3
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 457:LoadName(0, 83)",
+            3
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 458:LoadName(0, 84)",
+            3
+          ],
+          [
+            "105fa0000 startpos|endpos|subject|pos 231:LoadName(21, 5)",
+            3
+          ],
+          [
+            "106074000 subject|options 38:LoadName(14, 0)",
+            2
+          ],
+          [
+            "10611c000 spec|m|sp|ep 3:LoadName(1, 0)",
+            2
+          ],
+          [
+            "106044000 spec|m|sp|ep 11:LoadName(1, 0)",
+            2
+          ]
+        ],
+        "dispatch": [
+          [
+            "101ac8000 input|options|parser|handleEvent 212:IterStepL(10, 11)",
+            911
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 48:CallWithThis(0, 0)",
+            702
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 203:CallWithThis(1, 7)",
+            377
+          ],
+          [
+            "106030000 containers2|event|sp|ep 132:Call(4, 8)",
+            273
+          ],
+          [
+            "101900000 __toESM|__commonJS|require_lib|import_djot 108:Call(1, 16)",
+            246
+          ],
+          [
+            "1061c4000 node|result|oldtight|child 60:CallWithThis(1, 2)",
+            213
+          ],
+          [
+            "101ae4000 subject|patt|startpos|endpos 24:CallWithThis(1, 1)",
+            208
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 347:CallWithThis(1, 15)",
+            192
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 75:CallWithThis(1, 2)",
+            100
+          ],
+          [
+            "1061c4000 node|result|oldtight|child 19:IterStepL(4, 5)",
+            94
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 179:IterStepL(8, 9)",
+            87
+          ],
+          [
+            "1061b0000 lastMatched|tip|(inline callee)|(inline this) 41:CallWithThis(0, 1) lastMatched|tip|(inline callee)|(inline",
+            80
+          ],
+          [
+            "106030000 containers2|event|sp|ep 102:CallWithThis(1, 6)",
+            60
+          ],
+          [
+            "1061c4000 node|result|oldtight|child 16:GetIter",
+            56
+          ],
+          [
+            "106258000 container|skipCloseUnmatched|tip|(inline callee) 50:CallWithThis(0, 2) container|skipCloseUnmatched|tip|(inline",
+            49
+          ],
+          [
+            "106030000 containers2|event|sp|ep 34:CallWithThis(1, 2)",
+            49
+          ],
+          [
+            "10602c000 s|startpos|endpos|result 7:CallWithThis(1, 0)",
+            48
+          ],
+          [
+            "106014000 startpos|endpos|k|%for-in-base% 4:ForInKeys",
+            42
+          ],
+          [
+            "10601c000 startpos|endpos|annot|matchIndex 15:CallWithThis(3, 0)",
+            41
+          ],
+          [
+            "106014000 startpos|endpos|k|%for-in-base% 43:CallWithThis(2, 0)",
+            39
+          ],
+          [
+            "106030000 containers2|event|sp|ep 115:CallWithThis(1, 7)",
+            38
+          ],
+          [
+            "1060f4000 s 3:CallWithThis(1, 0)",
+            35
+          ],
+          [
+            "10627c000 _a|ilparser|(inline callee)|(inline this) 51:IterStepL(6, 7) _a|ilparser|(inline callee)|(inline",
+            34
+          ],
+          [
+            "106030000 containers2|event|sp|ep 49:CallWithThis(1, 4)",
+            34
+          ],
+          [
+            "106000000 s|base|i|ident 13:CallWithThis(2, 2)",
+            31
+          ]
+        ],
+        "allocation": [
+          [
+            "105f60000 idx|container|tip|isBlank 48:CallWithThis(0, 0)",
+            178
+          ],
+          [
+            "101ae4000 subject|patt|startpos|endpos 24:CallWithThis(1, 1)",
+            27
+          ],
+          [
+            "1061c4000 node|result|oldtight|child 16:GetIter",
+            13
+          ],
+          [
+            "1061c4000 node|result|oldtight|child 19:IterStepL(4, 5)",
+            8
+          ],
+          [
+            "106040000 child|tip 16:CallWithThis(1, 0)",
+            7
+          ],
+          [
+            "106030000 containers2|event|sp|ep 34:CallWithThis(1, 2)",
+            6
+          ],
+          [
+            "101ae4000 subject|patt|startpos|endpos 81:MakeObject(6, 3, 0)",
+            5
+          ],
+          [
+            "10602c000 s|startpos|endpos|result 7:CallWithThis(1, 0)",
+            5
+          ],
+          [
+            "106014000 startpos|endpos|k|%for-in-base% 4:ForInKeys",
+            5
+          ],
+          [
+            "10601c000 startpos|endpos|annot|matchIndex 4:MakeObject(0, 3, 0)",
+            5
+          ],
+          [
+            "106050000 startpos|endpos|annot 13:MakeObject(5, 3, 0)",
+            4
+          ],
+          [
+            "106074000 subject|options 17:MakeObject(4, 0, 4294967295)",
+            4
+          ],
+          [
+            "106264000 self|pos|endpos|subject 52:CallWithThis(1, 2)",
+            4
+          ],
+          [
+            "1061fc000 label 6:CallWithThis(2, 1)",
+            4
+          ],
+          [
+            "106188000 suffixes|startpos|endpos|pos 9:MakeObject(4, 3, 0)",
+            4
+          ],
+          [
+            "101ac8000 input|options|parser|handleEvent 120:MakeClosure(42, 60)",
+            4
+          ],
+          [
+            "1060f4000 s 3:CallWithThis(1, 0)",
+            4
+          ],
+          [
+            "106074000 subject|options 12:SetPropThisDrop(1, 8)",
+            3
+          ],
+          [
+            "106074000 subject|options 18:SetPropThisDrop(4, 20)",
+            3
+          ],
+          [
+            "106068000 spec|extra 5:SetPropThisDrop(2, 20)",
+            3
+          ],
+          [
+            "106014000 startpos|endpos|k|%for-in-base% 43:CallWithThis(2, 0)",
+            3
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 176:GetIter",
+            3
+          ],
+          [
+            "105fc0000 container|k|%for-in-base%|%for-in-keys% 3:CallWithThis(1, 0)",
+            3
+          ],
+          [
+            "1061d0000 subject|options 113:MakeClosure(20, 20)",
+            3
+          ],
+          [
+            "1061d0000 subject|options 140:MakeClosure(29, 20)",
+            3
+          ]
+        ],
+        "property": [
+          [
+            "101ae4000 subject|patt|startpos|endpos 24:CallWithThis(1, 1)",
+            62
+          ],
+          [
+            "1061c4000 node|result|oldtight|child 19:IterStepL(4, 5)",
+            51
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 179:IterStepL(8, 9)",
+            49
+          ],
+          [
+            "1061c4000 node|result|oldtight|child 16:GetIter",
+            34
+          ],
+          [
+            "10601c000 startpos|endpos|annot|matchIndex 15:CallWithThis(3, 0)",
+            28
+          ],
+          [
+            "101ac8000 input|options|parser|handleEvent 212:IterStepL(10, 11)",
+            28
+          ],
+          [
+            "106014000 startpos|endpos|k|%for-in-base% 43:CallWithThis(2, 0)",
+            27
+          ],
+          [
+            "106074000 subject|options 27:SetPropThisDrop(8, 36)",
+            24
+          ],
+          [
+            "106030000 containers2|event|sp|ep 49:CallWithThis(1, 4)",
+            24
+          ],
+          [
+            "106068000 spec|extra 17:SetPropThisDrop(8, 52)",
+            23
+          ],
+          [
+            "106000000 s|base|i|ident 13:CallWithThis(2, 2)",
+            19
+          ],
+          [
+            "10602c000 s|startpos|endpos|result 7:CallWithThis(1, 0)",
+            18
+          ],
+          [
+            "10627c000 _a|ilparser|(inline callee)|(inline this) 51:IterStepL(6, 7) _a|ilparser|(inline callee)|(inline",
+            16
+          ],
+          [
+            "106030000 containers2|event|sp|ep 102:CallWithThis(1, 6)",
+            16
+          ],
+          [
+            "106044000 spec|m|sp|ep 92:IterStepL(11, 12)",
+            15
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 176:GetIter",
+            14
+          ],
+          [
+            "1061fc000 label 6:CallWithThis(2, 1)",
+            13
+          ],
+          [
+            "106040000 child|tip 16:CallWithThis(1, 0)",
+            12
+          ],
+          [
+            "106030000 containers2|event|sp|ep 115:CallWithThis(1, 7)",
+            12
+          ],
+          [
+            "106014000 startpos|endpos|k|%for-in-base% 4:ForInKeys",
+            11
+          ],
+          [
+            "106000000 s|base|i|ident 7:CallWithThis(2, 0)",
+            11
+          ],
+          [
+            "106224000 marker|style|numtype|s 6:CallWithThis(2, 0)",
+            10
+          ],
+          [
+            "106238000 s 4:CallWithThis(2, 0)",
+            10
+          ],
+          [
+            "106264000 self|pos|endpos|subject 52:CallWithThis(1, 2)",
+            9
+          ],
+          [
+            "105fc0000 container|k|%for-in-base%|%for-in-keys% 3:CallWithThis(1, 0)",
+            9
+          ]
+        ],
+        "gc": [
+          [
+            "105f60000 idx|container|tip|isBlank 48:CallWithThis(0, 0)",
+            690
+          ]
+        ],
+        "array_construction": [
+          [
+            "101ae4000 subject|patt|startpos|endpos 24:CallWithThis(1, 1)",
+            28
+          ],
+          [
+            "1061c4000 node|result|oldtight|child 16:GetIter",
+            26
+          ],
+          [
+            "106058000 pos|container 1:MakeArray(0)",
+            12
+          ],
+          [
+            "105fc0000 container|k|%for-in-base%|%for-in-keys% 3:CallWithThis(1, 0)",
+            11
+          ],
+          [
+            "106030000 containers2|event|sp|ep 29:MakeArray(0)",
+            9
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 176:GetIter",
+            8
+          ],
+          [
+            "10627c000 _a|ilparser|(inline callee)|(inline this) 48:GetIter _a|ilparser|(inline callee)|(inline",
+            5
+          ],
+          [
+            "101ae4000 subject|patt|startpos|endpos 34:MakeArray(0)",
+            5
+          ],
+          [
+            "106030000 containers2|event|sp|ep 115:CallWithThis(1, 7)",
+            5
+          ],
+          [
+            "106074000 subject|options 15:MakeArray(0)",
+            4
+          ],
+          [
+            "106130000 marker 20:MakeArray(1)",
+            4
+          ],
+          [
+            "10602c000 s|startpos|endpos|result 7:CallWithThis(1, 0)",
+            4
+          ],
+          [
+            "10601c000 startpos|endpos|annot|matchIndex 15:CallWithThis(3, 0)",
+            4
+          ],
+          [
+            "106264000 self|pos|endpos|subject 52:CallWithThis(1, 2)",
+            4
+          ],
+          [
+            "106030000 containers2|event|sp|ep 102:CallWithThis(1, 6)",
+            4
+          ],
+          [
+            "106044000 spec|m|sp|ep 89:GetIter",
+            3
+          ],
+          [
+            "106000000 s|base|i|ident 13:CallWithThis(2, 2)",
+            3
+          ],
+          [
+            "106000000 s|base|i|ident 7:CallWithThis(2, 0)",
+            3
+          ],
+          [
+            "105ffc000 node|buffer|child|%iter% 36:GetIter",
+            3
+          ],
+          [
+            "10605c000 container|m|marker|mtask 66:GetIter",
+            2
+          ],
+          [
+            "1062ac000 self|pos|endpos|subject 43:CallWithThis(1, 2)",
+            2
+          ],
+          [
+            "101ac8000 input|options|parser|handleEvent 190:MakeArray(0)",
+            2
+          ],
+          [
+            "101ac8000 input|options|parser|handleEvent 203:MakeArray(1)",
+            2
+          ],
+          [
+            "106008000 spec|m|sp|ep 75:GetIter",
+            1
+          ],
+          [
+            "106014000 startpos|endpos|k|%for-in-base% 4:ForInKeys",
+            1
+          ]
+        ]
+      },
+      "helper_exclusive_leaf_callers": {
+        "destruction": [
+          [
+            "105f60000 idx|container|tip|isBlank 48:CallWithThis(0, 0)",
+            99
+          ],
+          [
+            "101ac8000 input|options|parser|handleEvent 212:IterStepL(10, 11)",
+            43
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 203:CallWithThis(1, 7)",
+            19
+          ],
+          [
+            "1061c4000 node|result|oldtight|child 19:IterStepL(4, 5)",
+            16
+          ],
+          [
+            "106004000 patt 9:ReturnUndef",
+            15
+          ],
+          [
+            "101ae4000 subject|patt|startpos|endpos 24:CallWithThis(1, 1)",
+            13
+          ],
+          [
+            "106030000 containers2|event|sp|ep 132:Call(4, 8)",
+            13
+          ],
+          [
+            "105fa0000 startpos|endpos|subject|pos 439:ReturnUndef",
+            11
+          ],
+          [
+            "106258000 container|skipCloseUnmatched|tip|(inline callee) 50:CallWithThis(0, 2) container|skipCloseUnmatched|tip|(inline",
+            10
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 179:IterStepL(8, 9)",
+            9
+          ],
+          [
+            "106030000 containers2|event|sp|ep 102:CallWithThis(1, 6)",
+            7
+          ],
+          [
+            "106030000 containers2|event|sp|ep 34:CallWithThis(1, 2)",
+            7
+          ],
+          [
+            "1060f4000 s 3:CallWithThis(1, 0)",
+            7
+          ],
+          [
+            "106254000 tag|node|newlines|extraAttrs 94:ReturnUndef",
+            6
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 75:CallWithThis(1, 2)",
+            5
+          ],
+          [
+            "10627c000 _a|ilparser|(inline callee)|(inline this) 51:IterStepL(6, 7) _a|ilparser|(inline callee)|(inline",
+            5
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 361:New(2, 1)",
+            5
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 362:SetPropLocalDrop(11, 38, 328)",
+            5
+          ],
+          [
+            "106030000 containers2|event|sp|ep 74:GenBin(14)",
+            5
+          ],
+          [
+            "106084000 node|_a|%switch%|result 1149:ReturnUndef",
+            5
+          ],
+          [
+            "1061b0000 lastMatched|tip|(inline callee)|(inline this) 41:CallWithThis(0, 1) lastMatched|tip|(inline callee)|(inline",
+            4
+          ],
+          [
+            "10601c000 startpos|endpos|annot|matchIndex 15:CallWithThis(3, 0)",
+            4
+          ],
+          [
+            "106224000 marker|style|numtype|s 6:CallWithThis(2, 0)",
+            4
+          ],
+          [
+            "106030000 containers2|event|sp|ep 115:CallWithThis(1, 7)",
+            4
+          ],
+          [
+            "1061c4000 node|result|oldtight|child 60:CallWithThis(1, 2)",
+            4
+          ]
+        ],
+        "name_path": [
+          [
+            "101ad8000 subject|i 6:LoadNameForCall(2, 0)",
+            16
+          ],
+          [
+            "106050000 startpos|endpos|annot 2:LoadName(2, 0)",
+            10
+          ],
+          [
+            "106004000 patt 2:LoadName(0, 0)",
+            10
+          ],
+          [
+            "101ac8000 input|options|parser|handleEvent 212:IterStepL(10, 11)",
+            9
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 0:LoadName(0, 0)",
+            6
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 2:LoadName(2, 1)",
+            5
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 15:LoadName(0, 4)",
+            5
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 13:LoadName(0, 3)",
+            4
+          ],
+          [
+            "105fa0000 startpos|endpos|subject|pos 222:LoadName(21, 3)",
+            4
+          ],
+          [
+            "106044000 spec|m|sp|ep 62:LoadNameForCall(7, 2)",
+            3
+          ],
+          [
+            "106050000 startpos|endpos|annot 7:LoadName(2, 1)",
+            3
+          ],
+          [
+            "106168000 spec 2:LoadName(1, 0)",
+            3
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 188:LoadName(20, 35)",
+            3
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 28:LoadName(0, 8)",
+            3
+          ],
+          [
+            "101ae0000 subject|newpos 6:LoadNameForCall(2, 0)",
+            3
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 43:LoadName(0, 12)",
+            3
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 140:LoadName(0, 29)",
+            3
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 310:LoadName(0, 54)",
+            3
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 458:LoadName(0, 84)",
+            3
+          ],
+          [
+            "105fc0000 container|k|%for-in-base%|%for-in-keys% 0:LoadName(0, 0)",
+            3
+          ],
+          [
+            "106074000 subject|options 38:LoadName(14, 0)",
+            2
+          ],
+          [
+            "10611c000 spec|m|sp|ep 3:LoadName(1, 0)",
+            2
+          ],
+          [
+            "106044000 spec|m|sp|ep 11:LoadName(1, 0)",
+            2
+          ],
+          [
+            "1060f8000 spec 2:LoadName(1, 0)",
+            2
+          ],
+          [
+            "1060fc000 spec|m|level 3:LoadName(1, 0)",
+            2
+          ]
+        ],
+        "dispatch": [
+          [
+            "101ae4000 subject|patt|startpos|endpos 24:CallWithThis(1, 1)",
+            13
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 203:CallWithThis(1, 7)",
+            13
+          ],
+          [
+            "106030000 containers2|event|sp|ep 132:Call(4, 8)",
+            10
+          ],
+          [
+            "101ac8000 input|options|parser|handleEvent 212:IterStepL(10, 11)",
+            9
+          ],
+          [
+            "106050000 startpos|endpos|annot 6:CallWithThis(2, 0)",
+            7
+          ],
+          [
+            "106030000 containers2|event|sp|ep 34:CallWithThis(1, 2)",
+            7
+          ],
+          [
+            "1061c4000 node|result|oldtight|child 19:IterStepL(4, 5)",
+            7
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 179:IterStepL(8, 9)",
+            6
+          ],
+          [
+            "1061c4000 node|result|oldtight|child 16:GetIter",
+            6
+          ],
+          [
+            "105fc0000 container|k|%for-in-base%|%for-in-keys% 3:CallWithThis(1, 0)",
+            5
+          ],
+          [
+            "1060f4000 s 3:CallWithThis(1, 0)",
+            5
+          ],
+          [
+            "1061c4000 node|result|oldtight|child 60:CallWithThis(1, 2)",
+            5
+          ],
+          [
+            "106050000 startpos|endpos|annot 11:CallWithThis(2, 1)",
+            4
+          ],
+          [
+            "106030000 containers2|event|sp|ep 74:GenBin(14)",
+            4
+          ],
+          [
+            "101900000 __toESM|__commonJS|require_lib|import_djot 108:Call(1, 16)",
+            4
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 75:CallWithThis(1, 2)",
+            3
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 254:IterCloseL(8)",
+            3
+          ],
+          [
+            "105fe4000 suffixes|startpos|endpos|pos 176:CallWithThis(1, 13)",
+            3
+          ],
+          [
+            "106218000 suffixes|startpos|endpos|pos 5:CallWithThis(1, 0)",
+            3
+          ],
+          [
+            "106030000 containers2|event|sp|ep 115:CallWithThis(1, 7)",
+            3
+          ],
+          [
+            "10627c000 _a|ilparser|(inline callee)|(inline this) 51:IterStepL(6, 7) _a|ilparser|(inline callee)|(inline",
+            2
+          ],
+          [
+            "106258000 container|skipCloseUnmatched|tip|(inline callee) 50:CallWithThis(0, 2) container|skipCloseUnmatched|tip|(inline",
+            2
+          ],
+          [
+            "106044000 spec|m|sp|ep 92:IterStepL(11, 12)",
+            2
+          ],
+          [
+            "106144000 spec|attributeParser|res|container 3:LoadLexicalThis",
+            2
+          ],
+          [
+            "101ae4000 subject|patt|startpos|endpos 63:CallWithThis(2, 2)",
+            2
+          ]
+        ],
+        "allocation": [
+          [
+            "105f60000 idx|container|tip|isBlank 48:CallWithThis(0, 0)",
+            143
+          ],
+          [
+            "101ae4000 subject|patt|startpos|endpos 24:CallWithThis(1, 1)",
+            21
+          ],
+          [
+            "1061c4000 node|result|oldtight|child 16:GetIter",
+            10
+          ],
+          [
+            "106030000 containers2|event|sp|ep 34:CallWithThis(1, 2)",
+            6
+          ],
+          [
+            "1061c4000 node|result|oldtight|child 19:IterStepL(4, 5)",
+            6
+          ],
+          [
+            "101ae4000 subject|patt|startpos|endpos 81:MakeObject(6, 3, 0)",
+            5
+          ],
+          [
+            "10602c000 s|startpos|endpos|result 7:CallWithThis(1, 0)",
+            5
+          ],
+          [
+            "106014000 startpos|endpos|k|%for-in-base% 4:ForInKeys",
+            5
+          ],
+          [
+            "10601c000 startpos|endpos|annot|matchIndex 4:MakeObject(0, 3, 0)",
+            5
+          ],
+          [
+            "106040000 child|tip 16:CallWithThis(1, 0)",
+            5
+          ],
+          [
+            "106050000 startpos|endpos|annot 13:MakeObject(5, 3, 0)",
+            4
+          ],
+          [
+            "106074000 subject|options 17:MakeObject(4, 0, 4294967295)",
+            4
+          ],
+          [
+            "106188000 suffixes|startpos|endpos|pos 9:MakeObject(4, 3, 0)",
+            4
+          ],
+          [
+            "101ac8000 input|options|parser|handleEvent 120:MakeClosure(42, 60)",
+            4
+          ],
+          [
+            "1060f4000 s 3:CallWithThis(1, 0)",
+            4
+          ],
+          [
+            "106014000 startpos|endpos|k|%for-in-base% 43:CallWithThis(2, 0)",
+            3
+          ],
+          [
+            "106264000 self|pos|endpos|subject 52:CallWithThis(1, 2)",
+            3
+          ],
+          [
+            "1061fc000 label 6:CallWithThis(2, 1)",
+            3
+          ],
+          [
+            "105fc0000 container|k|%for-in-base%|%for-in-keys% 3:CallWithThis(1, 0)",
+            3
+          ],
+          [
+            "1061d0000 subject|options 113:MakeClosure(20, 20)",
+            3
+          ],
+          [
+            "1061d0000 subject|options 140:MakeClosure(29, 20)",
+            3
+          ],
+          [
+            "106030000 containers2|event|sp|ep 102:CallWithThis(1, 6)",
+            3
+          ],
+          [
+            "101ac8000 input|options|parser|handleEvent 178:MakeClosure(100, 118)",
+            3
+          ],
+          [
+            "101ac8000 input|options|parser|handleEvent 135:MakeClosure(57, 75)",
+            3
+          ],
+          [
+            "10629c000 node|extraAttrs|result|attributes 98:ForInKeys",
+            3
+          ]
+        ],
+        "property": [
+          [
+            "101ae4000 subject|patt|startpos|endpos 24:CallWithThis(1, 1)",
+            36
+          ],
+          [
+            "1061c4000 node|result|oldtight|child 19:IterStepL(4, 5)",
+            25
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 179:IterStepL(8, 9)",
+            22
+          ],
+          [
+            "1061c4000 node|result|oldtight|child 16:GetIter",
+            18
+          ],
+          [
+            "106014000 startpos|endpos|k|%for-in-base% 43:CallWithThis(2, 0)",
+            14
+          ],
+          [
+            "106030000 containers2|event|sp|ep 49:CallWithThis(1, 4)",
+            14
+          ],
+          [
+            "10601c000 startpos|endpos|annot|matchIndex 15:CallWithThis(3, 0)",
+            13
+          ],
+          [
+            "101ac8000 input|options|parser|handleEvent 212:IterStepL(10, 11)",
+            13
+          ],
+          [
+            "10602c000 s|startpos|endpos|result 7:CallWithThis(1, 0)",
+            12
+          ],
+          [
+            "106044000 spec|m|sp|ep 92:IterStepL(11, 12)",
+            9
+          ],
+          [
+            "10627c000 _a|ilparser|(inline callee)|(inline this) 51:IterStepL(6, 7) _a|ilparser|(inline callee)|(inline",
+            8
+          ],
+          [
+            "105fc0000 container|k|%for-in-base%|%for-in-keys% 3:CallWithThis(1, 0)",
+            7
+          ],
+          [
+            "10627c000 _a|ilparser|(inline callee)|(inline this) 48:GetIter _a|ilparser|(inline callee)|(inline",
+            6
+          ],
+          [
+            "106040000 child|tip 16:CallWithThis(1, 0)",
+            6
+          ],
+          [
+            "106030000 containers2|event|sp|ep 102:CallWithThis(1, 6)",
+            6
+          ],
+          [
+            "106264000 self|pos|endpos|subject 52:CallWithThis(1, 2)",
+            5
+          ],
+          [
+            "106000000 s|base|i|ident 13:CallWithThis(2, 2)",
+            5
+          ],
+          [
+            "105ffc000 node|buffer|child|%iter% 39:IterStepL(3, 4)",
+            5
+          ],
+          [
+            "106030000 containers2|event|sp|ep 115:CallWithThis(1, 7)",
+            5
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 176:GetIter",
+            4
+          ],
+          [
+            "105fa0000 startpos|endpos|subject|pos 439:ReturnUndef",
+            4
+          ],
+          [
+            "10601c000 startpos|endpos|annot|matchIndex 21:CallWithThis(1, 1)",
+            4
+          ],
+          [
+            "1061fc000 label 6:CallWithThis(2, 1)",
+            4
+          ],
+          [
+            "105f60000 idx|container|tip|isBlank 48:CallWithThis(0, 0)",
+            3
+          ],
+          [
+            "106068000 spec|extra 1:SetPropThisDrop(0, 4)",
+            3
+          ]
+        ],
+        "gc": [
+          [
+            "105f60000 idx|container|tip|isBlank 48:CallWithThis(0, 0)",
+            234
+          ]
+        ],
+        "array_construction": [
+          [
+            "101ae4000 subject|patt|startpos|endpos 24:CallWithThis(1, 1)",
+            10
+          ],
+          [
+            "106074000 subject|options 15:MakeArray(0)",
+            2
+          ],
+          [
+            "101ae4000 subject|patt|startpos|endpos 34:MakeArray(0)",
+            2
+          ],
+          [
+            "106264000 self|pos|endpos|subject 52:CallWithThis(1, 2)",
+            1
+          ],
+          [
+            "106264000 self|pos|endpos|subject 62:MakeArray(0)",
+            1
+          ],
+          [
+            "105fc0000 container|k|%for-in-base%|%for-in-keys% 3:CallWithThis(1, 0)",
+            1
+          ],
+          [
+            "106058000 pos|container 1:MakeArray(0)",
+            1
+          ],
+          [
+            "106030000 containers2|event|sp|ep 132:Call(4, 8)",
+            1
+          ],
+          [
+            "106030000 containers2|event|sp|ep 29:MakeArray(0)",
+            1
+          ]
+        ]
+      },
+      "hashes": {
+        "djot-inline-reads-current.sample": "6a606a0adc345ae4745d79c3fe2ab87699835d9ca6d27825c41b75e66d2e814a",
+        "djot-inline-reads-current-profile.maps": "04b3b5bcd5c6aa4a75dd0a83a571beddb0320872cd0dbd4a556d24a1fcc58b48"
+      },
+      "limits": [
+        "Exclusive residuals partition sample tree; helper categories overlap and must not be added.",
+        "Same-offset PCs remain grouped; last start owns span but outlined tails/fusions can invalidate semantic opcode attribution.",
+        "Helper caller uses return address minus4; descendants can include nested callbacks, not exclusive helper CPU."
+      ]
+    }
+  },
+  "navier_numeric_validation": [
+    {
+      "engine": "node",
+      "values": [
+        0.25290338361902887,
+        -0.019693568964586683,
+        0.006307604168859275,
+        0.3130675006350456,
+        -0.1229085369767361,
+        -0.007250312766347368,
+        0.34440264797536935,
+        -0.12575171196916707,
+        -0.00874496670225993,
+        0.34172345788082875,
+        -0.14613287539076514,
+        -0.004004037427193415,
+        0.24449253283496797,
+        -0.14683595421723455,
+        0.0016092113716571427,
+        0.3292803170063091,
+        -0.162291074501111,
+        -0.00026063916104155933,
+        0.3197427201662216,
+        -0.14996692629448855,
+        -0.0012460920407101315,
+        0.39308494012277007,
+        -0.17553834021689205,
+        -0.0020324990201109443,
+        0.3676159795476086,
+        -0.1335348021219877,
+        -0.005954839886448084,
+        0.20444481372026613,
+        -0.08157713189419499,
+        -0.009786586512328957,
+        0.24748969511201613,
+        -0.005392130692479374,
+        -0.12304002411549317,
+        0.2206569704071402,
+        0.05128375361533605,
+        -0.022555418922427885,
+        0.1857103292224933,
+        -0.04426002282369568,
+        0.02451688438283533,
+        0.21931666952169218,
+        -0.09886002099500772,
+        -0.02284680267097717,
+        0.1905279961432898,
+        -0.06501749873384005,
+        -0.010650355747590877,
+        0.22194513707834523,
+        -0.037973241548655556,
+        -0.004370525304804751,
+        0.22838723309875783,
+        -0.0314547019043915,
+        -0.008755358447481218,
+        0.18871712173010532,
+        -0.023215220550995303,
+        -0.008295501112350005,
+        0.30161642505183317,
+        -0.01741079652837539,
+        -0.026861486069213156,
+        0.45086616474370256,
+        -0.025804025563523805,
+        -0.14537333486364232,
+        0.30701916174636784,
+        -0.022911181896076917,
+        -0.16493743548387707,
+        0.15097949932251736,
+        -0.06340441582417394,
+        -0.09153927789696926,
+        0.40105007718736757,
+        0.02625961316345219,
+        0.049067122385909136,
+        0.4760304944526652,
+        -0.005090568708874038,
+        0.015226196927467711,
+        0.403268912921237,
+        -0.003607360291731063,
+        -0.05729871640347838,
+        0.23437585499582078,
+        -0.0033430556533371935,
+        -0.013012464896222535,
+        0.23449275593371818,
+        -0.004759003270076294,
+        -0.007392038310080045,
+        0.256238423121319,
+        -0.002375679644611114,
+        -0.012956196370342865,
+        0.1942656076976771,
+        0.0010385825217152165,
+        -0.03866479936960315,
+        0.30189416787645934,
+        0.012515636165304812,
+        -0.1477623102199399,
+        0.48157602796315996,
+        -0.0065204411223940325,
+        -0.13453319956484913,
+        0.1352819745724438,
+        -0.030715920786846183,
+        -0.10232416054876345,
+        0.18210256097685723,
+        -0.050298857169433046,
+        -0.05649415901118497,
+        0.3312081147123984,
+        0.05495160883392581,
+        0.02425929974106255,
+        0.36170258163555463,
+        0.15348732478227564,
+        0.06608974314148548,
+        0.3113717266297784,
+        0.04275727071000247,
+        0.021129012528089942,
+        0.17958789612680215,
+        0.007211452433945632,
+        0.0018026990694672111,
+        0.17483298485364487,
+        0.007302665768331195,
+        -0.009022761395738798,
+        0.19823410704476685,
+        -0.0012854857216846327,
+        -0.034890198274276404,
+        0.4508508437757236,
+        0.010633566328550757,
+        -0.16990403895225162,
+        0.2153115847967247,
+        0.00022819954910897119,
+        -0.15096694454963333,
+        0.09816491622570733,
+        -0.010026233674540691,
+        -0.08954525824352853,
+        0.14212083833384515,
+        -0.018716944679575836,
+        -0.06310266199994403,
+        0.1346375651296272,
+        0.005768750574517469,
+        -0.05830531940586674,
+        0.12829835035012363,
+        0.05720246638570641,
+        -0.016518761612411993,
+        0.3623495347393053,
+        0.06427364070544449,
+        0.12914006249940155,
+        0.36449082535742494,
+        0.044311263616779055,
+        0.017603061732771017,
+        0.184463857838061,
+        0.03030277432365981,
+        -0.00047135681466676317,
+        0.21428958125422135,
+        0.017099976473356475,
+        -0.030375159479416092,
+        0.4708858883459831,
+        0.009982381491833985,
+        -0.15120978561994808,
+        0.2895279729166705,
+        -0.007831960436837513,
+        -0.1534849214222824,
+        0.20833631756427126,
+        -0.020468435510423322,
+        -0.07071867865845412,
+        0.16224609829068312,
+        -0.02718516285014414,
+        -0.05643425612034074,
+        0.23574663902146498,
+        -0.0183323492097352,
+        -0.05306614173797164,
+        0.16747493951334283,
+        -0.023332136563273976,
+        -0.023760631258000774,
+        0.1732662081185239,
+        0.10034494033973382,
+        0.0439273582158584,
+        0.3452568975031745,
+        0.24387619693334264,
+        0.17621983205823422,
+        0.314169384803314,
+        0.08435263526643971,
+        0.07012761796547191,
+        0.263910524539112,
+        0.02996837296985445,
+        -0.01973477312084041,
+        0.2523848523729252,
+        0.010980575259091092,
+        -0.0972697567838401,
+        0.20151291451432776,
+        -0.014338398207620593,
+        -0.11545166228277562,
+        0.4344211735405899,
+        -0.0799005267782044,
+        -0.058228029535871285,
+        0.38031209778305247,
+        -0.09123546957639786,
+        -0.05408984859931708,
+        0.40159617723429997,
+        -0.08260609426201737,
+        -0.06111091108107465,
+        0.5657787694998584,
+        -0.03621181077855728,
+        -0.04118473209705005,
+        0.302165841258925,
+        0.03770260718466953,
+        -0.05754430136133452,
+        0.18151697399809913,
+        0.1799633727975705,
+        0.19691664101991052,
+        0.30913812179393946,
+        0.17086065327001074,
+        0.23244747121961054,
+        0.21714171233691404,
+        0.1438495530185193,
+        -0.03699249333843033,
+        0.5969459061236472,
+        0.06795477280732183,
+        -0.06987023957607041,
+        0.2513048817008448,
+        -0.007779852214355145,
+        -0.08197572188719476,
+        0.4167516128053865,
+        -0.08399498075279156,
+        -0.044367343162255664,
+        0.5718592277824693,
+        -0.1310543201473345,
+        -0.023670076986801836,
+        0.38527832640743515,
+        -0.12890858637284444,
+        -0.06149295918240024,
+        0.35258052754819214,
+        -0.15442768030829446,
+        -0.04826517598848465,
+        0.2965134120990133,
+        -0.10354708185835969,
+        -0.03767397000379634,
+        0.21913466396847744,
+        0.006568941486210726,
+        0.0721436823893264,
+        0.28484559072780524,
+        0.13749319191923404,
+        0.20453186954872024,
+        0.1884769006618762,
+        0.1770570450781959,
+        0.18036034353588082,
+        0.46751311116644756,
+        0.10135635237861428,
+        0.020376299656938955,
+        0.4047875964617449,
+        -0.0235968288905788,
+        -0.024217654876843586,
+        0.35914203234933884,
+        -0.115606747703137,
+        -0.010641778145640492,
+        0.5880347674728281,
+        -0.12654075752604962,
+        -0.0333675593059337,
+        0.2279872414561859,
+        -0.1314806784507901,
+        -0.027334030645921863,
+        0.30819448470430666,
+        -0.12728609749910763,
+        0.002088723137074043,
+        0.39902966827388064,
+        -0.12490891757634959,
+        -0.03606601328305141,
+        0.48279165276412034,
+        -0.10308483525838746,
+        -0.0023453580410773564,
+        0.7568417813275121,
+        -0.0278885073346636,
+        0.0655785030090568,
+        0.3295191963300699,
+        0.0830962940916306,
+        0.14274503043508924,
+        0.29927573489051035,
+        0.0831464330833193,
+        0.06837491354348701,
+        0.21866485078886555,
+        -0.026811621131129164,
+        -0.05238218241341045,
+        0.209809297496065,
+        -0.1477401562497081,
+        -0.01453626623911592,
+        0.22568897372941565,
+        -0.1922935569353965,
+        -0.017808419648831064,
+        0.4520523031898481,
+        -0.21040819287540288,
+        0.004943342368215575,
+        0.21049833846713092,
+        -0.1658885488472213,
+        -0.011305292063774543,
+        0.26660906283569985,
+        -0.14344234403119532,
+        -0.016629544105725348,
+        0.3247379903343338,
+        -0.1176505352031191,
+        -0.00546645740152233,
+        0.18807897772241766,
+        -0.078568675497916,
+        0.012115710137031287,
+        0.2795421695216704,
+        -0.03135526816970259,
+        0.03339653347888479,
+        0.31972955018986415,
+        0.0238610436923687,
+        0.05314949181107896
+      ],
+      "max_absolute_error": 0.0,
+      "returncode": 0
+    },
+    {
+      "engine": "bun",
+      "values": [
+        0.25290338361902887,
+        -0.019693568964586683,
+        0.006307604168859275,
+        0.3130675006350456,
+        -0.1229085369767361,
+        -0.007250312766347368,
+        0.34440264797536935,
+        -0.12575171196916707,
+        -0.00874496670225993,
+        0.34172345788082875,
+        -0.14613287539076514,
+        -0.004004037427193415,
+        0.24449253283496797,
+        -0.14683595421723455,
+        0.0016092113716571427,
+        0.3292803170063091,
+        -0.162291074501111,
+        -0.00026063916104155933,
+        0.3197427201662216,
+        -0.14996692629448855,
+        -0.0012460920407101315,
+        0.39308494012277007,
+        -0.17553834021689205,
+        -0.0020324990201109443,
+        0.3676159795476086,
+        -0.1335348021219877,
+        -0.005954839886448084,
+        0.20444481372026613,
+        -0.08157713189419499,
+        -0.009786586512328957,
+        0.24748969511201613,
+        -0.005392130692479374,
+        -0.12304002411549317,
+        0.2206569704071402,
+        0.05128375361533605,
+        -0.022555418922427885,
+        0.1857103292224933,
+        -0.04426002282369568,
+        0.02451688438283533,
+        0.21931666952169218,
+        -0.09886002099500772,
+        -0.02284680267097717,
+        0.1905279961432898,
+        -0.06501749873384005,
+        -0.010650355747590877,
+        0.22194513707834523,
+        -0.037973241548655556,
+        -0.004370525304804751,
+        0.22838723309875783,
+        -0.0314547019043915,
+        -0.008755358447481218,
+        0.18871712173010532,
+        -0.023215220550995303,
+        -0.008295501112350005,
+        0.30161642505183317,
+        -0.01741079652837539,
+        -0.026861486069213156,
+        0.45086616474370256,
+        -0.025804025563523805,
+        -0.14537333486364232,
+        0.30701916174636784,
+        -0.022911181896076917,
+        -0.16493743548387707,
+        0.15097949932251736,
+        -0.06340441582417394,
+        -0.09153927789696926,
+        0.40105007718736757,
+        0.02625961316345219,
+        0.049067122385909136,
+        0.4760304944526652,
+        -0.005090568708874038,
+        0.015226196927467711,
+        0.403268912921237,
+        -0.003607360291731063,
+        -0.05729871640347838,
+        0.23437585499582078,
+        -0.0033430556533371935,
+        -0.013012464896222535,
+        0.23449275593371818,
+        -0.004759003270076294,
+        -0.007392038310080045,
+        0.256238423121319,
+        -0.002375679644611114,
+        -0.012956196370342865,
+        0.1942656076976771,
+        0.0010385825217152165,
+        -0.03866479936960315,
+        0.30189416787645934,
+        0.012515636165304812,
+        -0.1477623102199399,
+        0.48157602796315996,
+        -0.0065204411223940325,
+        -0.13453319956484913,
+        0.1352819745724438,
+        -0.030715920786846183,
+        -0.10232416054876345,
+        0.18210256097685723,
+        -0.050298857169433046,
+        -0.05649415901118497,
+        0.3312081147123984,
+        0.05495160883392581,
+        0.02425929974106255,
+        0.36170258163555463,
+        0.15348732478227564,
+        0.06608974314148548,
+        0.3113717266297784,
+        0.04275727071000247,
+        0.021129012528089942,
+        0.17958789612680215,
+        0.007211452433945632,
+        0.0018026990694672111,
+        0.17483298485364487,
+        0.007302665768331195,
+        -0.009022761395738798,
+        0.19823410704476685,
+        -0.0012854857216846327,
+        -0.034890198274276404,
+        0.4508508437757236,
+        0.010633566328550757,
+        -0.16990403895225162,
+        0.2153115847967247,
+        0.00022819954910897119,
+        -0.15096694454963333,
+        0.09816491622570733,
+        -0.010026233674540691,
+        -0.08954525824352853,
+        0.14212083833384515,
+        -0.018716944679575836,
+        -0.06310266199994403,
+        0.1346375651296272,
+        0.005768750574517469,
+        -0.05830531940586674,
+        0.12829835035012363,
+        0.05720246638570641,
+        -0.016518761612411993,
+        0.3623495347393053,
+        0.06427364070544449,
+        0.12914006249940155,
+        0.36449082535742494,
+        0.044311263616779055,
+        0.017603061732771017,
+        0.184463857838061,
+        0.03030277432365981,
+        -0.00047135681466676317,
+        0.21428958125422135,
+        0.017099976473356475,
+        -0.030375159479416092,
+        0.4708858883459831,
+        0.009982381491833985,
+        -0.15120978561994808,
+        0.2895279729166705,
+        -0.007831960436837513,
+        -0.1534849214222824,
+        0.20833631756427126,
+        -0.020468435510423322,
+        -0.07071867865845412,
+        0.16224609829068312,
+        -0.02718516285014414,
+        -0.05643425612034074,
+        0.23574663902146498,
+        -0.0183323492097352,
+        -0.05306614173797164,
+        0.16747493951334283,
+        -0.023332136563273976,
+        -0.023760631258000774,
+        0.1732662081185239,
+        0.10034494033973382,
+        0.0439273582158584,
+        0.3452568975031745,
+        0.24387619693334264,
+        0.17621983205823422,
+        0.314169384803314,
+        0.08435263526643971,
+        0.07012761796547191,
+        0.263910524539112,
+        0.02996837296985445,
+        -0.01973477312084041,
+        0.2523848523729252,
+        0.010980575259091092,
+        -0.0972697567838401,
+        0.20151291451432776,
+        -0.014338398207620593,
+        -0.11545166228277562,
+        0.4344211735405899,
+        -0.0799005267782044,
+        -0.058228029535871285,
+        0.38031209778305247,
+        -0.09123546957639786,
+        -0.05408984859931708,
+        0.40159617723429997,
+        -0.08260609426201737,
+        -0.06111091108107465,
+        0.5657787694998584,
+        -0.03621181077855728,
+        -0.04118473209705005,
+        0.302165841258925,
+        0.03770260718466953,
+        -0.05754430136133452,
+        0.18151697399809913,
+        0.1799633727975705,
+        0.19691664101991052,
+        0.30913812179393946,
+        0.17086065327001074,
+        0.23244747121961054,
+        0.21714171233691404,
+        0.1438495530185193,
+        -0.03699249333843033,
+        0.5969459061236472,
+        0.06795477280732183,
+        -0.06987023957607041,
+        0.2513048817008448,
+        -0.007779852214355145,
+        -0.08197572188719476,
+        0.4167516128053865,
+        -0.08399498075279156,
+        -0.044367343162255664,
+        0.5718592277824693,
+        -0.1310543201473345,
+        -0.023670076986801836,
+        0.38527832640743515,
+        -0.12890858637284444,
+        -0.06149295918240024,
+        0.35258052754819214,
+        -0.15442768030829446,
+        -0.04826517598848465,
+        0.2965134120990133,
+        -0.10354708185835969,
+        -0.03767397000379634,
+        0.21913466396847744,
+        0.006568941486210726,
+        0.0721436823893264,
+        0.28484559072780524,
+        0.13749319191923404,
+        0.20453186954872024,
+        0.1884769006618762,
+        0.1770570450781959,
+        0.18036034353588082,
+        0.46751311116644756,
+        0.10135635237861428,
+        0.020376299656938955,
+        0.4047875964617449,
+        -0.0235968288905788,
+        -0.024217654876843586,
+        0.35914203234933884,
+        -0.115606747703137,
+        -0.010641778145640492,
+        0.5880347674728281,
+        -0.12654075752604962,
+        -0.0333675593059337,
+        0.2279872414561859,
+        -0.1314806784507901,
+        -0.027334030645921863,
+        0.30819448470430666,
+        -0.12728609749910763,
+        0.002088723137074043,
+        0.39902966827388064,
+        -0.12490891757634959,
+        -0.03606601328305141,
+        0.48279165276412034,
+        -0.10308483525838746,
+        -0.0023453580410773564,
+        0.7568417813275121,
+        -0.0278885073346636,
+        0.0655785030090568,
+        0.3295191963300699,
+        0.0830962940916306,
+        0.14274503043508924,
+        0.29927573489051035,
+        0.0831464330833193,
+        0.06837491354348701,
+        0.21866485078886555,
+        -0.026811621131129164,
+        -0.05238218241341045,
+        0.209809297496065,
+        -0.1477401562497081,
+        -0.01453626623911592,
+        0.22568897372941565,
+        -0.1922935569353965,
+        -0.017808419648831064,
+        0.4520523031898481,
+        -0.21040819287540288,
+        0.004943342368215575,
+        0.21049833846713092,
+        -0.1658885488472213,
+        -0.011305292063774543,
+        0.26660906283569985,
+        -0.14344234403119532,
+        -0.016629544105725348,
+        0.3247379903343338,
+        -0.1176505352031191,
+        -0.00546645740152233,
+        0.18807897772241766,
+        -0.078568675497916,
+        0.012115710137031287,
+        0.2795421695216704,
+        -0.03135526816970259,
+        0.03339653347888479,
+        0.31972955018986415,
+        0.0238610436923687,
+        0.05314949181107896
+      ],
+      "max_absolute_error": 0.0,
+      "returncode": 0
+    },
+    {
+      "engine": "retained",
+      "values": [
+        0.25290338361902887,
+        -0.019693568964586683,
+        0.006307604168859275,
+        0.3130675006350456,
+        -0.1229085369767361,
+        -0.007250312766347368,
+        0.34440264797536935,
+        -0.12575171196916707,
+        -0.00874496670225993,
+        0.34172345788082875,
+        -0.14613287539076514,
+        -0.004004037427193415,
+        0.24449253283496797,
+        -0.14683595421723455,
+        0.0016092113716571427,
+        0.3292803170063091,
+        -0.162291074501111,
+        -0.00026063916104155933,
+        0.3197427201662216,
+        -0.14996692629448855,
+        -0.0012460920407101315,
+        0.39308494012277007,
+        -0.17553834021689205,
+        -0.0020324990201109443,
+        0.3676159795476086,
+        -0.1335348021219877,
+        -0.005954839886448084,
+        0.20444481372026613,
+        -0.08157713189419499,
+        -0.009786586512328957,
+        0.24748969511201613,
+        -0.005392130692479374,
+        -0.12304002411549317,
+        0.2206569704071402,
+        0.05128375361533605,
+        -0.022555418922427885,
+        0.1857103292224933,
+        -0.04426002282369568,
+        0.02451688438283533,
+        0.21931666952169218,
+        -0.09886002099500772,
+        -0.02284680267097717,
+        0.1905279961432898,
+        -0.06501749873384005,
+        -0.010650355747590877,
+        0.22194513707834523,
+        -0.037973241548655556,
+        -0.004370525304804751,
+        0.22838723309875783,
+        -0.0314547019043915,
+        -0.008755358447481218,
+        0.18871712173010532,
+        -0.023215220550995303,
+        -0.008295501112350005,
+        0.30161642505183317,
+        -0.01741079652837539,
+        -0.026861486069213156,
+        0.45086616474370256,
+        -0.025804025563523805,
+        -0.14537333486364232,
+        0.30701916174636784,
+        -0.022911181896076917,
+        -0.16493743548387707,
+        0.15097949932251736,
+        -0.06340441582417394,
+        -0.09153927789696926,
+        0.40105007718736757,
+        0.02625961316345219,
+        0.049067122385909136,
+        0.4760304944526652,
+        -0.005090568708874038,
+        0.015226196927467711,
+        0.403268912921237,
+        -0.003607360291731063,
+        -0.05729871640347838,
+        0.23437585499582078,
+        -0.0033430556533371935,
+        -0.013012464896222535,
+        0.23449275593371818,
+        -0.004759003270076294,
+        -0.007392038310080045,
+        0.256238423121319,
+        -0.002375679644611114,
+        -0.012956196370342865,
+        0.1942656076976771,
+        0.0010385825217152165,
+        -0.03866479936960315,
+        0.30189416787645934,
+        0.012515636165304812,
+        -0.1477623102199399,
+        0.48157602796315996,
+        -0.0065204411223940325,
+        -0.13453319956484913,
+        0.1352819745724438,
+        -0.030715920786846183,
+        -0.10232416054876345,
+        0.18210256097685723,
+        -0.050298857169433046,
+        -0.05649415901118497,
+        0.3312081147123984,
+        0.05495160883392581,
+        0.02425929974106255,
+        0.36170258163555463,
+        0.15348732478227564,
+        0.06608974314148548,
+        0.3113717266297784,
+        0.04275727071000247,
+        0.021129012528089942,
+        0.17958789612680215,
+        0.007211452433945632,
+        0.0018026990694672111,
+        0.17483298485364487,
+        0.007302665768331195,
+        -0.009022761395738798,
+        0.19823410704476685,
+        -0.0012854857216846327,
+        -0.034890198274276404,
+        0.4508508437757236,
+        0.010633566328550757,
+        -0.16990403895225162,
+        0.2153115847967247,
+        0.00022819954910897119,
+        -0.15096694454963333,
+        0.09816491622570733,
+        -0.010026233674540691,
+        -0.08954525824352853,
+        0.14212083833384515,
+        -0.018716944679575836,
+        -0.06310266199994403,
+        0.1346375651296272,
+        0.005768750574517469,
+        -0.05830531940586674,
+        0.12829835035012363,
+        0.05720246638570641,
+        -0.016518761612411993,
+        0.3623495347393053,
+        0.06427364070544449,
+        0.12914006249940155,
+        0.36449082535742494,
+        0.044311263616779055,
+        0.017603061732771017,
+        0.184463857838061,
+        0.03030277432365981,
+        -0.00047135681466676317,
+        0.21428958125422135,
+        0.017099976473356475,
+        -0.030375159479416092,
+        0.4708858883459831,
+        0.009982381491833985,
+        -0.15120978561994808,
+        0.2895279729166705,
+        -0.007831960436837513,
+        -0.1534849214222824,
+        0.20833631756427126,
+        -0.020468435510423322,
+        -0.07071867865845412,
+        0.16224609829068312,
+        -0.02718516285014414,
+        -0.05643425612034074,
+        0.23574663902146498,
+        -0.0183323492097352,
+        -0.05306614173797164,
+        0.16747493951334283,
+        -0.023332136563273976,
+        -0.023760631258000774,
+        0.1732662081185239,
+        0.10034494033973382,
+        0.0439273582158584,
+        0.3452568975031745,
+        0.24387619693334264,
+        0.17621983205823422,
+        0.314169384803314,
+        0.08435263526643971,
+        0.07012761796547191,
+        0.263910524539112,
+        0.02996837296985445,
+        -0.01973477312084041,
+        0.2523848523729252,
+        0.010980575259091092,
+        -0.0972697567838401,
+        0.20151291451432776,
+        -0.014338398207620593,
+        -0.11545166228277562,
+        0.4344211735405899,
+        -0.0799005267782044,
+        -0.058228029535871285,
+        0.38031209778305247,
+        -0.09123546957639786,
+        -0.05408984859931708,
+        0.40159617723429997,
+        -0.08260609426201737,
+        -0.06111091108107465,
+        0.5657787694998584,
+        -0.03621181077855728,
+        -0.04118473209705005,
+        0.302165841258925,
+        0.03770260718466953,
+        -0.05754430136133452,
+        0.18151697399809913,
+        0.1799633727975705,
+        0.19691664101991052,
+        0.30913812179393946,
+        0.17086065327001074,
+        0.23244747121961054,
+        0.21714171233691404,
+        0.1438495530185193,
+        -0.03699249333843033,
+        0.5969459061236472,
+        0.06795477280732183,
+        -0.06987023957607041,
+        0.2513048817008448,
+        -0.007779852214355145,
+        -0.08197572188719476,
+        0.4167516128053865,
+        -0.08399498075279156,
+        -0.044367343162255664,
+        0.5718592277824693,
+        -0.1310543201473345,
+        -0.023670076986801836,
+        0.38527832640743515,
+        -0.12890858637284444,
+        -0.06149295918240024,
+        0.35258052754819214,
+        -0.15442768030829446,
+        -0.04826517598848465,
+        0.2965134120990133,
+        -0.10354708185835969,
+        -0.03767397000379634,
+        0.21913466396847744,
+        0.006568941486210726,
+        0.0721436823893264,
+        0.28484559072780524,
+        0.13749319191923404,
+        0.20453186954872024,
+        0.1884769006618762,
+        0.1770570450781959,
+        0.18036034353588082,
+        0.46751311116644756,
+        0.10135635237861428,
+        0.020376299656938955,
+        0.4047875964617449,
+        -0.0235968288905788,
+        -0.024217654876843586,
+        0.35914203234933884,
+        -0.115606747703137,
+        -0.010641778145640492,
+        0.5880347674728281,
+        -0.12654075752604962,
+        -0.0333675593059337,
+        0.2279872414561859,
+        -0.1314806784507901,
+        -0.027334030645921863,
+        0.30819448470430666,
+        -0.12728609749910763,
+        0.002088723137074043,
+        0.39902966827388064,
+        -0.12490891757634959,
+        -0.03606601328305141,
+        0.48279165276412034,
+        -0.10308483525838746,
+        -0.0023453580410773564,
+        0.7568417813275121,
+        -0.0278885073346636,
+        0.0655785030090568,
+        0.3295191963300699,
+        0.0830962940916306,
+        0.14274503043508924,
+        0.29927573489051035,
+        0.0831464330833193,
+        0.06837491354348701,
+        0.21866485078886555,
+        -0.026811621131129164,
+        -0.05238218241341045,
+        0.209809297496065,
+        -0.1477401562497081,
+        -0.01453626623911592,
+        0.22568897372941565,
+        -0.1922935569353965,
+        -0.017808419648831064,
+        0.4520523031898481,
+        -0.21040819287540288,
+        0.004943342368215575,
+        0.21049833846713092,
+        -0.1658885488472213,
+        -0.011305292063774543,
+        0.26660906283569985,
+        -0.14344234403119532,
+        -0.016629544105725348,
+        0.3247379903343338,
+        -0.1176505352031191,
+        -0.00546645740152233,
+        0.18807897772241766,
+        -0.078568675497916,
+        0.012115710137031287,
+        0.2795421695216704,
+        -0.03135526816970259,
+        0.03339653347888479,
+        0.31972955018986415,
+        0.0238610436923687,
+        0.05314949181107896
+      ],
+      "max_absolute_error": 0.0,
+      "returncode": 0
+    },
+    {
+      "engine": "candidate",
+      "values": [
+        0.25290338361902887,
+        -0.019693568964586683,
+        0.006307604168859275,
+        0.3130675006350456,
+        -0.1229085369767361,
+        -0.007250312766347368,
+        0.34440264797536935,
+        -0.12575171196916707,
+        -0.00874496670225993,
+        0.34172345788082875,
+        -0.14613287539076514,
+        -0.004004037427193415,
+        0.24449253283496797,
+        -0.14683595421723455,
+        0.0016092113716571427,
+        0.3292803170063091,
+        -0.162291074501111,
+        -0.00026063916104155933,
+        0.3197427201662216,
+        -0.14996692629448855,
+        -0.0012460920407101315,
+        0.39308494012277007,
+        -0.17553834021689205,
+        -0.0020324990201109443,
+        0.3676159795476086,
+        -0.1335348021219877,
+        -0.005954839886448084,
+        0.20444481372026613,
+        -0.08157713189419499,
+        -0.009786586512328957,
+        0.24748969511201613,
+        -0.005392130692479374,
+        -0.12304002411549317,
+        0.2206569704071402,
+        0.05128375361533605,
+        -0.022555418922427885,
+        0.1857103292224933,
+        -0.04426002282369568,
+        0.02451688438283533,
+        0.21931666952169218,
+        -0.09886002099500772,
+        -0.02284680267097717,
+        0.1905279961432898,
+        -0.06501749873384005,
+        -0.010650355747590877,
+        0.22194513707834523,
+        -0.037973241548655556,
+        -0.004370525304804751,
+        0.22838723309875783,
+        -0.0314547019043915,
+        -0.008755358447481218,
+        0.18871712173010532,
+        -0.023215220550995303,
+        -0.008295501112350005,
+        0.30161642505183317,
+        -0.01741079652837539,
+        -0.026861486069213156,
+        0.45086616474370256,
+        -0.025804025563523805,
+        -0.14537333486364232,
+        0.30701916174636784,
+        -0.022911181896076917,
+        -0.16493743548387707,
+        0.15097949932251736,
+        -0.06340441582417394,
+        -0.09153927789696926,
+        0.40105007718736757,
+        0.02625961316345219,
+        0.049067122385909136,
+        0.4760304944526652,
+        -0.005090568708874038,
+        0.015226196927467711,
+        0.403268912921237,
+        -0.003607360291731063,
+        -0.05729871640347838,
+        0.23437585499582078,
+        -0.0033430556533371935,
+        -0.013012464896222535,
+        0.23449275593371818,
+        -0.004759003270076294,
+        -0.007392038310080045,
+        0.256238423121319,
+        -0.002375679644611114,
+        -0.012956196370342865,
+        0.1942656076976771,
+        0.0010385825217152165,
+        -0.03866479936960315,
+        0.30189416787645934,
+        0.012515636165304812,
+        -0.1477623102199399,
+        0.48157602796315996,
+        -0.0065204411223940325,
+        -0.13453319956484913,
+        0.1352819745724438,
+        -0.030715920786846183,
+        -0.10232416054876345,
+        0.18210256097685723,
+        -0.050298857169433046,
+        -0.05649415901118497,
+        0.3312081147123984,
+        0.05495160883392581,
+        0.02425929974106255,
+        0.36170258163555463,
+        0.15348732478227564,
+        0.06608974314148548,
+        0.3113717266297784,
+        0.04275727071000247,
+        0.021129012528089942,
+        0.17958789612680215,
+        0.007211452433945632,
+        0.0018026990694672111,
+        0.17483298485364487,
+        0.007302665768331195,
+        -0.009022761395738798,
+        0.19823410704476685,
+        -0.0012854857216846327,
+        -0.034890198274276404,
+        0.4508508437757236,
+        0.010633566328550757,
+        -0.16990403895225162,
+        0.2153115847967247,
+        0.00022819954910897119,
+        -0.15096694454963333,
+        0.09816491622570733,
+        -0.010026233674540691,
+        -0.08954525824352853,
+        0.14212083833384515,
+        -0.018716944679575836,
+        -0.06310266199994403,
+        0.1346375651296272,
+        0.005768750574517469,
+        -0.05830531940586674,
+        0.12829835035012363,
+        0.05720246638570641,
+        -0.016518761612411993,
+        0.3623495347393053,
+        0.06427364070544449,
+        0.12914006249940155,
+        0.36449082535742494,
+        0.044311263616779055,
+        0.017603061732771017,
+        0.184463857838061,
+        0.03030277432365981,
+        -0.00047135681466676317,
+        0.21428958125422135,
+        0.017099976473356475,
+        -0.030375159479416092,
+        0.4708858883459831,
+        0.009982381491833985,
+        -0.15120978561994808,
+        0.2895279729166705,
+        -0.007831960436837513,
+        -0.1534849214222824,
+        0.20833631756427126,
+        -0.020468435510423322,
+        -0.07071867865845412,
+        0.16224609829068312,
+        -0.02718516285014414,
+        -0.05643425612034074,
+        0.23574663902146498,
+        -0.0183323492097352,
+        -0.05306614173797164,
+        0.16747493951334283,
+        -0.023332136563273976,
+        -0.023760631258000774,
+        0.1732662081185239,
+        0.10034494033973382,
+        0.0439273582158584,
+        0.3452568975031745,
+        0.24387619693334264,
+        0.17621983205823422,
+        0.314169384803314,
+        0.08435263526643971,
+        0.07012761796547191,
+        0.263910524539112,
+        0.02996837296985445,
+        -0.01973477312084041,
+        0.2523848523729252,
+        0.010980575259091092,
+        -0.0972697567838401,
+        0.20151291451432776,
+        -0.014338398207620593,
+        -0.11545166228277562,
+        0.4344211735405899,
+        -0.0799005267782044,
+        -0.058228029535871285,
+        0.38031209778305247,
+        -0.09123546957639786,
+        -0.05408984859931708,
+        0.40159617723429997,
+        -0.08260609426201737,
+        -0.06111091108107465,
+        0.5657787694998584,
+        -0.03621181077855728,
+        -0.04118473209705005,
+        0.302165841258925,
+        0.03770260718466953,
+        -0.05754430136133452,
+        0.18151697399809913,
+        0.1799633727975705,
+        0.19691664101991052,
+        0.30913812179393946,
+        0.17086065327001074,
+        0.23244747121961054,
+        0.21714171233691404,
+        0.1438495530185193,
+        -0.03699249333843033,
+        0.5969459061236472,
+        0.06795477280732183,
+        -0.06987023957607041,
+        0.2513048817008448,
+        -0.007779852214355145,
+        -0.08197572188719476,
+        0.4167516128053865,
+        -0.08399498075279156,
+        -0.044367343162255664,
+        0.5718592277824693,
+        -0.1310543201473345,
+        -0.023670076986801836,
+        0.38527832640743515,
+        -0.12890858637284444,
+        -0.06149295918240024,
+        0.35258052754819214,
+        -0.15442768030829446,
+        -0.04826517598848465,
+        0.2965134120990133,
+        -0.10354708185835969,
+        -0.03767397000379634,
+        0.21913466396847744,
+        0.006568941486210726,
+        0.0721436823893264,
+        0.28484559072780524,
+        0.13749319191923404,
+        0.20453186954872024,
+        0.1884769006618762,
+        0.1770570450781959,
+        0.18036034353588082,
+        0.46751311116644756,
+        0.10135635237861428,
+        0.020376299656938955,
+        0.4047875964617449,
+        -0.0235968288905788,
+        -0.024217654876843586,
+        0.35914203234933884,
+        -0.115606747703137,
+        -0.010641778145640492,
+        0.5880347674728281,
+        -0.12654075752604962,
+        -0.0333675593059337,
+        0.2279872414561859,
+        -0.1314806784507901,
+        -0.027334030645921863,
+        0.30819448470430666,
+        -0.12728609749910763,
+        0.002088723137074043,
+        0.39902966827388064,
+        -0.12490891757634959,
+        -0.03606601328305141,
+        0.48279165276412034,
+        -0.10308483525838746,
+        -0.0023453580410773564,
+        0.7568417813275121,
+        -0.0278885073346636,
+        0.0655785030090568,
+        0.3295191963300699,
+        0.0830962940916306,
+        0.14274503043508924,
+        0.29927573489051035,
+        0.0831464330833193,
+        0.06837491354348701,
+        0.21866485078886555,
+        -0.026811621131129164,
+        -0.05238218241341045,
+        0.209809297496065,
+        -0.1477401562497081,
+        -0.01453626623911592,
+        0.22568897372941565,
+        -0.1922935569353965,
+        -0.017808419648831064,
+        0.4520523031898481,
+        -0.21040819287540288,
+        0.004943342368215575,
+        0.21049833846713092,
+        -0.1658885488472213,
+        -0.011305292063774543,
+        0.26660906283569985,
+        -0.14344234403119532,
+        -0.016629544105725348,
+        0.3247379903343338,
+        -0.1176505352031191,
+        -0.00546645740152233,
+        0.18807897772241766,
+        -0.078568675497916,
+        0.012115710137031287,
+        0.2795421695216704,
+        -0.03135526816970259,
+        0.03339653347888479,
+        0.31972955018986415,
+        0.0238610436923687,
+        0.05314949181107896
+      ],
+      "max_absolute_error": 0.0,
+      "returncode": 0
+    }
+  ],
+  "runs": [
+    {
+      "workload": "navier",
+      "round": 0,
+      "mode": "retained-inline",
+      "elapsed": 2.0176577079999998,
+      "stdout": "NavierStokes: 37100\n----\nScore (version 7): 37100\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "navier",
+      "round": 0,
+      "mode": "off",
+      "elapsed": 2.018577709,
+      "stdout": "NavierStokes: 38732\n----\nScore (version 7): 38732\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "navier",
+      "round": 0,
+      "mode": "inline",
+      "elapsed": 2.020334,
+      "stdout": "NavierStokes: 39248\n----\nScore (version 7): 39248\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "navier",
+      "round": 0,
+      "mode": "combined",
+      "elapsed": 2.020889459,
+      "stdout": "NavierStokes: 38803\n----\nScore (version 7): 38803\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "navier",
+      "round": 1,
+      "mode": "off",
+      "elapsed": 2.0220850000000006,
+      "stdout": "NavierStokes: 39208\n----\nScore (version 7): 39208\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "navier",
+      "round": 1,
+      "mode": "inline",
+      "elapsed": 2.0206368339999994,
+      "stdout": "NavierStokes: 38951\n----\nScore (version 7): 38951\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "navier",
+      "round": 1,
+      "mode": "combined",
+      "elapsed": 2.0219118750000007,
+      "stdout": "NavierStokes: 39356\n----\nScore (version 7): 39356\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "navier",
+      "round": 1,
+      "mode": "retained-inline",
+      "elapsed": 2.0213192919999994,
+      "stdout": "NavierStokes: 36693\n----\nScore (version 7): 36693\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "navier",
+      "round": 2,
+      "mode": "inline",
+      "elapsed": 2.0184682500000015,
+      "stdout": "NavierStokes: 38139\n----\nScore (version 7): 38139\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "navier",
+      "round": 2,
+      "mode": "combined",
+      "elapsed": 2.0200227910000024,
+      "stdout": "NavierStokes: 39287\n----\nScore (version 7): 39287\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "navier",
+      "round": 2,
+      "mode": "retained-inline",
+      "elapsed": 2.022255207999997,
+      "stdout": "NavierStokes: 36397\n----\nScore (version 7): 36397\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "navier",
+      "round": 2,
+      "mode": "off",
+      "elapsed": 2.022139000000003,
+      "stdout": "NavierStokes: 38842\n----\nScore (version 7): 38842\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "shared",
+      "round": 0,
+      "mode": "retained-inline",
+      "elapsed": 0.06648170799999775,
+      "stdout": "SharedClosureBatch: 54 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "shared",
+      "round": 0,
+      "mode": "off",
+      "elapsed": 0.12185070900000028,
+      "stdout": "SharedClosureBatch: 100 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "shared",
+      "round": 0,
+      "mode": "inline",
+      "elapsed": 0.06866349999999954,
+      "stdout": "SharedClosureBatch: 56 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "shared",
+      "round": 0,
+      "mode": "combined",
+      "elapsed": 0.06719420800000009,
+      "stdout": "SharedClosureBatch: 55 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "shared",
+      "round": 1,
+      "mode": "off",
+      "elapsed": 0.13533379100000076,
+      "stdout": "SharedClosureBatch: 114 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "shared",
+      "round": 1,
+      "mode": "inline",
+      "elapsed": 0.06843795799999697,
+      "stdout": "SharedClosureBatch: 56 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "shared",
+      "round": 1,
+      "mode": "combined",
+      "elapsed": 0.06699587499999993,
+      "stdout": "SharedClosureBatch: 55 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "shared",
+      "round": 1,
+      "mode": "retained-inline",
+      "elapsed": 0.0662714159999993,
+      "stdout": "SharedClosureBatch: 54 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "shared",
+      "round": 2,
+      "mode": "inline",
+      "elapsed": 0.067060957999999,
+      "stdout": "SharedClosureBatch: 55 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "shared",
+      "round": 2,
+      "mode": "combined",
+      "elapsed": 0.06609816699999982,
+      "stdout": "SharedClosureBatch: 54 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "shared",
+      "round": 2,
+      "mode": "retained-inline",
+      "elapsed": 0.0670442919999985,
+      "stdout": "SharedClosureBatch: 55 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "shared",
+      "round": 2,
+      "mode": "off",
+      "elapsed": 0.12153654099999756,
+      "stdout": "SharedClosureBatch: 100 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 0,
+      "mode": "retained-inline",
+      "elapsed": 3.491784958,
+      "stdout": "Djot: 3478 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 0,
+      "mode": "off",
+      "elapsed": 3.444108082999996,
+      "stdout": "Djot: 3431 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 0,
+      "mode": "inline",
+      "elapsed": 3.5104585839999984,
+      "stdout": "Djot: 3497 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 0,
+      "mode": "combined",
+      "elapsed": 3.4613739999999993,
+      "stdout": "Djot: 3448 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 1,
+      "mode": "off",
+      "elapsed": 3.4974165,
+      "stdout": "Djot: 3484 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 1,
+      "mode": "inline",
+      "elapsed": 3.5138405410000004,
+      "stdout": "Djot: 3500 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 1,
+      "mode": "combined",
+      "elapsed": 3.4436083749999966,
+      "stdout": "Djot: 3430 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 1,
+      "mode": "retained-inline",
+      "elapsed": 3.5030721250000028,
+      "stdout": "Djot: 3489 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 2,
+      "mode": "inline",
+      "elapsed": 3.564006040999999,
+      "stdout": "Djot: 3549 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 2,
+      "mode": "combined",
+      "elapsed": 3.4667081249999967,
+      "stdout": "Djot: 3454 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 2,
+      "mode": "retained-inline",
+      "elapsed": 3.520454082999997,
+      "stdout": "Djot: 3508 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 2,
+      "mode": "off",
+      "elapsed": 3.5108457499999943,
+      "stdout": "Djot: 3496 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 0,
+      "mode": "retained-inline",
+      "elapsed": 22.487631875000005,
+      "stdout": "Richards: 23392\nDeltaBlue: 3923\nCrypto: 24029\nRayTrace: 6473\nEarleyBoyer: 3546\nRegExp: 1624\nSplay: 9852\nNavierStokes: 36618\n----\nScore (version 7): 8591\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 0,
+      "mode": "off",
+      "elapsed": 22.43063712499999,
+      "stdout": "Richards: 22473\nDeltaBlue: 3947\nCrypto: 23882\nRayTrace: 6560\nEarleyBoyer: 3567\nRegExp: 1630\nSplay: 9934\nNavierStokes: 38732\n----\nScore (version 7): 8641\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 0,
+      "mode": "inline",
+      "elapsed": 22.496717125000018,
+      "stdout": "Richards: 23334\nDeltaBlue: 3980\nCrypto: 23998\nRayTrace: 6380\nEarleyBoyer: 3602\nRegExp: 1634\nSplay: 9885\nNavierStokes: 39099\n----\nScore (version 7): 8684\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 0,
+      "mode": "combined",
+      "elapsed": 22.448200958,
+      "stdout": "Richards: 23407\nDeltaBlue: 3941\nCrypto: 23925\nRayTrace: 6460\nEarleyBoyer: 3658\nRegExp: 1640\nSplay: 9991\nNavierStokes: 38951\n----\nScore (version 7): 8715\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 1,
+      "mode": "off",
+      "elapsed": 22.506849125000002,
+      "stdout": "Richards: 23386\nDeltaBlue: 3901\nCrypto: 24013\nRayTrace: 6521\nEarleyBoyer: 3547\nRegExp: 1613\nSplay: 9909\nNavierStokes: 38803\n----\nScore (version 7): 8653\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 1,
+      "mode": "inline",
+      "elapsed": 22.614140332999995,
+      "stdout": "Richards: 23512\nDeltaBlue: 3831\nCrypto: 23862\nRayTrace: 6265\nEarleyBoyer: 3199\nRegExp: 1497\nSplay: 9127\nNavierStokes: 37766\n----\nScore (version 7): 8287\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 1,
+      "mode": "combined",
+      "elapsed": 22.434891666999988,
+      "stdout": "Richards: 23409\nDeltaBlue: 3901\nCrypto: 24030\nRayTrace: 6345\nEarleyBoyer: 3655\nRegExp: 1632\nSplay: 9885\nNavierStokes: 38359\n----\nScore (version 7): 8655\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 1,
+      "mode": "retained-inline",
+      "elapsed": 22.49387470900001,
+      "stdout": "Richards: 23408\nDeltaBlue: 3941\nCrypto: 23921\nRayTrace: 6419\nEarleyBoyer: 3593\nRegExp: 1628\nSplay: 9551\nNavierStokes: 36322\n----\nScore (version 7): 8557\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 2,
+      "mode": "inline",
+      "elapsed": 22.450718125000037,
+      "stdout": "Richards: 23638\nDeltaBlue: 3908\nCrypto: 23750\nRayTrace: 6480\nEarleyBoyer: 3584\nRegExp: 1631\nSplay: 9657\nNavierStokes: 38765\n----\nScore (version 7): 8642\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 2,
+      "mode": "combined",
+      "elapsed": 22.414371958000004,
+      "stdout": "Richards: 23406\nDeltaBlue: 3934\nCrypto: 23929\nRayTrace: 6499\nEarleyBoyer: 3648\nRegExp: 1637\nSplay: 10032\nNavierStokes: 37990\n----\nScore (version 7): 8692\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 2,
+      "mode": "retained-inline",
+      "elapsed": 22.50467116599998,
+      "stdout": "Richards: 23476\nDeltaBlue: 3822\nCrypto: 23864\nRayTrace: 6438\nEarleyBoyer: 3572\nRegExp: 1619\nSplay: 9657\nNavierStokes: 36285\n----\nScore (version 7): 8526\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 2,
+      "mode": "off",
+      "elapsed": 22.504971875000024,
+      "stdout": "Richards: 23441\nDeltaBlue: 3881\nCrypto: 23823\nRayTrace: 6374\nEarleyBoyer: 3598\nRegExp: 1632\nSplay: 9950\nNavierStokes: 38173\n----\nScore (version 7): 8632\n",
+      "stderr": "",
+      "returncode": 0
+    }
+  ],
+  "reference": {
+    "versions": {
+      "node": "v24.18.0",
+      "bun": "1.3.14"
+    },
+    "method": "Three fresh-process runs after the Lumen comparison; alternate Node/Bun order. Same fixture files and timed workload; runtimes are not interleaved with Lumen.",
+    "runs": [
+      {
+        "workload": "shared",
+        "round": 0,
+        "engine": "node",
+        "stdout": "SharedClosureBatch: 1 ms\n",
+        "stderr": "",
+        "returncode": 0
+      },
+      {
+        "workload": "shared",
+        "round": 0,
+        "engine": "bun",
+        "stdout": "SharedClosureBatch: 2 ms\n",
+        "stderr": "",
+        "returncode": 0
+      },
+      {
+        "workload": "shared",
+        "round": 1,
+        "engine": "bun",
+        "stdout": "SharedClosureBatch: 2 ms\n",
+        "stderr": "",
+        "returncode": 0
+      },
+      {
+        "workload": "shared",
+        "round": 1,
+        "engine": "node",
+        "stdout": "SharedClosureBatch: 1 ms\n",
+        "stderr": "",
+        "returncode": 0
+      },
+      {
+        "workload": "shared",
+        "round": 2,
+        "engine": "node",
+        "stdout": "SharedClosureBatch: 2 ms\n",
+        "stderr": "",
+        "returncode": 0
+      },
+      {
+        "workload": "shared",
+        "round": 2,
+        "engine": "bun",
+        "stdout": "SharedClosureBatch: 1 ms\n",
+        "stderr": "",
+        "returncode": 0
+      },
+      {
+        "workload": "djot",
+        "round": 0,
+        "engine": "node",
+        "stdout": "Djot: 221 ms; 3160000 HTML characters\n",
+        "stderr": "",
+        "returncode": 0
+      },
+      {
+        "workload": "djot",
+        "round": 0,
+        "engine": "bun",
+        "stdout": "Djot: 144 ms; 3160000 HTML characters\n",
+        "stderr": "",
+        "returncode": 0
+      },
+      {
+        "workload": "djot",
+        "round": 1,
+        "engine": "bun",
+        "stdout": "Djot: 144 ms; 3160000 HTML characters\n",
+        "stderr": "",
+        "returncode": 0
+      },
+      {
+        "workload": "djot",
+        "round": 1,
+        "engine": "node",
+        "stdout": "Djot: 222 ms; 3160000 HTML characters\n",
+        "stderr": "",
+        "returncode": 0
+      },
+      {
+        "workload": "djot",
+        "round": 2,
+        "engine": "node",
+        "stdout": "Djot: 223 ms; 3160000 HTML characters\n",
+        "stderr": "",
+        "returncode": 0
+      },
+      {
+        "workload": "djot",
+        "round": 2,
+        "engine": "bun",
+        "stdout": "Djot: 148 ms; 3160000 HTML characters\n",
+        "stderr": "",
+        "returncode": 0
+      }
+    ]
+  }
+}
