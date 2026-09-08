@@ -88,6 +88,11 @@ mod numeric_expr;
     target_arch = "aarch64",
     any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
+mod packed_element;
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 mod property_probe;
 #[cfg(all(
     target_arch = "aarch64",
@@ -7074,15 +7079,7 @@ fn emit_get_elem_inline(
     a.cbz(12, true, slow);
     if packed_elem_inlinable(layout) {
         let classic_dense = a.new_label();
-        a.ldr_imm(15, 12, layout.dense_packed as u32);
-        a.cbz(15, true, classic_dense);
-        // Packed elements are a keyless Vec<Property>: Empty remains a semantic hole, while a
-        // live data slot can be decoded directly without an index string or entry-table chase.
-        a.ldr_imm(14, 15, layout.vec_len_off as u32);
-        a.cmp_reg_x(9, 14);
-        a.b_cond(C_HS, slow);
-        a.ldr_imm(15, 15, layout.vec_ptr_off as u32);
-        a.add_shifted(15, 15, 9, 4); // property_size == 16 (gate above)
+        packed_element::address(a, layout, classic_dense, slow, packed_element::Site::Stack);
         guard_prop_data(a, 14, 15, layout.property_meta as u32, slow);
         a.ldur(13, 15, layout.property_value as i32);
         a.mov_imm64(14, crate::value::PACK_EMPTY);
@@ -7809,13 +7806,7 @@ fn emit_elem_local_keyed(
     a.cbz(12, true, slow);
     if get && packed_elem_inlinable(layout) {
         let classic_dense = a.new_label();
-        a.ldr_imm(15, 12, layout.dense_packed as u32);
-        a.cbz(15, true, classic_dense);
-        a.ldr_imm(14, 15, layout.vec_len_off as u32);
-        a.cmp_reg_x(9, 14);
-        a.b_cond(C_HS, slow);
-        a.ldr_imm(15, 15, layout.vec_ptr_off as u32);
-        a.add_shifted(15, 15, 9, 4);
+        packed_element::address(a, layout, classic_dense, slow, packed_element::Site::Local);
         guard_prop_data(a, 14, 15, layout.property_meta as u32, slow);
         a.ldur(13, 15, layout.property_value as i32);
         a.mov_imm64(14, crate::value::PACK_EMPTY);

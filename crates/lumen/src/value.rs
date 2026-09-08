@@ -366,6 +366,9 @@ pub struct JitLayout {
     /// Nullable `Box<Vec<Property>>` within the dense sidecar. When non-null the box points at
     /// the Vec header; packed element slots use [`Value::Empty`] for holes and have no key Rc.
     pub dense_packed: usize,
+    /// Initialized inline element count and slot base within DenseBuffers.
+    pub dense_inline_len: usize,
+    pub dense_inline_slots: usize,
     /// The `mirror_flags` byte within `Props`.
     pub props_mirror_flags: usize,
     /// `size_of::<(Rc<str>, Property)>()` — the entry stride.
@@ -568,6 +571,8 @@ pub(crate) fn jit_layout(sample: &Gc) -> JitLayout {
         dense_elems: offset_of!(DenseBuffers, elems),
         dense_mirror: offset_of!(DenseBuffers, mirror),
         dense_packed: offset_of!(DenseBuffers, packed),
+        dense_inline_len: DenseBuffers::inline_len_offset(),
+        dense_inline_slots: DenseBuffers::inline_slots_offset(),
         props_mirror_flags: offset_of!(Props, mirror_flags),
         entry_size: std::mem::size_of::<(Rc<str>, Property)>(),
         entry_key: offset_of!((Rc<str>, Property), 0),

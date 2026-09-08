@@ -2602,3 +2602,93 @@ Sources, binaries, hashes, schedules, raw results and validation logs remain und
 `empty-array-sidecar-*` and `lumen-empty-array-sidecar-*` in the external optimizer
 directory. Native reads of inline packed values are the next candidate, with
 confirmed Djot capture-index reads currently falling back to helpers.
+
+### Native reads of inline packed elements (2026-09-08)
+
+Djot's verified `find` path reads both endpoints of a regex capture-index pair.
+The compact builtin constructor stores such pairs inline, but the general JIT
+read templates previously recognized only heap-packed or classic storage, so
+these reads fell back to helpers. A shared `jit/packed_element.rs` selector now
+serves stack and local-keyed reads. It prefers existing heap-packed storage,
+then checks the live inline initialized length and computes a property address.
+Zero inline length selects classic storage; an out-of-bounds inline index exits
+to the original helper. `LUMEN_JIT_NO_INLINE_PACKED_READS=1` disables the new arm
+at code-generation time and preserves the previous heap/classic instructions.
+
+Inline offsets are derived using nested Rust `offset_of!` operations in the
+storage owner. Encoding gates validate the offsets and existing property stride.
+The selector changes only x14/x15, preserving the index, dense base and receiver.
+Callers retain descriptor checks, hole/prototype fallback, packed-value decoding,
+owner acquisition and subsequent receiver release. No helper, GC or storage
+mutation occurs between selection and decoding, and each new read reloads the
+current representation. Numeric-region heap-header preparation and writes retain
+their existing contracts. A heap hit gains a branch over the inline arm, so
+regression measurements must include existing heap-backed consumers.
+
+Colocated tests separately count actual stack/local inline address selections;
+these counters run after bounds checks but before descriptor/value decoding, so
+they are not counts of completed loads. The fixtures also verify resulting values,
+lengths 1/10/11/32, strings, Undefined, NaN, BigInt fallback, readonly properties,
+alias ownership, GC, sparse/prototype/accessor fallback, shrinking and promotion,
+and proxy or invalid-index reads. The independent source review found no blocker.
+
+Validation passes 756 unit and 34 integration tests, including both new runtime
+tests; the two also pass with native inline reads disabled. Formatting and the
+new module/storage audits pass. Clippy exactly matches the existing error-message
+multiset. Release compilation succeeds for Lumen and both validation tools.
+
+Expanded before/after conformance matches exactly: 26,007 passes, two known
+failures, zero skips and identical full failure lists. Differential testing
+agrees on 1,996 cases with four budget skips.
+
+The initial 45 verified workload runs use three rotated rounds of retained
+498896d, disabled/enabled candidate, Node v24.18.0 and Bun 1.3.14. Source snapshots
+include all Rust files and executable hashes. No builds, tests or profiling
+interleave with timing. Full-change before/enabled comparisons are primary.
+
+| Workload (lower is better) | Before | Disabled | Enabled | Node | Bun |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Capture indices, µs/2,000 calls | 1380 | 1340 | 1160 | 200 | 141.43 |
+| Capture strings, µs/2,000 calls | 770 | 760 | 700 | 53.53 | 11.2 |
+| Object entries, µs/2,000 calls | 810 | 800 | 630 | 154.29 | 108.89 |
+| String split, µs/2,000 calls | 380 | 380 | 315 | 34.8 | 18.4 |
+| Djot 10,000 verified parses, ms | 3508 | 3507 | 3467 | 230 | 146 |
+| Delta 5,000 verified iterations, ms | 8271 | 8331 | 8331 | 195 | 309 |
+
+All three full-change pairs improve for each array kernel: median gains are
+15.94%, 9.09%, 22.22% and 17.11%, respectively. Djot's median improves 1.17%, but
+its pairs are mixed (-1.31%, -1.94%, +0.37%); this is not an all-round parser gain.
+Standalone Delta regresses 0.73%, with every pair slower (+0.19%, +2.62%, +0.73%).
+Disabled/enabled Delta is flat by median and mixed by pair; it does not replace
+the old-binary regression result. Initial parser time ratios are 15.07× Node and
+23.75× Bun. The classic comparison follows below.
+
+Fifteen additional sequential runs complete the classic comparison (60 total).
+
+| Classic benchmark (higher is better) | Before | Disabled | Enabled | Node | Bun |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Richards | 23431 | 23506 | 23501 | 65489 | 71818 |
+| DeltaBlue | 3894 | 3947 | 3934 | 154379 | 109346 |
+| Crypto | 23837 | 24031 | 24017 | 90863 | 118741 |
+| RayTrace | 6380 | 6460 | 6447 | 134604 | 304061 |
+| EarleyBoyer | 3634 | 3604 | 3648 | 146365 | 155724 |
+| RegExp | 1651 | 1645 | 1645 | 22843 | 30730 |
+| Splay | 9877 | 9958 | 9803 | 81238 | 94831 |
+| NavierStokes | 38101 | 37990 | 38139 | 70193 | 60931 |
+| Score (version 7) | 8637 | 8639 | 8669 | 83475 | 96636 |
+
+The full-change composite improves 0.37%, with every pair improving 0.32–0.56%.
+Crypto and RayTrace also improve in every before/enabled pair, with median gains
+0.76% and 1.05%. Other individual score directions are mixed. Splay's median
+falls 0.75%, and RegExp falls 0.36%; these counter-results remain included. The
+same-binary disabled/enabled composite improves 0.35% by median but has mixed
+pairs, so the full-change result is not a precise attribution to the inline arm.
+
+The change is retained for repeatable array-workload gains and a small consistent
+full-change suite improvement. The parser result remains mixed, and standalone
+Delta's regression is accepted explicitly; no broad application-speedup claim
+follows. Current composite ratios are 9.63× Node / 11.15× Bun, while parser
+time ratios remain 15.07× / 23.75×. The within-2× goal is not achieved. Source,
+binary hashes, schedules, strict outputs, summaries and validation are archived
+under `inline-packed-reads-*` and `lumen-inline-packed-reads-*` in the external
+optimizer directory. The next collector counting-pass proposal remains unmeasured.
