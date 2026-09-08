@@ -2796,3 +2796,78 @@ JIT attribution and binary validation are archived under
 `djot-inline-reads-current-*`, `djot-inline-jit-*` and related scripts in the external
 optimizer directory. This diagnostic changes the next action, not the measured
 Node/Bun gap or the within-2× completion status.
+
+### Direct ordinary iterator-result reads (2026-09-08, rejected)
+
+The rejected candidate made generic `iterator_step` probe an ordinary own-data result after calling
+`next` and validating that its return is an object. The new `eval/iterator_result`
+module checks side-table exotic exclusions and the object's ordinary/plain state,
+requires own data `done`, and uses existing truthiness including HTMLDDA. Truthy
+`done` returns completion without even probing `value`. Falsy `done` requires own
+data `value`, which is cloned while its result object remains borrowed and alive.
+An outer miss leaves generic ordered property access unchanged. Accessors, absent
+own fields and exotic receivers retain normal behavior; no callback or mutation
+runs inside the probe. `LUMEN_NO_DIRECT_ITERATOR_RESULT=1` disables it per process.
+
+Colocated all-tier tests assert exact completed-probe counts while checking falsy
+and truthy values, GC-held aliases, skipped value getters, getter mutation, thrown
+done/value getters, proxy trap order and inherited fields. The implementation
+clones results normally; unique-owner extraction and result allocation elimination
+are not part of this candidate. Independent source review found no blocker.
+
+Validation passes 759 unit and 34 integration tests. The three new runtime tests
+also pass with the feature disabled. Formatting/module checks pass; Clippy matches
+the existing error-message multiset exactly.
+
+Expanded before/after conformance matches exactly: 26,007 passes, two known
+failures, zero skips and identical full failure lists. Differential testing
+agrees on 1,996 cases with four budget skips.
+
+Forty-five sequential verified workload runs use three rotated rounds of retained
+bbe471f, candidate disabled/enabled, Node v24.18.0 and Bun 1.3.14. Source snapshots,
+executable hashes and strict outputs are preserved. No builds, tests or profiling
+overlap the timing runs. Full-change retained/enabled comparisons are primary.
+
+| Workload (lower is better) | Retained | Disabled | Enabled | Node | Bun |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Fresh results, µs/2,000 values | 212 | 212 | 174.29 | 4.16 | 4.6 |
+| Shared results, µs/2,000 values | 180 | 177.14 | 142.5 | 2 | 1.8 |
+| Accessor results, µs/2,000 values | 780 | 770 | 790 | 24 | 4.16 |
+| Djot 10,000 verified parses, ms | 3492 | 3488 | 3474 | 229 | 146 |
+| Delta 5,000 verified iterations, ms | 8309 | 8341 | 8318 | 196 | 305 |
+
+Fresh and shared result medians improve 17.79% and 20.83%, with all three pairs
+improving. Accessor results regress 1.28%, with two slower pairs and one tie.
+Djot's median improves 0.52%, but its pairs are mixed (+0.63%, -0.52%, -0.26%).
+Delta's median regresses 0.11%, also mixed (+1.95%, -0.18%, -0.70%). These results
+do not establish a broad application gain. Candidate parser time ratios were
+15.17× Node / 23.79× Bun.
+
+
+The final 15 classic-suite runs complete the 60-run batch:
+
+| Classic score (higher is better) | Retained | Disabled | Enabled | Node | Bun |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Richards | 23457 | 23557 | 23437 | 66039 | 72178 |
+| DeltaBlue | 3963 | 3958 | 3852 | 153857 | 111144 |
+| Crypto | 24045 | 23956 | 24008 | 92424 | 119672 |
+| RayTrace | 6412 | 6454 | 6473 | 137860 | 303691 |
+| EarleyBoyer | 3601 | 3642 | 3631 | 147975 | 159602 |
+| RegExp | 1645 | 1627 | 1604 | 22866 | 30821 |
+| Splay | 9901 | 9877 | 9844 | 81972 | 95059 |
+| NavierStokes | 38359 | 37842 | 38469 | 70787 | 71457 |
+| Score (version 7) | 8661 | 8690 | 8637 | 84060 | 99277 |
+
+The composite median declines 0.28%; paired changes are -1.63%, -0.28%
+and +0.80%. RegExp declines 2.49%, with all three pairs worse. Focused iterator
+improvements do not justify retaining this change given the mixed parser results
+and suite regressions. The candidate is archived and production source is restored
+exactly to the retained implementation. All runs remain in the evidence; no host
+load explanation is assumed.
+
+In this batch the retained engine scores 8661 against Node's 84060 and Bun's
+99277: 9.71× and 11.46× higher reference scores. Retained Djot takes 3492 ms
+against 229 ms and 146 ms: 15.25× and 23.92× longer. These are workload-specific
+comparisons, and the within-2× goal remains unmet. Artifacts, candidate binaries,
+source snapshots, rejected source, validation and independent review are under
+`direct-iterator-result-*` in the external optimizer directory.
