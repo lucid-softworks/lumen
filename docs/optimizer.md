@@ -3305,3 +3305,116 @@ strict diagnostic driver, stdout/stderr and parsed results are preserved as
 The next implementation must discharge these obligations and execute a guarded
 entry before measuring eliminated calls/allocations and off/on application timing.
 The within-2× goal remains unmet.
+
+
+### Guarded iterator entry execution (2026-09-08, rejected)
+
+The experimental `LUMEN_ITERATOR_ENTRY_EXEC` flag enabled a callback-free Rust
+evaluator for admitted entry plans in both bytecode and JIT consumers. This was
+compiled Rust reference execution, not an emitted JIT region. The executor roots
+intermediate Values,
+resolves live lexical bindings without global-object lookup or callbacks, guards
+ordinary own data and Array elements, forwards the pending numeric write on exact
+receiver/key equality, and commits only after every guard and yielded-owner clone.
+Accessors, proxies, imports/with/TDZ, holes, coercive arithmetic, readonly fields,
+unsupported callee entries and class constructors fall back before any state change.
+The original Add/Sub IEEE754 sequence remains intact.
+
+Normal calls and attempted entries share one extracted logical-call boundary:
+depth increment/check, one amortized GC poll, then attempt or ordinary call_inner.
+A miss does not poll a second time. The existing proper-tail trampoline and depth
+restoration apply to both outcomes. The consumer resolves done/value only after an
+ordinary result and restored depth; successful entries yield directly with no
+intermediate iterator-result object. Fresh identity, selected code version and
+realm checks follow the safepoint. Feedback and execution have independent flags;
+reference execution was disabled by default during the experiment.
+
+Validation passes 15 focused iterator tests plus three shared-call-boundary tests,
+and 774 unit / 34 integration tests with execution both disabled and enabled.
+Tests cover actual successful entries in both consumers, surviving yielded objects,
+post-store getter fallback with one increment and one getter call, exact alias
+forwarding, disjoint objects, IEEE rounding, readonly/proxy/hole/coercion rejection,
+call depth/tick counts, overflow, errors and proper-tail handling. Fixture setup and
+state checks explicitly reject JavaScript throws. Initial positive fixtures used
+unsupported global-object variables; switching their inputs to lexical bindings
+exercises the intended guarded path without weakening their assertions.
+
+Formatting and strict audits of all six affected focused modules pass. Clippy
+matches the existing baseline error-message multiset exactly. Expanded conformance
+matches baseline totals and complete failure lists: 26,606 passes, two known failures,
+zero skips. Differential testing agrees on 1,996 seeds with four budget skips.
+
+The unchanged verified Djot workload passes every HTML check (10,000 parses,
+3,160,000 characters) with execution and feedback enabled. Diagnostic totals are:
+
+| Event | Count |
+| --- | ---: |
+| Guarded Rust evaluator success | 260,000 |
+| Prepared-call miss | 540,000 |
+| Ordinary successful fallback: admitted parser callee | 200,000 |
+| Ordinary successful fallback: non-user callable | 340,000 |
+
+Successes match the independently counted immediate queued branch frequency.
+Misses and fallback classifications describe the same 540,000 calls and must not
+be added together. Each success bypasses the next body and fresh result-record
+construction; it is not a generated-native-instruction counter or a measured speedup.
+The custom-iterator kernel also verifies actual executor successes before timing.
+
+Release binary SHA-256:
+`a793933be6eca997c53051ee81a71659f75391e9308ce87b6430aa2c2a5489f6`.
+Drivers compare retained f056c51, same-binary execution off/on, Node and Bun in three
+rotated rounds: 45 kernel/application runs and 15 classic runs. Only on sets EXEC;
+all timing runs strip inherited LUMEN flags and disable feedback. Strict outputs,
+hashes, source snapshots and raw rows are archived under `iterator-exec-*` in the
+external optimizer directory.
+
+The 45 kernel/application comparisons are complete. Median elapsed time (lower is
+better), with three rotated runs per cell:
+
+| Workload | Retained f056c51 | Candidate off | Candidate on | Node | Bun |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| QueuedObjects, µs / verified 2,000 yields | 270 | 280 | 690 | 4.4 | 5.1 |
+| Djot, ms / 10,000 verified parses | 3,397 | 3,403 | 3,646 | 226 | 144 |
+| DeltaBlue, ms / 5,000 iterations | 8,222 | 8,216 | 8,197 | 196 | 298 |
+
+Enabled reference execution increases kernel time 155.56% and parser time 7.33%
+against retained, with losses in every paired round. Relative to candidate off,
+the increases are 146.43% and 7.14%, also losses in every round. Delta improves
+0.304% against retained in every round, but off/on changes are mixed. Call/result
+elision alone has not delivered a useful application speedup. The disabled
+candidate is also 3.70% slower on this kernel in every round; its shared-call
+extraction cannot be described as zero-cost. Disabled parser time rises 0.177%
+(all pairs slower), while Delta time falls 0.073% (mixed pairs).
+
+The retained engine in this batch takes 15.03× Node / 23.59× Bun time on Djot,
+and 41.95× / 27.59× on Delta. These are workload-specific elapsed-time ratios,
+not an overall-engine score.
+
+All 15 classic runs also complete with valid scores. Composite median scores
+(higher is better) are 8,750 retained, 8,761 off, 8,751 on, 83,474 Node and
+100,391 Bun. Enabled versus retained changes just +0.0114%, with mixed paired
+changes of -1.6706%, +0.6904% and -0.2629%. Disabled versus retained changes
++0.1257%; enabled versus disabled changes -0.1141%. RayTrace loses in every
+enabled/retained pair; other component comparisons are mixed. There is no
+consistent composite improvement to offset the target workload regressions.
+The retained classic score gap is 9.54× Node / 11.47× Bun in this batch.
+
+**Rejected.** The candidate source and its tests are preserved in
+`iterator-exec-rejected-source.zip` (all seven changed/new Rust files), the tracked
+patch and the complete measured source ZIP. Production is restored exactly to
+f056c51; neither the reference executor nor the universal call-wrapper change is
+retained. Full artifact validation, restoration hashes and independent review
+are preserved as `iterator-exec-validation.json`, `iterator-exec-restoration.json`
+and `iterator-exec-independent-audit.md`. The within-2× goal remains unmet.
+
+An independently reviewed next-step design is archived as
+`iterator-entry-native-emitter-design.md`. It proposes actual generated code
+inside an iterator-specific prepared call boundary, borrowed typed expression homes,
+lexical identity/generation guards, guarded own-property/Array probes and one
+owned output acquisition before the numeric commit. Existing property probes
+are partly reusable; name probes require explicit live-environment inputs and
+Array probes require stronger length/type guards. Raw embedded cache addresses
+must have an explicit owner independent of weak callee identity. This is a design,
+not implemented machine code or evidence of a future speedup. The follow-up
+should leave ordinary `call()` unchanged; the rejected reference tests provide
+a starting point for ownership, alias, safepoint and fallback validation.
