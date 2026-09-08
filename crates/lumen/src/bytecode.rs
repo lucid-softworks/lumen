@@ -24,6 +24,7 @@ pub(crate) mod collection_insert;
 pub(crate) mod collection_lookup;
 mod for_in;
 mod inline_frames;
+mod iterator_entry;
 mod name_path;
 pub(crate) use name_path::jit::load_cached as jit_load_cached_name;
 mod object_literal;
@@ -704,6 +705,7 @@ pub struct Chunk {
     /// calls like `caches`.
     name_caches: Vec<std::cell::Cell<NameIc>>,
     name_paths: Vec<std::cell::RefCell<Option<name_path::NamePath>>>,
+    iterator_entry_feedback: Option<Box<iterator_entry::Feedback>>,
     /// Weak handles pinning each name cache's scope allocation (parallel to `name_caches`), so
     /// the cached raw `env` pointer can never be recycled into a different scope while cached.
     name_pins: std::cell::RefCell<
@@ -2171,6 +2173,7 @@ fn compile_inner(
     let op_count = c.ops.len();
     let activation_layout = activation::ActivationLayout::new(&c.cap_inits, c.env_this, &c.names);
     Some(Rc::new(Chunk {
+        iterator_entry_feedback: iterator_entry::Feedback::for_ops(&c.ops),
         ops: c.ops,
         consts: c.consts,
         names: c.names,
@@ -5686,7 +5689,7 @@ fn run_vm(
                     None => {
                         let it = slots[is as usize].clone();
                         let nx = slots[ns as usize].clone();
-                        i.iterator_step(&it, &nx)?
+                        iterator_entry::fallback(chunk, *pc - 1, i, it, nx)?
                     }
                 };
                 match stepped {
@@ -9558,7 +9561,7 @@ unsafe fn jit_exec_inner(
                     None => {
                         let it = slots[is as usize].clone();
                         let nx = slots[ns as usize].clone();
-                        i.iterator_step(&it, &nx)?
+                        iterator_entry::fallback(chunk, pc as usize, i, it, nx)?
                     }
                 };
             match stepped {

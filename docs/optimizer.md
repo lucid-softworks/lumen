@@ -3247,3 +3247,61 @@ callee ownership, and preserve normal depth/GC checks before borrowed probes.
 Detailed reviews and validation logs are archived as `iterator-entry-*` under the
 external optimizer directory. This commit makes no new runtime speedup claim;
 the measured Node/Bun gaps and the within-2× goal remain unchanged.
+
+
+### Live iterator candidate feedback (2026-09-08, experimental)
+
+The iterator-entry analysis is connected to both bytecode and JIT fallback
+consumers behind `LUMEN_ITERATOR_ENTRY_FEEDBACK`. Observation follows a successful
+normal iterator step and uses the original owned next function, preserving
+reentrant mutation, exceptions and ordinary call safepoints. The intrinsic Array
+iterator fast path bypasses observation. No candidate executes specialized code.
+
+Per-site feedback retains weak callee identity, selected base/optimized version
+and copied analysis data. It does not retain a captured environment, callee Chunk
+or raw code pointer. Diagnostic totals classify successful fallback observations;
+accepted candidates are not successful queued entries or eliminated allocations.
+Default-disabled storage adds one nullable Box pointer per Chunk; enabled sites
+are indexed only by IterStepL PCs. Diagnostic labels are cached per classification,
+avoiding per-observation String construction. Realm membership is rechecked before
+reuse.
+
+
+Nine focused tests pass (five feedback/selection tests and four existing planner
+tests). Coverage includes both actual bytecode/JIT dispatches, captured next despite
+replacement of the iterator property, intrinsic array-yield bypass, thrown/nonobject
+results, distinct closures from one AST, weak reclamation through GC, cold-to-base-to-
+optimized refresh and foreign-realm rejection. The version test verifies optimized
+literal 9 replaces base literal 7; stable compiled observations do not replan.
+
+Full validation passes 765 unit and 34 integration tests with feedback disabled,
+and the same suite passes with feedback enabled. Formatting and strict audits of
+the two new modules pass. Clippy matches the existing error-message multiset exactly;
+it remains baseline-failing. Initial test-only Abrupt formatting compilation errors
+and two new lint findings were corrected; their original logs are archived.
+
+The release binary verifies the unchanged 10,000-parse Djot workload and every HTML
+output with feedback both enabled and disabled (3,160,000 characters each). Disabled
+mode emits no diagnostic output. Enabled mode reports:
+
+| Successful fallback classification | Observations |
+| --- | ---: |
+| Accepted: 483 ops, return PC 35, store PC 25, three branches | 460,000 |
+| Non-user callable | 340,000 |
+
+The intended live parser callee is structurally admitted on all 460,000 observed
+calls. This does not mean all 460,000 can take a fast entry: the separately measured
+immediate queued branch has 260,000 calls. Live environment, property, alias, numeric,
+rooting and safepoint obligations remain unresolved for native execution. No next
+calls or result allocations are eliminated by this feedback-only implementation.
+Elapsed diagnostic output is not accepted timing evidence or a new Node/Bun comparison.
+
+Binary SHA-256:
+`78d8c60ec3bb42f92cc88ebd99134d36cc8e53d302065e6078617cc31efd160e`.
+Build source hashes and ZIP, normal/enabled test logs, classification review,
+strict diagnostic driver, stdout/stderr and parsed results are preserved as
+`iterator-feedback-*`, `diagnose-iterator-feedback.py` and
+`iterator-entry-feedback-independent-review.md` in the external optimizer directory.
+The next implementation must discharge these obligations and execute a guarded
+entry before measuring eliminated calls/allocations and off/on application timing.
+The within-2× goal remains unmet.
