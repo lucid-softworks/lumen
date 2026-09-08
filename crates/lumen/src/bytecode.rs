@@ -1822,7 +1822,9 @@ pub(crate) fn compile_with_inlines(
     let seed = std::env::var_os("LUMEN_JIT_NO_CACHE_SEED")
         .is_none()
         .then_some(hot);
-    compile_inner(func, plan, seed)
+    let compiled = compile_inner(func, plan, seed)?;
+    inline_plan::compiled::record(func, &compiled);
+    Some(compiled)
 }
 
 fn property_cache_seeds(chunk: &Chunk) -> Vec<(Rc<str>, [IcState; PROP_IC_WAYS])> {

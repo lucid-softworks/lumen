@@ -1,4 +1,5 @@
 //! Admission planning for guarded speculative user-call inlining.
+pub(super) mod compiled;
 mod diagnostics;
 use super::{CallIc, Chunk, InlinePlanEntry, InlineWay, Op};
 use crate::ast::Function;
@@ -121,24 +122,22 @@ impl Planner<'_> {
                 Err(why) => skip!(log, idx, why),
             };
             let free_names = free_names(callee_chunk);
+            let record = diagnostics::Record {
+                caller,
+                chunk,
+                callee: f,
+                callee_chunk,
+                depth,
+                site: idx,
+                way: *way,
+                callee_object: ic.callee,
+                caller_env: caller_env as usize,
+                callee_env: callee_env as usize,
+                budget: *budget,
+                free_names: &free_names,
+            };
             if !free_names.is_empty() && !global_closure && !shared_closure {
-                diagnostics::rejected(
-                    self.admission,
-                    diagnostics::Record {
-                        caller,
-                        chunk,
-                        callee: f,
-                        callee_chunk,
-                        depth,
-                        site: idx,
-                        way: *way,
-                        callee_object: ic.callee,
-                        caller_env: caller_env as usize,
-                        callee_env: callee_env as usize,
-                        budget: *budget,
-                        free_names: &free_names,
-                    },
-                );
+                diagnostics::rejected(self.admission, record);
                 skip!(log, idx, "free names in a non-global closure");
             }
             let inline_cost = callee_chunk.ops.len();
@@ -152,6 +151,7 @@ impl Planner<'_> {
             } else {
                 Default::default()
             };
+            record.accepted(self.admission, global_closure, shared_closure, *budget);
             let f = f.clone();
             drop(b);
             ways.push(InlineWay {

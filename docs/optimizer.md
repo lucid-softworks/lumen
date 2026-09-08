@@ -3729,3 +3729,46 @@ The new release SHA-256 is
 Build/source archives, validation, detailed records and analysis use
 `inline-admission-details-*`. This is diagnostic infrastructure, not a measured
 engine speedup, and the within-2× goal remains unmet.
+
+
+### Accepted and emitted inline targets (2026-09-08)
+
+`LUMEN_INLINE_ADMISSION=1` now also records accepted PIC ways and the targets
+remaining after optimized bytecode compilation. Accepted records distinguish
+budget after the direct callee from budget after recursive planning. Final
+records identify the root Function/Chunk, callee, expected environment and every
+remaining InlineGuard PC. These are compilation events, not runtime guard hits;
+they do not establish whether native code executes an inline path.
+
+The verified unchanged Djot workload produces 21 existing rejection records,
+19 accepted-way records and 19 compiled-target records. Its ordinary tier log
+still exactly matches the retained baseline. Independent review confirms:
+
+| Helper / caller | Accepted PIC way | Final target / guard PC |
+| --- | ---: | --- |
+| topContainer / handleEvent | 2 | 0 / 65 |
+| addBlockAttributes / pushContainer | 3 | 0 / 9 |
+
+At each of these sites, the accepted way shares the caller's definition
+environment; the preceding two or three rejected ways have different
+environments. Thus rejected ways coexist with an emitted same-environment
+target. The records do not prove runtime coverage across fresh parser closures.
+Neither popContainer nor addChildToTip has an accepted or final target. The main
+parse's remaining 18-op budget and definition-versus-active environment
+distinction still constrain any proposed expansion.
+
+The next measurement is actual guard outcomes for these emitted targets,
+including an explicit account of any fused native regions. Widening identity
+checks also requires preserving the actual callable in inline reflection and GC
+roots; changing the guard alone is insufficient.
+
+Ordinary and diagnostic-enabled suites pass 820 tests. Clippy matches the
+existing error-message multiset (86 library / 88 library-test errors), rather
+than passing. Enabled conformance retains 26,606 passes and the same two known
+failures; differential fuzzing reports 1,996 agreements and four budget skips.
+Release diagnostic output verifies all 10,000 parser results. The final release
+SHA-256 is `53bd565685cfcacaee298340224d35ff62c49c8b9cb427b7771e1de92b55fd93`.
+Sources, binaries, raw results and independent helper analysis are archived as
+`inline-admission-targets-*`; the initial build with a subsequently fixed lint
+issue is separately preserved as `inline-admission-targets-pre-lint-*`.
+No runtime optimization or measured speedup is claimed for this increment.

@@ -19,15 +19,18 @@ pub(super) fn rejected(enabled: bool, record: Record<'_>) {
     if !enabled {
         return;
     }
-    eprintln!("[inline-admission] {}", json(&record));
+    eprintln!(
+        "[inline-admission] {}",
+        json(&record, "distinct-nonglobal-env")
+    );
 }
 fn strings<'a>(values: impl Iterator<Item = &'a str>) -> String {
     format!("[{}]", values.map(quoted).collect::<Vec<_>>().join(","))
 }
-fn source(function: &Function) -> String {
+pub(super) fn source(function: &Function) -> String {
     quoted(function.source.as_deref().unwrap_or(""))
 }
-fn json(r: &Record<'_>) -> String {
+fn json(r: &Record<'_>, reason: &str) -> String {
     let uses_this = r.callee_chunk.uses_this();
     let sites = r
         .chunk
@@ -46,7 +49,7 @@ fn json(r: &Record<'_>) -> String {
             .map(|s| &**s),
     );
     let fields = [
-        "\"reason\":\"distinct-nonglobal-env\"".to_owned(),
+        format!("\"reason\":{}", quoted(reason)),
         format!(
             "\"caller_function\":{}",
             r.caller as *const Function as usize
@@ -107,7 +110,7 @@ fn call_site(pc: usize, op: Op, wanted: usize, uses_this: bool) -> Option<String
     ))
 }
 
-fn quoted(value: &str) -> String {
+pub(super) fn quoted(value: &str) -> String {
     use std::fmt::Write;
     let mut out = String::from("\"");
     for c in value.chars() {
@@ -126,6 +129,18 @@ fn quoted(value: &str) -> String {
     out.push('"');
     out
 }
+impl Record<'_> {
+    pub(super) fn accepted(self, enabled: bool, global: bool, shared: bool, after: usize) {
+        let record = self;
+        if !enabled {
+            return;
+        }
+        let base = json(&record, "accepted-way");
+        let body = base.strip_suffix('}').expect("JSON object");
+        eprintln!("[inline-admission] {body},\"global_closure\":{global},\"shared_closure\":{shared},\"budget_after_nested\":{after},\"budget_after_direct\":{},\"expected_env\":{}}}",record.budget-record.callee_chunk.ops.len(),if shared{record.callee_env}else{0});
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
