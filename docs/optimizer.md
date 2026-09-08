@@ -3911,3 +3911,24 @@ refresh disabled; DeltaBlue changes from 8269 to 8288 ms, and classic score from
 The [focused report](closure-call-cache.md) contains raw results, reproduction,
 ownership details, and validation, including inherited HTTP/2 and Clippy failures
 and the identical enabled/disabled selected-conformance failure.
+
+### Shared live-closure inlining (2026-09-08)
+
+Commits `09f7025` and `835d2fd` add `LUMEN_JIT_INLINE_CLOSURES=1`. Shared
+non-global closures can inline when their AST Function and live lexical
+caller environment match. The original native identity check remains the first
+path for stable closures. A hidden local owns the actual callee; reflection and
+GC resolve weak identity snapshots from that local, including nested inlines.
+
+The verified shared-closure fixture falls from 101 to 55 ms (45.5% less time),
+but broader results are mixed: Djot changes from 3457 to 3499 ms, standalone
+DeltaBlue from 8317 to 8323 ms, and classic score from 8595 to 8549. Combining
+this with cache refresh gives 3427 ms Djot and preserves the earlier closure
+fixture's improvement. NavierStokes regresses; checked calls and conservative
+region restrictions remain. The new switch is off by default.
+
+Both previously cold Djot closure guards now record only hits. That is a proven
+change in execution coverage, not evidence of a whole-engine speedup. Same-input
+Djot reference medians are 224 ms for Node and 141 ms for Bun, leaving the
+within-2x objective unmet. See the [implementation and validation report](shared-closure-inlining.md)
+and its checked-in raw samples for the complete comparison and inherited failures.
