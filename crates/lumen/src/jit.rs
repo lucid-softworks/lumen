@@ -3065,7 +3065,10 @@ pub fn compile(
                 if chunk.inline_closure_target(*t) {
                     inline_guard_coverage::emit_closure(
                         &mut a,
+                        chunk,
                         pc as u32,
+                        layout,
+                        ilayout,
                         pc_labels[*target as usize],
                         id,
                     );

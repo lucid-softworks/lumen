@@ -6,14 +6,39 @@ use crate::{bytecode::InlineTarget, value::JitLayout};
 pub(super) use registry::Compilation;
 
 /// A shared-Function guard reads only live operands and declines before any binding.
-pub(super) fn emit_closure(a: &mut Asm, pc: u32, target: usize, id: Option<u64>) {
+pub(super) fn emit_closure(
+    a: &mut Asm,
+    chunk: &crate::bytecode::Chunk,
+    pc: u32,
+    layout: &JitLayout,
+    ilayout: &crate::interpreter::InterpLayout,
+    target: usize,
+    id: Option<u64>,
+) {
     let miss = id.map_or(target, |_| a.new_label());
+    let accepted = a.new_label();
+    let validate = a.new_label();
+    let frame_len = ilayout.fn_frames + ilayout.fnf_len_word;
+    if ilayout.valid && frame_len.is_multiple_of(8) && frame_len / 8 < 4096 {
+        // The original weak-pinned identity + environment proof remains sufficient.
+        // Stable closures keep that path; fresh instances use the shared-Function guard.
+        a.ldr_imm(9, 19, std::mem::offset_of!(super::JitCtx, interp) as u32);
+        a.ldr_imm(10, 9, frame_len as u32);
+        a.cbz(10, true, validate);
+        let crate::bytecode::Op::InlineGuard(index, _) = chunk.jit_ops()[pc as usize] else {
+            unreachable!("inline guard emitter");
+        };
+        emit(a, layout, chunk.jit_inline_target(index), validate, None);
+        a.b(accepted);
+    }
+    a.bind(validate);
     a.mov(0, 19);
     a.movz(1, pc, 0);
     a.mov(2, 20);
     a.ldr_imm(16, 21, (super::H_INLINE_CLOSURE * 8) as u32);
     a.blr(16);
     a.cbz(0, true, miss);
+    a.bind(accepted);
     if let Some(id) = id {
         let done = a.new_label();
         counters::emit(a, id, true);

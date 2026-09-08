@@ -152,6 +152,37 @@ mod tests {
         assert!(engine.interp.fn_frames.is_empty());
     }
 
+    fn assert_optimized(engine: &Engine) {
+        use crate::value::Callable;
+        let first = engine
+            .interp
+            .global
+            .borrow()
+            .props
+            .get("first")
+            .unwrap()
+            .value();
+        let invoke = first
+            .as_obj()
+            .unwrap()
+            .borrow()
+            .props
+            .get("invoke")
+            .unwrap()
+            .value();
+        let object = invoke.as_obj().unwrap().borrow();
+        let Callable::User(user) = &object.call else {
+            panic!("user function")
+        };
+        let chunk = user
+            .func
+            .code2
+            .get()
+            .and_then(Option::as_ref)
+            .expect("optimized caller");
+        assert!(chunk.has_inline_closures());
+    }
+
     #[test]
     fn fresh_shared_closures_preserve_capture_and_reflected_identity() {
         let _enabled = Enabled::new();
@@ -176,7 +207,7 @@ mod tests {
             'passed'
         "#,
         );
-        assert!(HITS.with(|hits| hits.get()) > 0, "guard never accepted");
+        assert_optimized(&engine);
         for tier in [Tier::Jit, Tier::Bytecode] {
             engine.set_tier(tier);
             HITS.with(|hits| hits.set(0));
@@ -216,7 +247,7 @@ mod tests {
             warm(); 'passed'
         "#,
         );
-        assert!(HITS.with(|hits| hits.get()) > 0);
+        assert_optimized(&engine);
         for tier in [Tier::Jit, Tier::Bytecode] {
             engine.set_tier(tier);
             HITS.with(|hits| hits.set(0));
@@ -340,7 +371,7 @@ mod tests {
             warm(); 'passed'
         "#,
         );
-        assert!(HITS.with(|hits| hits.get()) > 0);
+        assert_optimized(&engine);
         for tier in [Tier::Jit, Tier::Bytecode] {
             engine.set_tier(tier);
             HITS.with(|hits| hits.set(0));

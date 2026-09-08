@@ -25,7 +25,8 @@ Successful returns reset the hidden owner; exception paths use ordinary frame
 ownership. Snapshots own no strong references and the physical frame ABI stays
 32 bytes. Both wide and packed local representations are supported by the recorder.
 
-For now, shared-closure guards call a Rust predicate from native code. Calls within
+Native guards first try the original weak-pinned identity and environment checks;
+fresh instances call a Rust predicate to validate the broader proof. Calls within
 these inlines use checked helpers, and affected chunks exclude loop regions and
 mixed object/numeric regions whose ownership publication does not yet model the
 hidden callee. These conservative choices limit whole-application gains. This is
