@@ -8,6 +8,7 @@ mod arrays;
 mod bindings;
 pub(crate) mod call_entry;
 mod constructor_body;
+mod fresh_call;
 mod this_binding;
 pub(crate) use bindings::BindingLayout;
 pub use bindings::VarMap;
@@ -5326,48 +5327,14 @@ impl Interp {
         let ic = match hit {
             Some(ic) => ic,
             None => {
-                // Fresh-closure retry: a needs-env entry whose AST FUNCTION matches the callee
-                // still applies — closures created per call share the function and chunk; only
-                // the environment differs, and that comes from the live callee object. One
-                // borrow + pointer compare instead of a full call_jit_fast re-walk + refill
-                // per instance.
-                let has_env_entry = site.entries.iter().any(|e| {
-                    let p = e.as_ptr();
-                    unsafe { (*p).direct & crate::bytecode::CALL_IC_NEEDS_ENV != 0 }
-                });
-                if !has_env_entry {
-                    return None;
+                let ic = self.fresh_call_ic(site, o, key, genv, epoch)?;
+                if ic.direct & crate::bytecode::CALL_IC_NEEDS_ENV != 0 {
+                    return Some(unsafe {
+                        self.call_jit_env_committed(ic, ic.env, this_slot, args, argc)
+                    });
                 }
-                let (fp, ep) = match &o.borrow().call {
-                    // `under_with`: see the refusal in `call_jit_fast` — this retry runs a
-                    // FRESH closure instance whose env was never vetted there.
-                    Callable::User(user)
-                        if !user.func.is_arrow && !user.env.borrow().under_with =>
-                    {
-                        (Rc::as_ptr(&user.func), Rc::as_ptr(&user.env))
-                    }
-                    _ => return None,
-                };
-                let mut found = None;
-                for e in &site.entries {
-                    let p = e.as_ptr();
-                    unsafe {
-                        if (*p).direct & crate::bytecode::CALL_IC_NEEDS_ENV != 0
-                            && (*p).func == fp
-                            && (*p).global_env == genv
-                            && (*p).epoch == epoch
-                        {
-                            found = Some(*p);
-                            break;
-                        }
-                    }
-                }
-                let mut ic = found?;
-                // The cached code belongs to the shared AST, but reflection and the
-                // frame's lifetime proof must identify the live closure on the stack.
-                ic.callee = key;
-                ic.env = ep;
-                return Some(unsafe { self.call_jit_env_committed(ic, ep, this_slot, args, argc) });
+                // Fresh no-activation calls retain the normal recompile opportunity below.
+                ic
             }
         };
         if ic.native != 0 {

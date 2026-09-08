@@ -3839,3 +3839,56 @@ pass 823 tests; Clippy matches its existing baseline. Enabled conformance retain
 Source archives, binaries, counts and independent completeness review are saved
 under `inline-guard-coverage-*`. Instrumented elapsed time is not a performance
 result, and no speedup is claimed for this diagnostic increment.
+
+
+### Draft checkpoint: fresh closure call-cache retries (2026-09-08)
+
+`interpreter/fresh_call.rs` extracts the existing activation-bearing closure
+retry and adds an experimental no-activation retry, disabled unless
+`LUMEN_JIT_FRESH_CLOSURE_RETRY=1` is present at its first use. The new path checks
+live callable eligibility, realm, Function identity, current code and cache
+epoch, plus frame dimensions and strictness/receiver flags. Matching recycled
+addresses cannot authorize stale frame metadata. Only the returned local IC
+copy receives the actual callee and environment; ordinary physical frames,
+ownership, exception handling and inline recompilation remain in effect.
+
+The first complete comparison used three rotated rounds of retained/off/on/Node/
+Bun, with verified fresh-closure batches, Djot, DeltaBlue and the classic suite.
+Medians for the retained engine, candidate disabled and candidate enabled were:
+
+| Workload | Retained | Disabled | Enabled |
+| --- | ---: | ---: | ---: |
+| Fresh captured closures, microseconds / 2,000 | 850 | 850 | 820 |
+| Fresh shared-environment closures, microseconds / 2,000 | 580 | 550 | 540 |
+| Reused-function control, microseconds / 2,000 | 17.333 | 17.333 | 17.333 |
+| Djot, milliseconds / 10,000 verified parses | 3,459 | 3,429 | 3,398 |
+| DeltaBlue, milliseconds / 5,000 iterations | 8,373 | 8,383 | 8,321 |
+| Classic suite score (higher is better) | 8,685 | 8,688 | 8,639 |
+
+Parser time improved in all three enabled/disabled pairs, but classic score was
+lower in two of three pairs and its median fell 0.56%. This version was not
+approved for default enablement. The retained engine in this batch remained
+about 9.6x/11.5x behind Node/Bun on classic score and 15.1x/23.7x on Djot.
+
+The current revision rejects sites without a plausible cached user Function
+before inspecting object/environment eligibility, preserving all safety checks.
+This ordering is intended to reduce unsuccessful admission work; that cause and
+its performance benefit are not established. Its benchmark was stopped at the
+user's request after 17 of 45 main-workload runs, before the classic comparison.
+Those partial measurements are not an accepted performance result. Both native
+iterator entries and fresh-closure retries remain disabled by default.
+
+The exact current Rust source matches the archived release build. Ordinary and
+enabled suites each pass 827 tests, including four actual-hit/metadata regressions
+colocated with the retry. The JIT-dependent tests are gated to supported AArch64
+platforms. Clippy matches the existing 86/88 error-message baseline; enabled
+conformance retains 26,606 passes and the same two known failures; fuzzing reports
+1,996 agreements and four budget skips. Formatting and the focused structural
+audit pass. Release SHA-256:
+`4ad7fa27a10fb55bb0628a9e3f928fad27a1def38505d62d1e523d72b25b82b8`.
+
+The local evidence archive uses `fresh-call-*` for the initial complete candidate
+and `fresh-call-gated-*` for the current revision. The stopped batch is explicitly
+marked `stopped_by_user`; pre-lint artifacts are separately preserved. These raw
+archives live outside the repository. This draft preserves the experiment for
+review, not as a completed performance milestone. The within-2x objective is unmet.
