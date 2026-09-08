@@ -2871,3 +2871,62 @@ against 229 ms and 146 ms: 15.25× and 23.92× longer. These are workload-specif
 comparisons, and the within-2× goal remains unmet. Artifacts, candidate binaries,
 source snapshots, rejected source, validation and independent review are under
 `direct-iterator-result-*` in the external optimizer directory.
+
+
+### Native deeper-name coverage (2026-09-08, diagnostic)
+
+A temporary instrumented build of retained production source counts only successful
+`name_path::jit::load_cached` lookups, after the checked path returns its live value.
+It classifies the successful cache's holder, guard count, layout-guard count and
+BigInt value status. It does not count fills, misses, direct native NameIc hits or
+all lexical accesses. The helper and diagnostic inspect the same cache without JS
+or mutation between them. Counters dump every category at process exit.
+
+The verified 10,000-parse Djot workload completes with 3,160,000 HTML characters:
+
+| Completed helper-hit category | Count | Share |
+| --- | ---: | ---: |
+| Exact binding, all guards exact | 12,000,361 | 85.36% |
+| Exact binding, at least one layout guard | 1,378,940 | 9.81% |
+| Global property holder | 680,000 | 4.84% |
+| Template binding holder | 0 | 0% |
+| Total | 14,059,301 | 100% |
+
+The exact-only category spans two, four, six and seven guards. No successful hit
+returned BigInt. This is measured workload coverage, not a reason to omit BigInt's
+checked fallback. Delta's verified 5,000-iteration workload exits successfully and
+records zero successful deeper-name helper hits. Its bottleneck needs other work.
+
+This evidence changes the next implementation from a broad template/native-binding
+view to exact-scope guards first: stable per-cache publication, live parent-chain
+identity and generation checks, live binding initialization/import checks, and reuse
+of the existing native value decoder. Layout and global paths keep the checked
+helper. This avoids adding fields and mutation bookkeeping to every VarMap for a
+first candidate that can cover 85.36% of measured successful parser helper hits.
+The profile attributes about 4% of parser samples to the name-path family; neither
+that attribution nor coverage predicts the resulting application speedup.
+
+The release diagnostic binary hash is
+`b6ae3aca09365d9cb38f6fada5e427a6e59b99ca2f0020acbe1c13beab87e5c4`.
+Only `LUMEN_NAME_PATH_COVERAGE=1` and `LUMEN_JIT_OPSTAT=1` are enabled after clearing
+inherited LUMEN flags. Instrumented elapsed times are not performance comparisons.
+The original driver incorrectly required nonempty coverage rows and failed after
+Delta had passed exit-code and strict-output checks. That driver and traceback are
+preserved; zero was finalized from the existing output without rerunning the engine.
+The corrected driver accepts zero. Source snapshots include the untracked diagnostic
+module; raw outputs, binary, source patch and metadata are archived under
+`name-path-coverage-*` in the external optimizer directory. Instrumentation is removed
+from production source. No new production speedup or correctness-suite result is
+claimed by this diagnostic; the within-2× target remains unmet.
+
+
+Independent artifact review verifies counts, source/binary/workload hashes and the
+zero-hit finalization. Owner review identifies a remaining ABI boundary:
+`Binding.import_ref` is an `Option<(Env, String)>` without a promised native tag
+layout, and mutable binding access can change it without bumping generation.
+The first implementation should keep a small checked final-binding helper for live
+initialization/import validation while moving the repeated exact scope traversal
+into generated code. It must also reject conflicting live RefCell borrows. This
+preserves the current checks without guessing Rust enum storage or widening the
+binding-map mutation contract. The helper's residual cost must be measured in the
+full before/after comparison.
