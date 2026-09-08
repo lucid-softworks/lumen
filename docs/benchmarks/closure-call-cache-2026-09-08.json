@@ -1,0 +1,454 @@
+{
+  "date": "2026-09-08",
+  "machine": "Apple M4 / macOS arm64",
+  "base_commit": "6976d91",
+  "implementation_commit": "2faa9d7",
+  "candidate_sha256": "0e6b452bed4e027ccbe035704d0dc667457b826440c51bf794f3fc7b6c4161e8",
+  "baseline_sha256": "44ab385b25778668dab77218f262f2bcf88c3450a24c46c7ae50287de5d95597",
+  "mode_environment": {
+    "retained": {},
+    "disabled": {},
+    "refresh": {
+      "LUMEN_JIT_REFRESH_CLOSURE_CACHE": "1"
+    }
+  },
+  "method": "Three sequential fresh-process rounds; rotate retained, disabled, refresh. No task builds/tests/profiles overlap timing; unrelated machine activity is not controlled.",
+  "workload_sha256": {
+    "djot.js": "55ebab9bfc306f8dea3843fd9699ecdb3fa2c709d8e9943a7d52967e35058608",
+    "closure-batch.js": "bd83729613700cf6cae03b7749a4020845f844a7d696e6be46940b980ef8955e",
+    "delta.js": "ecc3f89e50b1a071f3f2549436eb4f01d7cb2d54e3a928938e6c8164452bf22b",
+    "classic.js": "077a1dd6ea48ddd00471cff26f1556a7caecb0992fd206d348db7cdeeac9e4fb"
+  },
+  "metrics": {
+    "closure-batch": {
+      "retained": {
+        "median": 111,
+        "samples": [
+          109,
+          111,
+          113
+        ]
+      },
+      "disabled": {
+        "median": 111,
+        "samples": [
+          114,
+          110,
+          111
+        ]
+      },
+      "refresh": {
+        "median": 78,
+        "samples": [
+          78,
+          78,
+          78
+        ]
+      }
+    },
+    "djot": {
+      "retained": {
+        "median": 3434,
+        "samples": [
+          3434,
+          3433,
+          3518
+        ]
+      },
+      "disabled": {
+        "median": 3457,
+        "samples": [
+          3445,
+          3491,
+          3457
+        ]
+      },
+      "refresh": {
+        "median": 3402,
+        "samples": [
+          3402,
+          3432,
+          3379
+        ]
+      }
+    },
+    "delta": {
+      "retained": {
+        "median": 8328,
+        "samples": [
+          8264,
+          8328,
+          8332
+        ]
+      },
+      "disabled": {
+        "median": 8269,
+        "samples": [
+          8288,
+          8196,
+          8269
+        ]
+      },
+      "refresh": {
+        "median": 8288,
+        "samples": [
+          8288,
+          8253,
+          8415
+        ]
+      }
+    },
+    "classic": {
+      "retained": {
+        "median": 8694,
+        "samples": [
+          8716,
+          8694,
+          8416
+        ]
+      },
+      "disabled": {
+        "median": 8662,
+        "samples": [
+          8683,
+          8662,
+          8575
+        ]
+      },
+      "refresh": {
+        "median": 8735,
+        "samples": [
+          8706,
+          8739,
+          8735
+        ]
+      }
+    }
+  },
+  "runs": [
+    {
+      "workload": "closure-batch",
+      "round": 0,
+      "engine": "retained",
+      "elapsed": 0.14507175,
+      "returncode": 0,
+      "stdout": "ClosureBatch: 109 ms\n",
+      "stderr": ""
+    },
+    {
+      "workload": "closure-batch",
+      "round": 0,
+      "engine": "disabled",
+      "elapsed": 0.6309298750000001,
+      "returncode": 0,
+      "stdout": "ClosureBatch: 114 ms\n",
+      "stderr": ""
+    },
+    {
+      "workload": "closure-batch",
+      "round": 0,
+      "engine": "refresh",
+      "elapsed": 0.09599695800000008,
+      "returncode": 0,
+      "stdout": "ClosureBatch: 78 ms\n",
+      "stderr": ""
+    },
+    {
+      "workload": "closure-batch",
+      "round": 1,
+      "engine": "disabled",
+      "elapsed": 0.1330512920000001,
+      "returncode": 0,
+      "stdout": "ClosureBatch: 110 ms\n",
+      "stderr": ""
+    },
+    {
+      "workload": "closure-batch",
+      "round": 1,
+      "engine": "refresh",
+      "elapsed": 0.09508083300000014,
+      "returncode": 0,
+      "stdout": "ClosureBatch: 78 ms\n",
+      "stderr": ""
+    },
+    {
+      "workload": "closure-batch",
+      "round": 1,
+      "engine": "retained",
+      "elapsed": 0.134255083,
+      "returncode": 0,
+      "stdout": "ClosureBatch: 111 ms\n",
+      "stderr": ""
+    },
+    {
+      "workload": "closure-batch",
+      "round": 2,
+      "engine": "refresh",
+      "elapsed": 0.0957667080000002,
+      "returncode": 0,
+      "stdout": "ClosureBatch: 78 ms\n",
+      "stderr": ""
+    },
+    {
+      "workload": "closure-batch",
+      "round": 2,
+      "engine": "retained",
+      "elapsed": 0.13576533400000002,
+      "returncode": 0,
+      "stdout": "ClosureBatch: 113 ms\n",
+      "stderr": ""
+    },
+    {
+      "workload": "closure-batch",
+      "round": 2,
+      "engine": "disabled",
+      "elapsed": 0.13366595799999992,
+      "returncode": 0,
+      "stdout": "ClosureBatch: 111 ms\n",
+      "stderr": ""
+    },
+    {
+      "workload": "djot",
+      "round": 0,
+      "engine": "retained",
+      "elapsed": 3.4509857499999996,
+      "returncode": 0,
+      "stdout": "Djot: 3434 ms; 3160000 HTML characters\n",
+      "stderr": ""
+    },
+    {
+      "workload": "djot",
+      "round": 0,
+      "engine": "disabled",
+      "elapsed": 3.458386625,
+      "returncode": 0,
+      "stdout": "Djot: 3445 ms; 3160000 HTML characters\n",
+      "stderr": ""
+    },
+    {
+      "workload": "djot",
+      "round": 0,
+      "engine": "refresh",
+      "elapsed": 3.4157330409999993,
+      "returncode": 0,
+      "stdout": "Djot: 3402 ms; 3160000 HTML characters\n",
+      "stderr": ""
+    },
+    {
+      "workload": "djot",
+      "round": 1,
+      "engine": "disabled",
+      "elapsed": 3.505054165999999,
+      "returncode": 0,
+      "stdout": "Djot: 3491 ms; 3160000 HTML characters\n",
+      "stderr": ""
+    },
+    {
+      "workload": "djot",
+      "round": 1,
+      "engine": "refresh",
+      "elapsed": 3.4450724169999987,
+      "returncode": 0,
+      "stdout": "Djot: 3432 ms; 3160000 HTML characters\n",
+      "stderr": ""
+    },
+    {
+      "workload": "djot",
+      "round": 1,
+      "engine": "retained",
+      "elapsed": 3.4461879159999995,
+      "returncode": 0,
+      "stdout": "Djot: 3433 ms; 3160000 HTML characters\n",
+      "stderr": ""
+    },
+    {
+      "workload": "djot",
+      "round": 2,
+      "engine": "refresh",
+      "elapsed": 3.392211165999999,
+      "returncode": 0,
+      "stdout": "Djot: 3379 ms; 3160000 HTML characters\n",
+      "stderr": ""
+    },
+    {
+      "workload": "djot",
+      "round": 2,
+      "engine": "retained",
+      "elapsed": 3.5314700419999987,
+      "returncode": 0,
+      "stdout": "Djot: 3518 ms; 3160000 HTML characters\n",
+      "stderr": ""
+    },
+    {
+      "workload": "djot",
+      "round": 2,
+      "engine": "disabled",
+      "elapsed": 3.471312041000001,
+      "returncode": 0,
+      "stdout": "Djot: 3457 ms; 3160000 HTML characters\n",
+      "stderr": ""
+    },
+    {
+      "workload": "delta",
+      "round": 0,
+      "engine": "retained",
+      "elapsed": 8.269609917000004,
+      "returncode": 0,
+      "stdout": "DeltaBlue: 8264 ms\n",
+      "stderr": ""
+    },
+    {
+      "workload": "delta",
+      "round": 0,
+      "engine": "disabled",
+      "elapsed": 8.293247084,
+      "returncode": 0,
+      "stdout": "DeltaBlue: 8288 ms\n",
+      "stderr": ""
+    },
+    {
+      "workload": "delta",
+      "round": 0,
+      "engine": "refresh",
+      "elapsed": 8.293472125000001,
+      "returncode": 0,
+      "stdout": "DeltaBlue: 8288 ms\n",
+      "stderr": ""
+    },
+    {
+      "workload": "delta",
+      "round": 1,
+      "engine": "disabled",
+      "elapsed": 8.201492207999998,
+      "returncode": 0,
+      "stdout": "DeltaBlue: 8196 ms\n",
+      "stderr": ""
+    },
+    {
+      "workload": "delta",
+      "round": 1,
+      "engine": "refresh",
+      "elapsed": 8.258826499999998,
+      "returncode": 0,
+      "stdout": "DeltaBlue: 8253 ms\n",
+      "stderr": ""
+    },
+    {
+      "workload": "delta",
+      "round": 1,
+      "engine": "retained",
+      "elapsed": 8.334153916999995,
+      "returncode": 0,
+      "stdout": "DeltaBlue: 8328 ms\n",
+      "stderr": ""
+    },
+    {
+      "workload": "delta",
+      "round": 2,
+      "engine": "refresh",
+      "elapsed": 8.420690665999999,
+      "returncode": 0,
+      "stdout": "DeltaBlue: 8415 ms\n",
+      "stderr": ""
+    },
+    {
+      "workload": "delta",
+      "round": 2,
+      "engine": "retained",
+      "elapsed": 8.336908917000002,
+      "returncode": 0,
+      "stdout": "DeltaBlue: 8332 ms\n",
+      "stderr": ""
+    },
+    {
+      "workload": "delta",
+      "round": 2,
+      "engine": "disabled",
+      "elapsed": 8.27435583399999,
+      "returncode": 0,
+      "stdout": "DeltaBlue: 8269 ms\n",
+      "stderr": ""
+    },
+    {
+      "workload": "classic",
+      "round": 0,
+      "engine": "retained",
+      "elapsed": 22.503415916999984,
+      "returncode": 0,
+      "stdout": "Richards: 23415\nDeltaBlue: 3974\nCrypto: 24089\nRayTrace: 6499\nEarleyBoyer: 3646\nRegExp: 1632\nSplay: 9934\nNavierStokes: 38655\n----\nScore (version 7): 8716\n",
+      "stderr": ""
+    },
+    {
+      "workload": "classic",
+      "round": 0,
+      "engine": "disabled",
+      "elapsed": 22.447524915999992,
+      "returncode": 0,
+      "stdout": "Richards: 23428\nDeltaBlue: 3970\nCrypto: 24016\nRayTrace: 6480\nEarleyBoyer: 3650\nRegExp: 1630\nSplay: 9706\nNavierStokes: 38655\n----\nScore (version 7): 8683\n",
+      "stderr": ""
+    },
+    {
+      "workload": "classic",
+      "round": 0,
+      "engine": "refresh",
+      "elapsed": 22.523934374999982,
+      "returncode": 0,
+      "stdout": "Richards: 23429\nDeltaBlue: 3890\nCrypto: 23984\nRayTrace: 6447\nEarleyBoyer: 3719\nRegExp: 1639\nSplay: 9926\nNavierStokes: 38694\n----\nScore (version 7): 8706\n",
+      "stderr": ""
+    },
+    {
+      "workload": "classic",
+      "round": 1,
+      "engine": "disabled",
+      "elapsed": 22.55867650000002,
+      "returncode": 0,
+      "stdout": "Richards: 23386\nDeltaBlue: 3789\nCrypto: 24067\nRayTrace: 6553\nEarleyBoyer: 3653\nRegExp: 1635\nSplay: 9812\nNavierStokes: 38732\n----\nScore (version 7): 8662\n",
+      "stderr": ""
+    },
+    {
+      "workload": "classic",
+      "round": 1,
+      "engine": "refresh",
+      "elapsed": 22.481727250000006,
+      "returncode": 0,
+      "stdout": "Richards: 23433\nDeltaBlue: 3941\nCrypto: 24122\nRayTrace: 6505\nEarleyBoyer: 3720\nRegExp: 1638\nSplay: 10072\nNavierStokes: 38249\n----\nScore (version 7): 8739\n",
+      "stderr": ""
+    },
+    {
+      "workload": "classic",
+      "round": 1,
+      "engine": "retained",
+      "elapsed": 22.566494750000004,
+      "returncode": 0,
+      "stdout": "Richards: 23523\nDeltaBlue: 3914\nCrypto: 24128\nRayTrace: 6553\nEarleyBoyer: 3667\nRegExp: 1633\nSplay: 9820\nNavierStokes: 38139\n----\nScore (version 7): 8694\n",
+      "stderr": ""
+    },
+    {
+      "workload": "classic",
+      "round": 2,
+      "engine": "refresh",
+      "elapsed": 22.52173483300001,
+      "returncode": 0,
+      "stdout": "Richards: 23532\nDeltaBlue: 3974\nCrypto: 24032\nRayTrace: 6486\nEarleyBoyer: 3695\nRegExp: 1648\nSplay: 9893\nNavierStokes: 38617\n----\nScore (version 7): 8735\n",
+      "stderr": ""
+    },
+    {
+      "workload": "classic",
+      "round": 2,
+      "engine": "retained",
+      "elapsed": 22.46763545799996,
+      "returncode": 0,
+      "stdout": "Richards: 23478\nDeltaBlue: 3917\nCrypto: 23988\nRayTrace: 6512\nEarleyBoyer: 3622\nRegExp: 1484\nSplay: 9241\nNavierStokes: 35284\n----\nScore (version 7): 8416\n",
+      "stderr": ""
+    },
+    {
+      "workload": "classic",
+      "round": 2,
+      "engine": "disabled",
+      "elapsed": 22.463544000000013,
+      "returncode": 0,
+      "stdout": "Richards: 22858\nDeltaBlue: 3996\nCrypto: 24018\nRayTrace: 6438\nEarleyBoyer: 3492\nRegExp: 1634\nSplay: 9494\nNavierStokes: 38211\n----\nScore (version 7): 8575\n",
+      "stderr": ""
+    }
+  ]
+}

@@ -3892,3 +3892,22 @@ and `fresh-call-gated-*` for the current revision. The stopped batch is explicit
 marked `stopped_by_user`; pre-lint artifacts are separately preserved. These raw
 archives live outside the repository. This draft preserves the experiment for
 review, not as a completed performance milestone. The within-2x objective is unmet.
+
+### Bounded fresh-closure identity-cache refresh (2026-09-08)
+
+Branch `perf/closure-call-inlining`, based on fast-forward-pulled local main at
+`6976d91`, adds an opt-in follow-up in `2faa9d7`. A validated no-activation retry
+can publish a bounded, weakly pinned identity entry, allowing repeated calls to
+the same fresh closure to use ordinary native dispatch. Native addresses and
+dispatch flags are rebuilt from live code. Public `CallSite` layout is preserved;
+replaceable pins belong to the chunk and cannot authorize baked optimizer pointers.
+
+Three rotated final comparisons reduce a verified 1.6-million-call closure fixture
+from 111 to 78 ms. Djot changes from 3457 to 3402 ms against the same binary with
+refresh disabled; DeltaBlue changes from 8269 to 8288 ms, and classic score from
+8662 to 8735. Host variation and the small broader changes limit these conclusions.
+`LUMEN_JIT_REFRESH_CLOSURE_CACHE=1` remains opt-in; the within-2x objective is unmet.
+
+The [focused report](closure-call-cache.md) contains raw results, reproduction,
+ownership details, and validation, including inherited HTTP/2 and Clippy failures
+and the identical enabled/disabled selected-conformance failure.
