@@ -3601,3 +3601,69 @@ zero-overhead configuration. The current default remains 9.644× behind Node /
 The within-2× goal remains unmet. Further investigation targets ordinary misses
 that unnecessarily enter the native call wrapper and duplicated live eligibility
 checks; their timing benefit is not yet measured.
+
+### Rejected native iterator negative-hint routing (2026-09-08)
+
+A measured candidate checked native-entry presence and Weak callee identity before
+entering the native call wrapper. A negative hint used ordinary iterator_step,
+released the site borrow before callbacks and observed only successful protocol
+completion. A positive hint retained the full live validation after one normal
+GC/depth poll. New VM/JIT coverage exercised ordinary next re-entering the same
+warmed consumer. No eligibility checks were consolidated in this experiment.
+
+All 820 tests passed with the experiment disabled and enabled, including 27
+focused tests. Clippy matched the baseline error-message multiset. Enabled
+conformance matched the saved baseline at 26,606 passes / two known failures;
+differential seeds 1..2001 produced 1,996 agreements / four budget skips. The
+verified 10,000-parse diagnostic retained 260,000 native successes, one compilation
+and 9,999 reuses. It recorded 350,000 bypasses and 190,000 actual native misses.
+Bypasses count routed attempts, including potential throws; their reduction of
+the old miss counter is routing, not improved generated guard coverage.
+
+All 60 timings were retained and independently audited. Unlike the preceding
+comparison, BEFORE is saved d1d65c9 with native execution ENABLED, and ON is the
+routing candidate with native execution ENABLED. OFF is the candidate disabled.
+OFF/BEFORE therefore does not isolate default-disabled overhead. Node 24.18.0 and
+Bun 1.3.14, workloads, three rotated rounds and absence of feedback logging remain
+explicitly recorded. No builds, tests or profiles overlap the measurements.
+
+| Metric (median) | Previous native-on | Candidate off | Candidate on | Node | Bun |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| QueuedObjects µs / 2,000 verified yields | 168.5714 | 270 | 171.4286 | 4.4 | 5.2 |
+| Djot ms / 10,000 verified parses | 3,488 | 3,436 | 3,490 | 228 | 143 |
+| DeltaBlue ms / 5,000 | 8,307 | 8,335 | 8,324 | 200 | 311 |
+| Classic score, higher is better | 8,698 | 8,674 | 8,710 | 83,813 | 99,515 |
+
+Routing slows the iterator kernel 1.695%, with all three paired rounds slower.
+Djot changes +0.057% in time and DeltaBlue +0.205%, both with mixed directions.
+Classic score improves 0.138%, with all three pairs higher: +3.972%, +0.149% and
++0.138%. The lower first previous-native score of 8,359 remains included; no host
+cause is inferred. The small classic gain does not justify the consistent kernel
+loss and absent parser gain from this added iterator path. The routing code is
+rejected, archived, and all Rust sources restored byte-for-byte to d1d65c9.
+
+Candidate binary SHA-256:
+`5ab9d816d0df7d7505b863ce7e7701a5ee639b71ce4611fcdc78f74b92705015`.
+The rejected three-source ZIP, exact tracked patch, built/measured archives,
+validation, diagnostics, timing rows and summaries, independent review and exact
+restoration proof are under `iterator-routing-*` in the external optimizer
+directory. The retained implementation remains disabled by default; its retained
+comparison and goal gaps are the previous section, not this discarded candidate.
+
+After all timing processes ended, an existing LUMEN_TIER_LOG diagnostic on the
+saved d1d65c9 default binary verified the unchanged full parser output. It reports
+21 free-name/non-global-closure rejection events, 17 optimized-body-budget events,
+17 arrow/strictness events, 10 size/shape events, four callee-op events and one
+each for self-recursion and parameter shape. These are compilation events, not
+runtime call counts; repeated events need not represent distinct eligible targets.
+Artifacts are `inline-admission-djot.*` and `diagnose-inline-admission.py`. The
+next admission investigation must intersect all remaining guards and hotness
+before extending cross-environment call inlining. The within-2× goal is unmet.
+
+The subsequent caller summaries in the log associate those 21 events with handleEvent
+(two), pushContainer (three) and main parse (16), but existing messages omit
+recursive depth, callee identity and cache way. Remaining-budget consumption and
+later receiver/shadowing/lowering checks still follow the lexical rejection.
+`inline-admission-review.md` records this limitation and the required precise
+site/target eligibility plus call-frequency diagnostic; no cross-environment
+inlining implementation is justified by the event total alone.
