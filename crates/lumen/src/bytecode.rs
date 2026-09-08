@@ -18,6 +18,8 @@
 //! `--tier`, or `Engine::set_tier`.
 
 mod activation;
+mod call_site;
+pub use call_site::CallSite;
 pub(crate) mod array_destructure;
 pub(crate) mod array_iterator_step;
 pub(crate) mod collection_insert;
@@ -346,40 +348,6 @@ pub static CALL_IC_EPOCH: std::sync::atomic::AtomicU32 = std::sync::atomic::Atom
 /// to four distinct callees.
 /// Way count of [`CallSite::entries`] — the JIT call template's inline probe walks all of them.
 pub const CALL_IC_WAYS: usize = 4;
-
-pub struct CallSite {
-    pub entries: [std::cell::Cell<CallIc>; CALL_IC_WAYS],
-    /// Round-robin fill cursor.
-    pub next: std::cell::Cell<u8>,
-}
-
-impl CallSite {
-    pub fn empty() -> CallSite {
-        CallSite {
-            entries: [
-                std::cell::Cell::new(CallIc::EMPTY),
-                std::cell::Cell::new(CallIc::EMPTY),
-                std::cell::Cell::new(CallIc::EMPTY),
-                std::cell::Cell::new(CallIc::EMPTY),
-            ],
-            next: std::cell::Cell::new(0),
-        }
-    }
-    /// Record `ic`, replacing an existing way for the same callee (epoch or realm refills must
-    /// not fan one callee across ways — the inline planner reads way-count as polymorphism),
-    /// else the next way round-robin.
-    pub fn fill(&self, ic: CallIc) {
-        for e in &self.entries {
-            if e.get().callee == ic.callee {
-                e.set(ic);
-                return;
-            }
-        }
-        let k = self.next.get() as usize & 3;
-        self.entries[k].set(ic);
-        self.next.set((k as u8 + 1) & 3);
-    }
-}
 
 /// Monomorphic `new`-site cache. Constructors are overwhelmingly fixed per source site, so this
 /// avoids the interpreter-wide constructor hash table after the first execution while retaining
@@ -741,6 +709,8 @@ pub struct Chunk {
     regexp_literals: Vec<std::cell::OnceCell<Rc<crate::regex::Regex>>>,
     /// One [`CallSite`] per `Call`/`CallWithThis` site (the JIT→JIT fast call's callee cache).
     call_caches: Vec<CallSite>,
+    /// Lazy, bounded runtime pins; never used to authorize baked optimizer pointers.
+    call_refresh_pins: std::cell::RefCell<crate::fasthash::FastMap<u32, Option<CallPin>>>,
     /// One monomorphic identity cache per `New` site.
     construct_caches: Vec<std::cell::Cell<ConstructSite>>,
     /// Weak handles pinning every callee address a call cache has ever recorded (see [`CallIc`]),
@@ -2211,6 +2181,7 @@ fn compile_inner(
         arguments_forwarder_runtime: std::cell::RefCell::new(None),
         regexp_literals: (0..op_count).map(|_| std::cell::OnceCell::new()).collect(),
         call_caches: c.call_caches,
+        call_refresh_pins: Default::default(),
         construct_caches: c.construct_caches,
         call_pins: std::cell::RefCell::new(c.call_pins),
         inline_frames: c.inline_frames.finish(&c.inline_targets),
@@ -2509,10 +2480,7 @@ impl Compiler {
             for (callee, pin) in pins {
                 self.call_pins.entry(callee).or_insert(pin);
             }
-            CallSite {
-                entries: std::array::from_fn(|way| std::cell::Cell::new(entries[way])),
-                next: std::cell::Cell::new(next),
-            }
+            CallSite::seeded(entries, next)
         } else {
             CallSite::empty()
         };
@@ -8291,13 +8259,7 @@ unsafe fn jit_call_inner(
     } else {
         &raw mut *undef as *const Value
     };
-    let mut r = i.call_jit_cached(
-        &chunk.call_caches[c as usize],
-        &*sp.sub(argc + 1),
-        this_slot,
-        args_ptr,
-        argc,
-    );
+    let mut r = i.call_jit_cached(chunk, c, &*sp.sub(argc + 1), this_slot, args_ptr, argc);
     if r.is_none() {
         // Plain-native fast call: a bare `fn` callee in a proxy-free single-realm engine skips the
         // call/call_inner/call_dispatch layering. The callee is ALSO recorded as a native IC
@@ -9257,7 +9219,8 @@ unsafe fn jit_exec_inner(
             // a miss falls into `call_jit_fast`, which refills it.
             let mut undef = std::mem::ManuallyDrop::new(Value::Undefined);
             let mut r = i.call_jit_cached(
-                &chunk.call_caches[c as usize],
+                chunk,
+                c,
                 &*sp.sub(argc + 1),
                 &raw mut *undef as *const Value,
                 args_ptr,
@@ -9303,7 +9266,8 @@ unsafe fn jit_exec_inner(
             let argc = argc as usize;
             let args_ptr = sp.sub(argc);
             let mut r = i.call_jit_cached(
-                &chunk.call_caches[c as usize],
+                chunk,
+                c,
                 &*sp.sub(argc + 1),
                 sp.sub(argc + 2),
                 args_ptr,
