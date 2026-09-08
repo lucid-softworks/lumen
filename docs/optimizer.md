@@ -2692,3 +2692,54 @@ time ratios remain 15.07× / 23.75×. The within-2× goal is not achieved. Sourc
 binary hashes, schedules, strict outputs, summaries and validation are archived
 under `inline-packed-reads-*` and `lumen-inline-packed-reads-*` in the external
 optimizer directory. The next collector counting-pass proposal remains unmeasured.
+
+### Rejected borrowed object-edge counting (2026-09-08)
+
+A candidate counted object edges directly through immutable borrows, avoiding
+scratch-vector writes and temporary reference-count increments/decrements in the
+collector's counting pass. Checked packed Object payloads used scoped
+`ManuallyDrop<Gc>` handles; prototype, data, getter/setter and bound-function
+physical edges retained duplicates. Marking, scope traversal order, root tests,
+pin accounting, registry restoration and sweeping retained the existing paths.
+An independent `LUMEN_NO_BORROWED_GC_COUNT=1` comparator selected old counting.
+
+It passed 760 unit and 34 integration tests, including 17 focused GC tests. New
+coverage verified exact physical counts, unchanged owners, self/bound/accessor
+edges, packed duplicates/scalar exclusion, actual enabled/disabled counting calls,
+closures/mapped arguments/JIT aliases, pinned unreachable-cycle reclamation,
+external aliases and registry reuse after sweep. Both runtime tests passed with
+the path disabled. Expanded conformance matched the retained binary exactly:
+26,007 passes, two known failures, zero skips and identical full failure lists.
+Differential testing agreed on 1,996 cases with four budget skips. Formatting and
+module audits passed; Clippy matched its existing error-message multiset.
+
+Forty-five sequential verified timings used three rotated rounds of retained
+bbe471f, disabled/enabled candidate, Node v24.18.0 and Bun 1.3.14. No builds,
+tests or profiling overlapped timing. All source and binary hashes were preserved.
+
+| Workload (lower is better) | Retained | Disabled | Candidate | Node | Bun |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Capture indices, µs/2,000 calls | 1160 | 1180 | 1180 | 200 | 145.71 |
+| Capture strings, µs/2,000 calls | 700 | 710 | 700 | 52.35 | 11.4 |
+| Object entries, µs/2,000 calls | 630 | 630 | 630 | 157.14 | 108.89 |
+| String split, µs/2,000 calls | 315 | 320 | 320 | 34.8 | 18.4 |
+| Djot 10,000 verified parses, ms | 3486 | 3539 | 3507 | 230 | 144 |
+| Delta 5,000 verified iterations, ms | 8312 | 8347 | 8287 | 195 | 307 |
+
+Full-change Djot median time increases 0.60%, with mixed pairs (-7.60%, +0.60%,
+-0.61%). The first retained parser run is 3,802 ms, versus 3,486 and 3,471 ms in
+later rounds; all results remain included without assigning a cause. Candidate
+runs are 3,513, 3,507 and 3,450 ms. Disabled/enabled parser time improves 0.90%
+with all pairs improving, but that is not a full-change win against the retained
+executable. Delta improves only 0.30% by median, with mixed pairs (-0.45%, -1.16%,
++0.41%). Capture indices regress 1.72% (two losses/one tie); capture strings and
+object entries are flat by median, and split regresses 1.59% with mixed pairs.
+
+The candidate is rejected because it does not establish repeatable target-workload
+progress. Production code is restored exactly to bbe471f. The planned classic
+runs were not started; no new classic-suite claim follows. Candidate sources,
+including the untracked runtime module, binaries, timing rows, summaries and
+validation remain archived under `borrowed-gc-count-*` and
+`lumen-borrowed-gc-count-*` in the external optimizer directory. A fresh retained
+engine profile should reassess remaining application costs before another GC
+change; removed operations alone were not enough to justify this candidate.
