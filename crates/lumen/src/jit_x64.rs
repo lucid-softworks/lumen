@@ -6,7 +6,8 @@
 
 use super::{
     sys, JitCode, COND_PEEK_NOT_NULLISH, COND_PEEK_TRUTHY, COND_POP_TRUTHY, H_CALL, H_COND, H_EXEC,
-    H_GET_PROP, H_NEW, H_POP_HANDLER, H_PUSH_HANDLER, H_RETURN, H_SET_PROP, H_UNWIND,
+    H_GET_PROP, H_INLINE_CLOSURE, H_NEW, H_POP_HANDLER, H_PUSH_HANDLER, H_RETURN, H_SET_PROP,
+    H_UNWIND,
 };
 use crate::bytecode::{Chunk, Op};
 
@@ -599,28 +600,14 @@ pub(super) fn compile(
                 a.bytes(&[0x49, 0x89, 0xc5, 0x48, 0x85, 0xd2]);
                 a.jcc(0x85, pcs[*target as usize]);
             }
-            Op::InlineGuard(t, target) => {
-                let it = chunk.jit_inline_target(*t);
-                let stored = it.pin.upgrade().filter(|_| layout.valid).map(|o| {
-                    let some: Option<crate::value::Gc> = Some(o);
-                    unsafe { *(&some as *const Option<crate::value::Gc> as *const usize) }
-                });
-                match stored {
-                    None => a.jmp(pcs[*target as usize]),
-                    Some(stored) => {
-                        let callee = -((it.argc as i32 + 1) * 16);
-                        a.cmp_byte_r13(callee, 8); // Value::Obj
-                        a.jcc(0x85, pcs[*target as usize]);
-                        a.bytes(&[0x48, 0xb8]); // movabs rax, stored Rc pointer
-                        a.bytes(&(stored as u64).to_le_bytes());
-                        a.cmp_qword_r13_rax(callee + 8);
-                        a.jcc(0x85, pcs[*target as usize]);
-                        if it.check_this {
-                            a.cmp_byte_r13(callee - 16, 8);
-                            a.jcc(0x85, pcs[*target as usize]);
-                        }
-                    }
-                }
+            Op::InlineGuard(_t, target) => {
+                // The x64 backend keeps the wide Value ABI and uses the checked helper for
+                // shared-function guards. Besides the pinned object identity, the helper checks
+                // the live function, shared lexical environment, ordinary-object state, and
+                // reflective frame prerequisites required by fresh-closure inlining.
+                a.call_helper_ptr(H_INLINE_CLOSURE, pc as u32);
+                a.bytes(&[0x48, 0x85, 0xc0]); // test rax, rax
+                a.jcc(0x84, pcs[*target as usize]);
             }
             Op::Return => {
                 a.call_helper_ptr(H_RETURN, 1);
