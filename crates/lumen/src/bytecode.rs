@@ -8207,21 +8207,15 @@ pub(crate) unsafe extern "C" fn jit_get_prop(
                 Ok(())
             }
             Op::GetPropLocal(s, n, c) => {
-                let obj = if ctx.slots_packed {
-                    crate::value::PackedValue::clone_raw(ctx.slots.cast::<u64>().add(s as usize))
-                } else {
-                    (*ctx.slots.add(s as usize)).clone()
-                };
-                if matches!(obj, Value::Empty) {
-                    return Err(i.throw(
-                        "ReferenceError",
-                        format!(
-                            "cannot access '{}' before initialization",
-                            chunk.slot_names[s as usize]
-                        ),
-                    ));
-                }
-                let v = i.get_prop_ic(&obj, &chunk.names[n as usize], &chunk.caches[c as usize])?;
+                let v = crate::jit::local_slot::get_property(
+                    i,
+                    ctx.slots,
+                    ctx.slots_packed,
+                    s as usize,
+                    &chunk.slot_names[s as usize],
+                    &chunk.names[n as usize],
+                    &chunk.caches[c as usize],
+                )?;
                 sp.write(v);
                 sp = sp.add(1);
                 Ok(())

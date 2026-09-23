@@ -25,6 +25,7 @@
 )]
 
 pub(crate) mod iterator_entry;
+pub(crate) mod local_slot;
 
 #[cfg(all(
     target_arch = "aarch64",
