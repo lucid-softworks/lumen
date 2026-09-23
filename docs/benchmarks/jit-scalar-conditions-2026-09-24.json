@@ -1,6 +1,7 @@
 {
   "date": "2026-09-24",
-  "base_commit": "15f12329fe92b49cd3bff3b56448cf2bfd4059b9",
+  "profile_base_commit": "15f12329fe92b49cd3bff3b56448cf2bfd4059b9",
+  "rebased_onto": "95a4c45542cf212f943f23f01874fce32fd85e71",
   "platform": {
     "hardware": "Apple Silicon arm64",
     "os": "macOS 26.5.2 (25F84)",
@@ -14,7 +15,8 @@
     "method": "Sequential fresh-process pairs with order rotated each round. No task-owned build, test, profile, or other benchmark overlapped retained timing. Unrelated host activity was not controlled; one visibly contended exploratory round was discarded before the final schedule."
   },
   "artifacts": {
-    "release_binary_sha256": "4812ed66ce9e7f86d1b6ba1f110a39cdbf30428f86c45e63b4ac2d27fceec62f",
+    "profile_release_binary_sha256": "4812ed66ce9e7f86d1b6ba1f110a39cdbf30428f86c45e63b4ac2d27fceec62f",
+    "rebased_release_binary_sha256": "f4892c201c16b9ada406437be7f997110e41dd0324fc49af0c2a52f9e83534ba",
     "scalar_fixture_sha256": "8c91711dbc6839a7cb5111bf3cfc591a29dd1f184698660f09e338dd81a252b0",
     "bool_fixture_sha256": "3baeed755d969eac43bdcf94ab1c40ee3144b8e6aaef22c4a06cb18e9f936449"
   },
@@ -93,12 +95,39 @@
     "median_change_percent": -0.3,
     "paired_directions": "mixed"
   },
+  "rebased_confirmation": {
+    "code_commit": "0e5ba487e11156167b8558cbc1ed3b5ae7e97fc6",
+    "focused_ms": {
+      "disabled": [2005, 2037, 1963, 1967, 1976],
+      "enabled": [1882, 1885, 1905, 1890, 1890],
+      "disabled_median": 1976,
+      "enabled_median": 1890,
+      "median_change_percent": -4.35,
+      "paired_directions": "enabled faster in all five pairs"
+    },
+    "v8_v7": {
+      "disabled": [8926, 8854, 8790, 8818, 8743],
+      "enabled": [8842, 8833, 8789, 8817, 8778],
+      "disabled_median": 8818,
+      "enabled_median": 8817,
+      "median_change_percent": -0.01,
+      "paired_directions": "mixed"
+    },
+    "octane_selected": {
+      "disabled": [15037, 14932, 14935],
+      "enabled": [15066, 14843, 14931],
+      "disabled_median": 14935,
+      "enabled_median": 14931,
+      "median_change_percent": -0.03,
+      "paired_directions": "mixed"
+    }
+  },
   "validation": {
     "cargo_fmt_all_check": "pass",
-    "cargo_test_p_lumen": "pass: 818 unit tests, 35 integration tests, 0 failures",
+    "cargo_test_p_lumen": "pass after rebase: 827 unit tests, 35 integration tests, 0 failures",
     "cargo_clippy_all_targets_all_features": "pass with the existing 86 library / 88 test warning baseline; strict -D warnings fails on that unchanged baseline; no diagnostic names jit/condition.rs",
-    "differential": "pass: 1996 agree, 4 budget skips across seeds 1..2001",
-    "wasm": "pass: release cargo build of lumen-wasm for wasm32-unknown-unknown with the Pages 8 MiB stack flag; wasm-pack was unavailable locally",
+    "differential": "pass after rebase: 1996 agree, 4 budget skips across seeds 1..2001",
+    "wasm": "pass after rebase: release cargo build of lumen-wasm for wasm32-unknown-unknown with the Pages 8 MiB stack flag; wasm-pack was unavailable locally",
     "cross_target_cargo_check": [
       "x86_64-unknown-linux-gnu",
       "aarch64-unknown-linux-gnu",
