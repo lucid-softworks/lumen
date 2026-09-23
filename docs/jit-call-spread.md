@@ -1,6 +1,6 @@
 # JIT call-dispatch audit: dense spreads
 
-This audit starts from `origin/main` at `15f1232` and follows the constructor work already merged
+This audit starts from `origin/main` at `b0f9b75` and follows the constructor work already merged
 in PR #26. It covers native builtins, bound functions, `call`/`apply`, trailing spread calls, and
 remaining polymorphic call helpers. It does not change closure dispatch.
 
@@ -39,25 +39,23 @@ calls, and target recursion/GC behavior.
 
 ## Measurements
 
-Seven fresh-process rounds alternated clean release builds of `15f1232` and this change on Apple
+Five fresh-process rounds alternated clean release builds of `b0f9b75` and this change on Apple
 Silicon. Values are medians in milliseconds; lower is better. Checksums matched in every round.
 
 | Two million operations | Before | After | Change |
 | --- | ---: | ---: | ---: |
-| Native direct | 46 | 43 | -6.5% |
-| Native polymorphic (4 targets) | 74 | 70 | -5.4% |
-| User polymorphic (4 targets) | 67 | 65 | -3.0% |
-| Bound user / native | 174 / 152 | 179 / 154 | +2.9% / +1.3% |
-| `call` user / native | 80 / 73 | 82 / 75 | +2.5% / +2.7% |
-| `apply` user / native | 121 / 211 | 125 / 215 | +3.3% / +1.9% |
-| Spread user | 1,996 | 263 | **-86.8%** |
-| Spread native | 1,977 | 249 | **-87.4%** |
+| Native direct | 42 | 42 | 0% |
+| Native polymorphic (4 targets) | 66 | 67 | +1.5% |
+| User polymorphic (4 targets) | 64 | 64 | 0% |
+| Bound user / native | 172 / 151 | 171 / 153 | -0.6% / +1.3% |
+| `call` user / native | 78 / 72 | 78 / 71 | 0% / -1.4% |
+| `apply` user / native | 119 / 213 | 120 / 212 | +0.8% / -0.5% |
+| Spread user | 1,985 | 257 | **-87.1%** |
+| Spread native | 1,956 | 241 | **-87.7%** |
 
-The non-spread controls moved by at most four milliseconds and do not execute the changed path.
-Seven rotated full V8-v7 runs had composite medians of 8,316 before and 8,267 after (-0.6%),
-against wide observed ranges of 7,680–8,581 and 5,877–8,541. This is flat within run-to-run
-variance; that ES5-era suite has no representative hot spread-call workload, so no aggregate gain
-is claimed.
+The non-spread controls moved by at most two milliseconds and do not execute the changed path.
+Three rotated full V8-v7 runs had composite medians of 8,348 before and 8,435 after (+1.0%). That
+ES5-era suite has no representative hot spread-call workload, so no aggregate gain is claimed.
 
 ## Validation scope
 
