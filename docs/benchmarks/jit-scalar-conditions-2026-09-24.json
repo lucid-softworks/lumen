@@ -1,0 +1,112 @@
+{
+  "date": "2026-09-24",
+  "base_commit": "15f12329fe92b49cd3bff3b56448cf2bfd4059b9",
+  "platform": {
+    "hardware": "Apple Silicon arm64",
+    "os": "macOS 26.5.2 (25F84)",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05)"
+  },
+  "configuration": {
+    "enabled": "default environment",
+    "disabled": "LUMEN_JIT_NO_SCALAR_CONDITION=1",
+    "tier": "--tier=jit --tier-threshold=0 for focused fixtures; default JIT tier for suites",
+    "method": "Sequential fresh-process pairs with order rotated each round. No task-owned build, test, profile, or other benchmark overlapped retained timing. Unrelated host activity was not controlled; one visibly contended exploratory round was discarded before the final schedule."
+  },
+  "artifacts": {
+    "release_binary_sha256": "4812ed66ce9e7f86d1b6ba1f110a39cdbf30428f86c45e63b4ac2d27fceec62f",
+    "scalar_fixture_sha256": "8c91711dbc6839a7cb5111bf3cfc591a29dd1f184698660f09e338dd81a252b0",
+    "bool_fixture_sha256": "3baeed755d969eac43bdcf94ab1c40ee3144b8e6aaef22c4a06cb18e9f936449"
+  },
+  "focused_ms": {
+    "command": "target/release/lumen --tier=jit --tier-threshold=0 crates/lumen/benches/fixtures/scalar_condition_branch.js",
+    "operations_per_process": 100000000,
+    "checksum": 400000000,
+    "disabled": [2033, 2043, 2045, 2055, 2031],
+    "enabled": [1958, 1970, 1967, 1966, 1975],
+    "disabled_median": 2043,
+    "enabled_median": 1967,
+    "median_change_percent": -3.72,
+    "paired_changes_ms": [-75, -73, -78, -89, -56]
+  },
+  "bool_control_ms": {
+    "command": "target/release/lumen --tier=jit --tier-threshold=0 crates/lumen/benches/fixtures/bool_condition_branch.js",
+    "operations_per_process": 100000000,
+    "checksum": 400000000,
+    "disabled": [2159, 2143, 2147],
+    "enabled": [2154, 2133, 2144],
+    "disabled_median": 2147,
+    "enabled_median": 2144,
+    "median_change_percent": -0.14
+  },
+  "profiles": {
+    "command": "sample <pid> 5 1 -mayDie -file <path>; workload count raised to 400000000; LUMEN_JIT_MAP=1",
+    "disabled": {
+      "main_thread_samples": 4292,
+      "elapsed_ms_diagnostic_only": 8424,
+      "exclusive_jit_cond": 167,
+      "exclusive_value_drop_glue": 170,
+      "exclusive_jit_return": 123
+    },
+    "enabled": {
+      "main_thread_samples": 4290,
+      "elapsed_ms_diagnostic_only": 8108,
+      "exclusive_jit_cond": "fewer than 5 (omitted by sample report)",
+      "exclusive_value_drop_glue": 126,
+      "exclusive_jit_return": 127
+    }
+  },
+  "v8_v7": {
+    "command": "target/release/lumen v8-v7/base.js v8-v7/{richards,deltablue,crypto,raytrace,earley-boyer,regexp,splay,navier-stokes}.js v8-v7/driver.js",
+    "metric": "higher is better",
+    "disabled": [
+      {"richards": 23278, "deltablue": 3848, "crypto": 23195, "raytrace": 6301, "earley_boyer": 3296, "regexp": 1577, "splay": 9323, "navier_stokes": 36730, "composite": 8336},
+      {"richards": 23299, "deltablue": 3937, "crypto": 23411, "raytrace": 5964, "earley_boyer": 3395, "regexp": 1631, "splay": 9192, "navier_stokes": 36655, "composite": 8361},
+      {"richards": 23377, "deltablue": 3897, "crypto": 23423, "raytrace": 6295, "earley_boyer": 3351, "regexp": 1601, "splay": 9266, "navier_stokes": 36952, "composite": 8395}
+    ],
+    "enabled": [
+      {"richards": 23158, "deltablue": 3927, "crypto": 23529, "raytrace": 6320, "earley_boyer": 3345, "regexp": 1615, "splay": 9241, "navier_stokes": 37285, "composite": 8416},
+      {"richards": 23741, "deltablue": 3954, "crypto": 23789, "raytrace": 6290, "earley_boyer": 3465, "regexp": 1615, "splay": 8899, "navier_stokes": 35362, "composite": 8397},
+      {"richards": 23719, "deltablue": 3920, "crypto": 23926, "raytrace": 6358, "earley_boyer": 3467, "regexp": 1639, "splay": 9486, "navier_stokes": 37433, "composite": 8549}
+    ],
+    "disabled_composite_median": 8361,
+    "enabled_composite_median": 8416,
+    "median_change_percent": 0.66,
+    "paired_composite_changes_percent": [0.96, 0.43, 1.83]
+  },
+  "octane_selected": {
+    "suites": ["richards", "deltablue", "crypto", "raytrace", "splay", "navier-stokes"],
+    "command": "scripts/run-octane.sh richards deltablue crypto raytrace splay navier-stokes",
+    "metric": "higher is better",
+    "disabled": [
+      {"richards": 23257, "deltablue": 3838, "crypto": 23564, "raytrace": 6271, "splay": 9127, "splay_latency": 26153, "navier_stokes": 36582, "composite": 14178},
+      {"richards": 23282, "deltablue": 3855, "crypto": 23949, "raytrace": 6351, "splay": 9844, "splay_latency": 27566, "navier_stokes": 37545, "composite": 14565},
+      {"richards": 23709, "deltablue": 3762, "crypto": 23935, "raytrace": 6374, "splay": 9640, "splay_latency": 21321, "navier_stokes": 37618, "composite": 13996}
+    ],
+    "enabled": [
+      {"richards": 23250, "deltablue": 3742, "crypto": 23903, "raytrace": 6290, "splay": 9192, "splay_latency": 25608, "navier_stokes": 36582, "composite": 14133},
+      {"richards": 23271, "deltablue": 3835, "crypto": 23521, "raytrace": 6185, "splay": 9249, "splay_latency": 25668, "navier_stokes": 36582, "composite": 14135},
+      {"richards": 23529, "deltablue": 3934, "crypto": 23945, "raytrace": 6160, "splay": 9119, "splay_latency": 25191, "navier_stokes": 37545, "composite": 14223}
+    ],
+    "disabled_composite_median": 14178,
+    "enabled_composite_median": 14135,
+    "median_change_percent": -0.3,
+    "paired_directions": "mixed"
+  },
+  "validation": {
+    "cargo_fmt_all_check": "pass",
+    "cargo_test_p_lumen": "pass: 818 unit tests, 35 integration tests, 0 failures",
+    "cargo_clippy_all_targets_all_features": "pass with the existing 86 library / 88 test warning baseline; strict -D warnings fails on that unchanged baseline; no diagnostic names jit/condition.rs",
+    "differential": "pass: 1996 agree, 4 budget skips across seeds 1..2001",
+    "wasm": "pass: release cargo build of lumen-wasm for wasm32-unknown-unknown with the Pages 8 MiB stack flag; wasm-pack was unavailable locally",
+    "cross_target_cargo_check": [
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc",
+      "aarch64-pc-windows-msvc",
+      "x86_64-apple-darwin"
+    ],
+    "new_module_structure_audit": "pass: 0 signals",
+    "focused_fixture_checksums": "pass in enabled and disabled modes"
+  }
+}

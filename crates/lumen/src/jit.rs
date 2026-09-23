@@ -46,6 +46,11 @@ mod collection_lookup;
     target_arch = "aarch64",
     any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
+mod condition;
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 mod guarded_write_region;
 #[cfg(all(
     target_arch = "aarch64",
@@ -1587,6 +1592,7 @@ pub fn compile(
     let array_intrinsics_on = std::env::var_os("LUMEN_JIT_NO_ARRAY_INTRINSICS").is_none();
     let function_call_intrinsic_on =
         std::env::var_os("LUMEN_JIT_NO_FUNCTION_CALL_INTRINSIC").is_none();
+    let scalar_condition_on = std::env::var_os("LUMEN_JIT_NO_SCALAR_CONDITION").is_none();
     // Direct shared-ctx calls, on by default like every other emitter feature (mask bit 20
     // off for debugging). Requires the inline call probe (bit 524288) to emit at all.
     let direct_on = fast & (1 << 20) != 0;
@@ -2248,20 +2254,18 @@ pub fn compile(
                 a.b(pc_labels[*t as usize]);
             }
             Op::JumpIfFalse(t) if fast & 4 != 0 => {
-                // Bool on top (the compare fast paths produce one): branch on its payload byte.
-                let slow = a.new_label();
-                let done = a.new_label();
-                a.ldurb(9, 20, -16);
-                a.cmp_imm_w(9, 3);
-                a.b_cond(C_NE, slow);
-                a.ldurb(9, 20, -15); // bool payload at offset 1
-                a.sub_imm(20, 20, 16);
-                a.cbz(9, false, pc_labels[*t as usize]);
-                a.b(done);
-                a.bind(slow);
-                emit_cond(&mut a, COND_POP_TRUTHY, l_unwind);
-                a.cbz(1, false, pc_labels[*t as usize]);
-                a.bind(done);
+                let scalar_fast_path = scalar_condition_on
+                    && !targeted[pc]
+                    && pc
+                        .checked_sub(1)
+                        .and_then(|source| ops.get(source))
+                        .is_some_and(condition::produces_numeric_scalar);
+                condition::emit_pop_false(
+                    &mut a,
+                    pc_labels[*t as usize],
+                    l_unwind,
+                    scalar_fast_path,
+                );
             }
             Op::JumpIfFalse(t) => {
                 emit_cond(&mut a, COND_POP_TRUTHY, l_unwind);
