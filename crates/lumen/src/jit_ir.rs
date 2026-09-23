@@ -107,6 +107,7 @@ pub(crate) struct Cfg {
     rpo: Vec<BlockId>,
     dominators: Vec<Vec<u64>>,
     loops: Vec<NaturalLoop>,
+    loop_by_header: Vec<Option<usize>>,
     handler_roots: Vec<HandlerRoot>,
     max_settled_stack: usize,
 }
@@ -886,6 +887,11 @@ impl Cfg {
         let dominators = compute_dominators(&blocks, &rpo, &roots);
         let loops = discover_loops(&blocks, &rpo, &dominators);
 
+        let mut loop_by_header = vec![None; blocks.len()];
+        for (index, lp) in loops.iter().enumerate() {
+            loop_by_header[lp.header.index()] = Some(index);
+        }
+
         Ok(Cfg {
             blocks,
             pc_block,
@@ -893,6 +899,7 @@ impl Cfg {
             rpo,
             dominators,
             loops,
+            loop_by_header,
             handler_roots,
             max_settled_stack,
         })
@@ -949,7 +956,11 @@ impl Cfg {
         if self.blocks[block.index()].start != pc {
             return None;
         }
-        self.loops.iter().find(|lp| lp.header == block)
+        self.loop_by_header
+            .get(block.index())
+            .copied()
+            .flatten()
+            .and_then(|index| self.loops.get(index))
     }
 
     /// Return the unique unconditional backedge pc for the old branch-free loop emitter.
@@ -1383,6 +1394,29 @@ mod tests {
         let g = cfg(&ops).unwrap();
         assert!(g.loop_at_header(0).is_some());
         assert_eq!(g.linear_loop_latch(&ops, 0), None);
+    }
+
+    #[test]
+    fn cfg_finds_each_nested_loop_header() {
+        let ops = [
+            Op::LoadLocal(0),
+            Op::JumpIfFalse(12),
+            Op::LoadLocal(1),
+            Op::JumpIfFalse(8),
+            Op::Const(0),
+            Op::StoreLocal(2),
+            Op::Jump(2),
+            Op::ReturnUndef,
+            Op::Const(0),
+            Op::StoreLocal(2),
+            Op::Jump(0),
+            Op::ReturnUndef,
+            Op::ReturnUndef,
+        ];
+        let g = cfg(&ops).unwrap();
+        assert_eq!(g.loop_at_header(0).unwrap().header, g.block_at(0).unwrap());
+        assert_eq!(g.loop_at_header(2).unwrap().header, g.block_at(2).unwrap());
+        assert!(g.loop_at_header(1).is_none());
     }
 
     #[test]
