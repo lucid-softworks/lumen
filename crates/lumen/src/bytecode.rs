@@ -6618,29 +6618,41 @@ pub(crate) unsafe extern "C" fn jit_add_strings(
         return unsafe { jit_exec(ctx, pc, sp) };
     }
 
-    let Value::Str(mut left) = (unsafe { base.read() }) else {
+    let Value::Str(left) = (unsafe { base.read() }) else {
         unreachable!()
     };
     let Value::Str(right) = (unsafe { base.add(1).read() }) else {
         unreachable!()
     };
-    if left.len().saturating_add(right.len()) > crate::interpreter::MAX_STR_LEN {
-        let ctx = unsafe { &mut *ctx };
-        let i = unsafe { &mut *ctx.interp };
-        ctx.error = Some(i.throw("RangeError", "Invalid string length"));
-        return crate::jit::SpFlag { sp: base, flag: 1 };
+    let ctx = unsafe { &mut *ctx };
+    let i = unsafe { &mut *ctx.interp };
+    match concat_string_values(i, left, right) {
+        Ok(value) => unsafe { base.write(value) },
+        Err(abrupt) => {
+            ctx.error = Some(abrupt);
+            return crate::jit::SpFlag { sp: base, flag: 1 };
+        }
     }
+    crate::jit::SpFlag {
+        sp: unsafe { base.add(1) },
+        flag: 0,
+    }
+}
 
+fn concat_string_values(
+    i: &mut Interp,
+    mut left: crate::lstr::LStr,
+    right: crate::lstr::LStr,
+) -> Result<Value, Abrupt> {
+    if left.len().saturating_add(right.len()) > crate::interpreter::MAX_STR_LEN {
+        return Err(i.throw("RangeError", "Invalid string length"));
+    }
     if crate::jstr::needs_join_fixup(&left, &right) {
         left = crate::jstr::concat(&left, &right).into();
     } else if !left.append_in_place(&right) {
         left = left.concat_grown(&right);
     }
-    unsafe { base.write(Value::Str(left)) };
-    crate::jit::SpFlag {
-        sp: unsafe { base.add(1) },
-        flag: 0,
-    }
+    Ok(Value::Str(left))
 }
 
 /// Hot native intrinsics after the machine-code call IC has already proved builtin identity.
@@ -9219,7 +9231,12 @@ unsafe fn jit_bin_num(
     let b = sp.read();
     *sp = sp.sub(1);
     let a = sp.read();
-    let v = if let (Value::Num(x), Value::Num(y)) = (&a, &b) {
+    let v = if op == "+" {
+        match (a, b) {
+            (Value::Str(left), Value::Str(right)) => concat_string_values(i, left, right)?,
+            (a, b) => i.binary(op, a, b)?,
+        }
+    } else if let (Value::Num(x), Value::Num(y)) = (&a, &b) {
         Value::Num(f(*x, *y))
     } else {
         i.binary(op, a, b)?
@@ -9372,5 +9389,51 @@ pub(crate) unsafe extern "C" fn jit_unwind(
                 flag: target.add(1) as u64,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod jit_string_add_tests {
+    use super::Tier;
+    use crate::{Completion, Engine};
+
+    fn eval_jit(source: &str) -> Completion {
+        let mut engine = Engine::new();
+        engine.set_tier(Tier::Jit);
+        engine.eval(source, false).expect("test source parses")
+    }
+
+    #[test]
+    fn string_add_keeps_observable_coercion_and_exceptions() {
+        assert!(matches!(
+            eval_jit(
+                "let log=''; let l={valueOf(){log+='L';return 1}}; let r={valueOf(){log+='R';return 2}}; l+r+':'+log"
+            ),
+            Completion::Value(value) if value == "3:LR"
+        ));
+        assert!(matches!(
+            eval_jit("Symbol('x')+'y'"),
+            Completion::Throw { name, .. } if name == "TypeError"
+        ));
+        assert!(matches!(
+            eval_jit("1n+2"),
+            Completion::Throw { name, .. } if name == "TypeError"
+        ));
+    }
+
+    #[test]
+    fn string_add_does_not_bypass_getters_or_proxy_traps() {
+        assert!(matches!(
+            eval_jit(
+                "let gets=0; let o={get value(){gets++;return 'a'}}; o.value+'b'+':'+gets"
+            ),
+            Completion::Value(value) if value == "ab:1"
+        ));
+        assert!(matches!(
+            eval_jit(
+                "let gets=0; let p=new Proxy({value:'a'},{get(t,k,r){gets++;return Reflect.get(t,k,r)}}); p.value+'b'+':'+gets"
+            ),
+            Completion::Value(value) if value == "ab:1"
+        ));
     }
 }
