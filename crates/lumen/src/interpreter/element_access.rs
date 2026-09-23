@@ -74,15 +74,15 @@ mod tests {
             let ta = ta.as_obj().expect("typed array object");
             let fixed = fixed.as_obj().expect("fixed typed array object");
             assert!(matches!(
-                engine.interp.fast_get_elem(&ta, 0.0),
+                engine.interp.fast_get_elem(ta, 0.0),
                 Some(Value::Num(n)) if n == 7.0
             ));
             assert!(matches!(
-                engine.interp.fast_get_elem(&ta, 1.5),
+                engine.interp.fast_get_elem(ta, 1.5),
                 Some(Value::Undefined)
             ));
             assert!(matches!(
-                engine.interp.fast_get_elem(&ta, 2.0),
+                engine.interp.fast_get_elem(ta, 2.0),
                 Some(Value::Undefined)
             ));
             assert!(matches!(
@@ -90,7 +90,7 @@ mod tests {
                 Ok(Completion::Value(_))
             ));
             assert!(matches!(
-                engine.interp.fast_get_elem(&ta, 0.0),
+                engine.interp.fast_get_elem(ta, 0.0),
                 Some(Value::Undefined)
             ));
             assert!(matches!(
@@ -98,7 +98,7 @@ mod tests {
                 Ok(Completion::Value(_))
             ));
             assert!(matches!(
-                engine.interp.fast_get_elem(&fixed, 0.0),
+                engine.interp.fast_get_elem(fixed, 0.0),
                 Some(Value::Undefined)
             ));
         }
