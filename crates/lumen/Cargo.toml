@@ -42,6 +42,10 @@ harness = false
 name = "collections"
 harness = false
 
+[[bench]]
+name = "jit_boundaries"
+harness = false
+
 # Internal-stage benchmarks (lexer/parser/snapshot). Needs the `bench` feature for `bench_api`.
 [[bench]]
 name = "internals"
