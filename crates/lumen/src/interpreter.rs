@@ -9,6 +9,7 @@ mod bindings;
 mod cached_call;
 pub(crate) mod call_entry;
 mod constructor_body;
+mod element_access;
 mod fresh_call;
 mod this_binding;
 pub(crate) use bindings::BindingLayout;
@@ -2386,6 +2387,9 @@ impl Interp {
     /// exotic receiver, non-index number) — never "absent".
     #[inline]
     pub(crate) fn fast_get_elem(&mut self, o: &Gc, n: f64) -> Option<Value> {
+        if let Some(value) = self.fast_typed_array_get(o, n) {
+            return Some(value);
+        }
         if n.trunc() != n || !(0.0..u32::MAX as f64).contains(&n) {
             return None;
         }
