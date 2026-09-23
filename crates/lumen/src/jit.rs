@@ -1602,11 +1602,14 @@ pub fn compile(
         && rc_ok
         && std::env::var_os("LUMEN_JIT_NO_SCHED_FAST_LOOP").is_none()
     {
-        ops.iter().enumerate().find_map(|(head, _)| {
-            let plan = plan_scheduler_shell(chunk, ops, head, &cfg, layout, fast)?;
-            plan.active.as_ref()?;
-            Some((head, plan))
-        })
+        ops.iter()
+            .enumerate()
+            .filter(|(_, op)| scheduler_shell_start(op))
+            .find_map(|(head, _)| {
+                let plan = plan_scheduler_shell(chunk, ops, head, &cfg, layout, fast)?;
+                plan.active.as_ref()?;
+                Some((head, plan))
+            })
     } else {
         None
     };
@@ -8993,6 +8996,32 @@ fn plan_scheduler_shell(
         suspended_cache: chunk.jit_name_cache_ptr(*suspended_cache),
         active,
     })
+}
+
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+#[inline]
+fn scheduler_shell_start(op: &crate::bytecode::Op) -> bool {
+    matches!(op, crate::bytecode::Op::GetPropThis(..))
+}
+
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+#[cfg(test)]
+mod scheduler_planner_tests {
+    use super::scheduler_shell_start;
+    use crate::bytecode::Op;
+
+    #[test]
+    fn scheduler_shell_only_starts_at_property_receiver_reads() {
+        assert!(scheduler_shell_start(&Op::GetPropThis(0, 0)));
+        assert!(!scheduler_shell_start(&Op::LoadLocal(0)));
+        assert!(!scheduler_shell_start(&Op::Const(0)));
+    }
 }
 
 /// Recognize the straight-line `TaskControlBlock.run` prologue immediately after the scheduler
