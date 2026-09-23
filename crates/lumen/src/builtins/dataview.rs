@@ -145,7 +145,7 @@ fn dv_set(i: &mut Interp, this: &Value, args: &[Value], kind: TaKind) -> Result<
         bytes.reverse();
     }
     let start = off + byte_off;
-    dv_put(i, buf, start, &bytes);
+    dv_put(i, buf, start, bytes);
     Ok(Value::Undefined)
 }
 
