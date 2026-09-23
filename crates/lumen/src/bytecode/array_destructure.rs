@@ -15,6 +15,10 @@ pub(super) fn original_next(i: &Interp) -> Option<&Gc> {
     i.extra_protos.get(NEXT)
 }
 
+pub(super) fn original_values(i: &Interp) -> Option<&Gc> {
+    i.extra_protos.get(VALUES)
+}
+
 pub(crate) fn remember_next(i: &mut Interp, proto: &Gc) {
     if let Some(Value::Obj(next)) = proto.borrow().props.get("next").map(|p| p.value()) {
         i.extra_protos.insert(NEXT, next);

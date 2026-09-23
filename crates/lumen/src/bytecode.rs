@@ -18,10 +18,11 @@
 //! `--tier`, or `Engine::set_tier`.
 
 mod activation;
-mod call_site;
-pub use call_site::CallSite;
 pub(crate) mod array_destructure;
 pub(crate) mod array_iterator_step;
+mod call_site;
+mod call_spread;
+pub use call_site::CallSite;
 pub(crate) mod collection_insert;
 pub(crate) mod collection_lookup;
 mod for_in;
@@ -8702,9 +8703,13 @@ unsafe fn jit_exec_inner(
                 Value::Undefined
             };
             let mut args = plain;
-            let (it, nx) = i.get_iterator(&spread)?;
-            while let Some(x) = i.iterator_step(&it, &nx)? {
-                args.push(x);
+            if let Some(dense) = call_spread::try_dense(i, &spread)? {
+                args.extend(dense);
+            } else {
+                let (it, nx) = i.get_iterator(&spread)?;
+                while let Some(x) = i.iterator_step(&it, &nx)? {
+                    args.push(x);
+                }
             }
             let v = i.call(callee, this, &args)?;
             push!(v);
