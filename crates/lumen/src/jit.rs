@@ -2671,6 +2671,33 @@ pub fn compile(
                 emit_exec(&mut a, pc as u32, l_unwind);
                 a.bind(done);
             }
+            // Number modulo keeps the exact shared `js_mod` implementation, but avoids entering
+            // the generic opcode decoder and rebuilding the two-operand stack shape. Every
+            // non-Number pair remains on the checked path so ToNumeric/coercion order and
+            // BigInt mixing errors are unchanged.
+            Op::Mod if fast & 1 != 0 && std::env::var_os("LUMEN_JIT_NO_MOD_FAST").is_none() => {
+                let slow = a.new_label();
+                let done = a.new_label();
+                a.ldurb(9, 20, -32);
+                a.cmp_imm_w(9, 4);
+                a.b_cond(C_NE, slow);
+                a.ldurb(9, 20, -16);
+                a.cmp_imm_w(9, 4);
+                a.b_cond(C_NE, slow);
+                a.ldur_d(0, 20, -24);
+                a.ldur_d(1, 20, -8);
+                a.mov_imm64(
+                    16,
+                    crate::bytecode::jit_mod_num as *const () as usize as u64,
+                );
+                a.blr(16);
+                a.stur_d(0, 20, -24);
+                a.sub_imm(20, 20, 16);
+                a.b(done);
+                a.bind(slow);
+                emit_exec(&mut a, pc as u32, l_unwind);
+                a.bind(done);
+            }
             // Int32 ops on two numbers: ToInt32 = truncate + wrap to 32 bits. fcvtzs to x
             // truncates; taking the low 32 bits is the mod-2^32 wrap. The scvtf/frintz
             // round-trip proves no i64 saturation happened (NaN/±Inf/|x|≥2^63 all fail it and

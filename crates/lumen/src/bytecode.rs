@@ -9246,6 +9246,14 @@ unsafe fn jit_bin_num(
     Ok(())
 }
 
+/// Number-only modulo entry used by the native ARM64 template. Keeping the exact ECMAScript
+/// edge handling in `js_mod` means the generated path can avoid the generic opcode decoder
+/// without duplicating its NaN, infinity, and signed-zero rules.
+#[inline(never)]
+pub(crate) extern "C" fn jit_mod_num(a: f64, b: f64) -> f64 {
+    crate::eval::js_mod(a, b)
+}
+
 unsafe fn jit_bin_i32(
     i: &mut Interp,
     sp: &mut *mut Value,
@@ -9434,6 +9442,38 @@ mod jit_string_add_tests {
                 "let gets=0; let p=new Proxy({value:'a'},{get(t,k,r){gets++;return Reflect.get(t,k,r)}}); p.value+'b'+':'+gets"
             ),
             Completion::Value(value) if value == "ab:1"
+        ));
+    }
+}
+
+#[cfg(test)]
+mod jit_modulo_tests {
+    use super::Tier;
+    use crate::{Completion, Engine};
+
+    #[test]
+    fn numeric_modulo_fast_path_preserves_ieee_edges_and_bailouts() {
+        let mut engine = Engine::new();
+        engine.set_tier(Tier::Jit);
+        engine.set_tier_threshold(0);
+        let source = r#"
+            function rem(a,b){return a%b;}
+            for(let i=0;i<64;i++)if(rem(100+i,7)!==(100+i)%7)throw 'warmup';
+            if(!Object.is(rem(-0,3),-0))throw 'negative zero';
+            if(!Object.is(rem(-5,Infinity),-5))throw 'infinite divisor';
+            if(!Number.isNaN(rem(1,0))||!Number.isNaN(rem(Infinity,3))||!Number.isNaN(rem(NaN,3)))throw 'nan';
+            let order='';
+            const left={valueOf(){order+='L';return 11;}};
+            const right={valueOf(){order+='R';return 4;}};
+            if(rem(left,right)!==3||order!=='LR')throw 'coercion order';
+            let mixed=false;
+            try{rem(1n,2);}catch(e){mixed=e instanceof TypeError;}
+            if(!mixed)throw 'bigint mixing';
+            'passed'
+        "#;
+        assert!(matches!(
+            engine.eval(source, false).expect("test source parses"),
+            Completion::Value(value) if value == "passed"
         ));
     }
 }
