@@ -360,6 +360,9 @@ pub(crate) struct ConstructSite {
     pub prototype_shape: u32,
     pub prototype_slot: u32,
     pub arguments_apply_forwarder: bool,
+    /// A base class with no instance fields, private members, or decorator initializers. Its
+    /// otherwise-empty class setup can be skipped before entering the compiled constructor body.
+    pub empty_base_class: bool,
 }
 
 impl ConstructSite {
@@ -368,6 +371,7 @@ impl ConstructSite {
         prototype_shape: 0,
         prototype_slot: 0,
         arguments_apply_forwarder: false,
+        empty_base_class: false,
     };
 }
 

@@ -12,6 +12,20 @@ impl Interp {
             .get(&(Rc::as_ptr(constructor) as usize))
             .is_none_or(|info| !info.derived)
     }
+
+    /// Whether construction has no class-owned instance setup before the body. Only this class
+    /// shape may share the ordinary function-constructor IC path: derived classes need TDZ
+    /// `this`/`super()` handling, while every other metadata list has observable work or errors.
+    pub(super) fn is_empty_base_class(&self, constructor: &Gc) -> bool {
+        self.class_info
+            .get(&(Rc::as_ptr(constructor) as usize))
+            .is_some_and(|info| {
+                !info.derived
+                    && info.fields.is_empty()
+                    && info.instance_initializers.is_empty()
+                    && info.private_members.is_empty()
+            })
+    }
 }
 
 #[cfg(test)]
@@ -123,6 +137,36 @@ mod tests {
             assert(new bound().value===17);
         "#,
             &["CompiledBase"],
+        );
+    }
+
+    #[test]
+    fn empty_base_class_cached_construction_preserves_context_and_failures() {
+        run(
+            r#"
+            class Empty {
+                constructor(value) {
+                    order.push('body');
+                    if (value < 0) throw new Error('negative');
+                    this.value=value;
+                    if (value > 0) this.next=new Empty(value-1);
+                }
+            }
+            const order=[];
+            globalThis.CompiledEmpty=Empty;
+            for(let n=0;n<500;n++)assert(new Empty(0).value===0);
+            order.length=0;
+            function argument(){order.push('argument');return 0;}
+            assert(new Empty(argument()).value===0 && order.join(',')==='argument,body');
+            const recursive=new Empty(3);
+            assert(recursive.next.next.next.value===0);
+            let threw=false;
+            try{new Empty(-1);}catch(e){
+                threw=e.message==='negative' && e.stack.includes('at Empty');
+            }
+            assert(threw && new Empty(1).next.value===0);
+        "#,
+            &["CompiledEmpty"],
         );
     }
 

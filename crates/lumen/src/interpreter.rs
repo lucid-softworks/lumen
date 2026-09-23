@@ -785,6 +785,8 @@ struct ConstructIc {
     /// The constructor's immutable chunk has the exact Prototype.js
     /// `this.initialize.apply(this, arguments)` forwarding body.
     arguments_apply_forwarder: bool,
+    /// The callee is a base class with no observable instance setup before its body.
+    empty_base_class: bool,
 }
 
 pub struct Interp {
@@ -5932,29 +5934,32 @@ impl Interp {
             self.depth -= 1;
             return Some(r);
         }
-        let (ic, prototype_shape, prototype_slot, arguments_apply_forwarder) = match cached_site {
-            Some(entry) => (
-                entry.call,
-                entry.prototype_shape,
-                entry.prototype_slot,
-                entry.arguments_apply_forwarder,
-            ),
-            None => match self.construct_ics.get(&key) {
-                Some(entry)
-                    if entry.pin.as_ptr() == Rc::as_ptr(o)
-                        && entry.call.epoch == epoch
-                        && entry.call.global_env == genv =>
-                {
-                    (
-                        entry.call,
-                        entry.prototype_shape,
-                        entry.prototype_slot,
-                        entry.arguments_apply_forwarder,
-                    )
-                }
-                _ => self.construct_ic_fill(o, key, epoch, genv)?,
-            },
-        };
+        let (ic, prototype_shape, prototype_slot, arguments_apply_forwarder, empty_base_class) =
+            match cached_site {
+                Some(entry) => (
+                    entry.call,
+                    entry.prototype_shape,
+                    entry.prototype_slot,
+                    entry.arguments_apply_forwarder,
+                    entry.empty_base_class,
+                ),
+                None => match self.construct_ics.get(&key) {
+                    Some(entry)
+                        if entry.pin.as_ptr() == Rc::as_ptr(o)
+                            && entry.call.epoch == epoch
+                            && entry.call.global_env == genv =>
+                    {
+                        (
+                            entry.call,
+                            entry.prototype_shape,
+                            entry.prototype_slot,
+                            entry.arguments_apply_forwarder,
+                            entry.empty_base_class,
+                        )
+                    }
+                    _ => self.construct_ic_fill(o, key, epoch, genv)?,
+                },
+            };
         if cached_site.is_none() {
             if let Some((chunk, cache)) = site {
                 chunk.fill_construct_cache(
@@ -5964,6 +5969,7 @@ impl Interp {
                         prototype_shape,
                         prototype_slot,
                         arguments_apply_forwarder,
+                        empty_base_class,
                     },
                     o,
                 );
@@ -6120,6 +6126,10 @@ impl Interp {
         });
         let env = std::mem::ManuallyDrop::new(unsafe { Rc::from_raw(ic.env) });
         let code = unsafe { &*ic.code };
+        // `run_constructor_on` clears this flag around every base-class body. Preserve that
+        // context even when the empty instance-setup prefix is elided by the constructor IC.
+        let saved_super =
+            empty_base_class.then(|| std::mem::replace(&mut self.super_call_ok, false));
         let tv = if ic.uses_this {
             this_val.clone()
         } else {
@@ -6174,6 +6184,9 @@ impl Interp {
                 },
             }
         };
+        if let Some(saved_super) = saved_super {
+            self.super_call_ok = saved_super;
+        }
         self.fn_frames.pop();
         self.constructing = saved_ctor;
         self.new_target = saved_nt;
@@ -6210,7 +6223,7 @@ impl Interp {
         key: usize,
         epoch: u32,
         genv: usize,
-    ) -> Option<(crate::bytecode::CallIc, u32, u32, bool)> {
+    ) -> Option<(crate::bytecode::CallIc, u32, u32, bool, bool)> {
         let (func, env) = match &o.borrow().call {
             Callable::User(user) => (user.func.clone(), user.env.clone()),
             _ => return None,
@@ -6237,7 +6250,8 @@ impl Interp {
                 return None;
             }
         }
-        if !self.class_info.is_empty() && self.class_info.contains_key(&key) {
+        let empty_base_class = self.is_empty_base_class(o);
+        if !self.class_info.is_empty() && self.class_info.contains_key(&key) && !empty_base_class {
             return None;
         }
         let (prototype_shape, prototype_slot) = {
@@ -6308,6 +6322,7 @@ impl Interp {
                 prototype_shape,
                 prototype_slot,
                 arguments_apply_forwarder,
+                empty_base_class,
             },
         );
         Some((
@@ -6315,6 +6330,7 @@ impl Interp {
             prototype_shape,
             prototype_slot,
             arguments_apply_forwarder,
+            empty_base_class,
         ))
     }
 
