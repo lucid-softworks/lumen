@@ -1713,12 +1713,14 @@ impl Interp {
                 info.kind.read(bytes) as i128
             };
             if let Some(new) = f(old) {
-                let nb = if info.kind.is_bigint() {
-                    info.kind.write_bigint(new)
+                let mut bytes = [0; 8];
+                let len = if info.kind.is_bigint() {
+                    info.kind.write_bigint_into(new, &mut bytes);
+                    8
                 } else {
-                    info.kind.write(new as f64)
+                    info.kind.write_into(new as f64, &mut bytes)
                 };
-                buf[start..start + es].copy_from_slice(&nb);
+                buf[start..start + es].copy_from_slice(&bytes[..len]);
             }
             Some(old)
         };
@@ -1770,19 +1772,20 @@ impl Interp {
         }
         let es = info.kind.elsize();
         let start = info.offset + idx * es;
-        let bytes = info.kind.write_bigint(n);
+        let mut bytes = [0; 8];
+        info.kind.write_bigint_into(n, &mut bytes);
         if let Some(&id) = self.shared_buffers.get(&info.buffer) {
             if let Some(mem) = shared_mem_get(id) {
                 let mut buf = mem.lock().unwrap();
                 if start + es <= buf.len() {
-                    buf[start..start + es].copy_from_slice(&bytes);
+                    buf[start..start + es].copy_from_slice(&bytes[..8]);
                 }
             }
             return;
         }
         if let Some(buf) = self.array_buffers.get_mut(&info.buffer) {
             if start + es <= buf.len() {
-                buf[start..start + es].copy_from_slice(&bytes);
+                buf[start..start + es].copy_from_slice(&bytes[..8]);
             }
         }
     }
@@ -1794,19 +1797,20 @@ impl Interp {
         }
         let es = info.kind.elsize();
         let start = info.offset + idx * es;
-        let bytes = info.kind.write(n);
+        let mut bytes = [0; 8];
+        let len = info.kind.write_into(n, &mut bytes);
         if let Some(&id) = self.shared_buffers.get(&info.buffer) {
             if let Some(mem) = shared_mem_get(id) {
                 let mut buf = mem.lock().unwrap();
                 if start + es <= buf.len() {
-                    buf[start..start + es].copy_from_slice(&bytes);
+                    buf[start..start + es].copy_from_slice(&bytes[..len]);
                 }
             }
             return;
         }
         if let Some(buf) = self.array_buffers.get_mut(&info.buffer) {
             if start + es <= buf.len() {
-                buf[start..start + es].copy_from_slice(&bytes);
+                buf[start..start + es].copy_from_slice(&bytes[..len]);
             }
         }
     }

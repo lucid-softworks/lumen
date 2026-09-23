@@ -1009,8 +1009,16 @@ impl TaKind {
         }
     }
     /// Convert a BigInt (i128) to this element's 8 little-endian bytes, wrapping mod 2^64.
+    #[cfg(test)]
     pub(crate) fn write_bigint(self, n: i128) -> Vec<u8> {
-        (n as u64).to_le_bytes().to_vec()
+        let mut bytes = [0; 8];
+        self.write_bigint_into(n, &mut bytes);
+        bytes.to_vec()
+    }
+    /// Encode a BigInt into a fixed-size scratch buffer without allocating.
+    pub(crate) fn write_bigint_into(self, n: i128, out: &mut [u8; 8]) {
+        debug_assert!(self.is_bigint());
+        *out = (n as u64).to_le_bytes();
     }
     /// Read one element (little-endian) from `b` (which must be `elsize()` bytes) as a Number.
     pub(crate) fn read(self, b: &[u8]) -> f64 {
@@ -1028,11 +1036,24 @@ impl TaKind {
         }
     }
     /// Convert a Number to this element type's little-endian bytes (JS integer-conversion rules).
+    #[cfg(test)]
     pub(crate) fn write(self, n: f64) -> Vec<u8> {
+        let mut bytes = [0; 8];
+        let len = self.write_into(n, &mut bytes);
+        bytes[..len].to_vec()
+    }
+    /// Encode a Number into a fixed-size scratch buffer without allocating.
+    pub(crate) fn write_into(self, n: f64, out: &mut [u8; 8]) -> usize {
         let int = |n: f64| if n.is_finite() { n.trunc() as i64 } else { 0 };
         match self {
-            TaKind::I8 => vec![int(n) as i8 as u8],
-            TaKind::U8 => vec![int(n) as u8],
+            TaKind::I8 => {
+                out[0] = int(n) as i8 as u8;
+                1
+            }
+            TaKind::U8 => {
+                out[0] = int(n) as u8;
+                1
+            }
             TaKind::U8Clamped => {
                 // ToUint8Clamp: round-half-to-even (0.5 → 0, 1.5 → 2, 2.5 → 2), clamped to [0,255].
                 let c = if n.is_nan() || n <= 0.0 {
@@ -1051,16 +1072,77 @@ impl TaKind {
                         f
                     }
                 };
-                vec![c as u8]
+                out[0] = c as u8;
+                1
             }
-            TaKind::I16 => (int(n) as i16).to_le_bytes().to_vec(),
-            TaKind::U16 => (int(n) as u16).to_le_bytes().to_vec(),
-            TaKind::I32 => (int(n) as i32).to_le_bytes().to_vec(),
-            TaKind::U32 => (int(n) as u32).to_le_bytes().to_vec(),
-            TaKind::F16 => f64_to_f16(n).to_le_bytes().to_vec(),
-            TaKind::F32 => (n as f32).to_le_bytes().to_vec(),
-            TaKind::F64 => n.to_le_bytes().to_vec(),
-            TaKind::I64 | TaKind::U64 => self.write_bigint(int(n) as i128),
+            TaKind::I16 => {
+                out[..2].copy_from_slice(&(int(n) as i16).to_le_bytes());
+                2
+            }
+            TaKind::U16 => {
+                out[..2].copy_from_slice(&(int(n) as u16).to_le_bytes());
+                2
+            }
+            TaKind::I32 => {
+                out[..4].copy_from_slice(&(int(n) as i32).to_le_bytes());
+                4
+            }
+            TaKind::U32 => {
+                out[..4].copy_from_slice(&(int(n) as u32).to_le_bytes());
+                4
+            }
+            TaKind::F16 => {
+                out[..2].copy_from_slice(&f64_to_f16(n).to_le_bytes());
+                2
+            }
+            TaKind::F32 => {
+                out[..4].copy_from_slice(&(n as f32).to_le_bytes());
+                4
+            }
+            TaKind::F64 => {
+                *out = n.to_le_bytes();
+                8
+            }
+            TaKind::I64 | TaKind::U64 => {
+                self.write_bigint_into(int(n) as i128, out);
+                8
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod ta_kind_tests {
+    use super::TaKind;
+
+    #[test]
+    fn fixed_width_writes_match_allocating_encoders() {
+        for kind in [
+            TaKind::I8,
+            TaKind::U8,
+            TaKind::U8Clamped,
+            TaKind::I16,
+            TaKind::U16,
+            TaKind::I32,
+            TaKind::U32,
+            TaKind::F16,
+            TaKind::F32,
+            TaKind::F64,
+            TaKind::I64,
+            TaKind::U64,
+        ] {
+            let mut bytes = [0; 8];
+            let len = kind.write_into(-12.75, &mut bytes);
+            assert_eq!(&bytes[..len], kind.write(-12.75).as_slice());
+        }
+    }
+
+    #[test]
+    fn bigint_fixed_width_writes_match_allocating_encoder() {
+        for kind in [TaKind::I64, TaKind::U64] {
+            let mut bytes = [0; 8];
+            kind.write_bigint_into(-123_i128, &mut bytes);
+            assert_eq!(&bytes, kind.write_bigint(-123).as_slice());
         }
     }
 }
