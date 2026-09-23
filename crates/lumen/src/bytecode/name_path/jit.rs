@@ -54,6 +54,38 @@ mod tests {
     use crate::{bytecode::Tier, Completion, Engine};
 
     #[test]
+    fn exact_scope_cache_keeps_owned_values_alive_across_collection() {
+        let mut engine = Engine::new();
+        engine.set_tier(Tier::Jit);
+        engine.set_tier_threshold(0);
+        super::super::EXACT_HITS.with(|hits| hits.set(0));
+        let result = engine
+            .eval(
+                r#"
+                const make=Function('return function(seed){eval("var deep=seed");return function(){eval("var middle=1");return function(){eval("var inner=2");return function(n){return [deep,n]}}() }()}')();
+                const object={value:7}, read=make(object);
+                for(let i=0;i<500;i++) {
+                    const result=read(i);
+                    if(result[0]!==object || result[1]!==i) throw 'stale exact path';
+                    if((i%50)===0)$262.gc();
+                }
+                'passed'
+            "#,
+                false,
+            )
+            .unwrap();
+        assert!(matches!(result, Completion::Value(v) if v == "passed"));
+        #[cfg(all(
+            target_arch = "aarch64",
+            any(target_os = "macos", target_os = "linux", target_os = "windows")
+        ))]
+        assert!(
+            super::super::EXACT_HITS.with(|hits| hits.get()) > 0,
+            "exact scope path was not exercised"
+        );
+    }
+
+    #[test]
     fn native_cache_probe_handles_owned_values_calls_and_getter_invalidation() {
         let mut engine = Engine::new();
         engine.set_tier(Tier::Jit);

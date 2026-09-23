@@ -17,6 +17,16 @@ enum ScopeGuard {
     },
 }
 
+struct ExactGuard {
+    scope: Weak<RefCell<Scope>>,
+    generation: u32,
+}
+
+struct ExactPath {
+    guards: Box<[ExactGuard]>,
+    binding: *const Binding,
+}
+
 impl ScopeGuard {
     fn new(env: &Env, scope: &Scope) -> Self {
         match scope.vars.template_layout() {
@@ -57,12 +67,57 @@ enum Holder {
     },
 }
 
-pub(super) struct NamePath {
+struct GuardedPath {
     guards: Vec<ScopeGuard>,
     holder: Holder,
 }
 
-impl NamePath {
+pub(super) struct NamePath(PathKind);
+
+enum PathKind {
+    Exact(ExactPath),
+    Guarded(GuardedPath),
+}
+
+impl ExactPath {
+    fn read(&self, env: &Env) -> Option<Value> {
+        if self
+            .guards
+            .first()
+            .is_none_or(|guard| Rc::as_ptr(env) != guard.scope.as_ptr())
+        {
+            return None;
+        }
+        // Parent links are immutable while a live child owns the chain. Borrowing the cached
+        // exact scopes directly avoids rebuilding that chain's raw pointers on every hit; the
+        // weak owners keep every allocation address ABA-safe, and live generations still reject
+        // any insertion/removal that could change resolution.
+        for guard in &self.guards {
+            // SAFETY: matching the first guard proves the original child is live. Every later
+            // guard is one of its immutable ancestors, so the child chain keeps that allocation
+            // alive; each cached Weak additionally prevents address reuse between invocations.
+            let scope = unsafe { &*guard.scope.as_ptr() }.borrow();
+            if scope.with_obj.is_some() || scope.vars.generation() != guard.generation {
+                return None;
+            }
+        }
+        let binding = unsafe { &*self.binding };
+        let value =
+            (binding.initialized && binding.import_ref.is_none()).then(|| binding.value.clone());
+        #[cfg(test)]
+        if value.is_some() {
+            EXACT_HITS.with(|hits| hits.set(hits.get() + 1));
+        }
+        value
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static EXACT_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+impl GuardedPath {
     fn read(&self, interp: &Interp, env: &Env) -> Option<Value> {
         // The caller's strong env handle owns the entire parent chain. No JS, GC or scope
         // mutation occurs during this walk, so borrowed pointers avoid per-hop Rc churn.
@@ -104,6 +159,15 @@ impl NamePath {
         };
         (binding.initialized && binding.import_ref.is_none()).then(|| binding.value.clone())
     }
+}
+
+impl NamePath {
+    fn read(&self, interp: &Interp, env: &Env) -> Option<Value> {
+        match self {
+            Self(PathKind::Exact(path)) => path.read(env),
+            Self(PathKind::Guarded(path)) => path.read(interp, env),
+        }
+    }
 
     fn build(interp: &Interp, env: &Env, name: &str) -> Option<(Self, Value)> {
         let mut guards = Vec::new();
@@ -124,7 +188,28 @@ impl NamePath {
                     Some(layout) => Holder::Slot(layout.slot(name)?),
                     None => Holder::Binding(binding as *const Binding),
                 };
-                return Some((Self { guards, holder }, binding.value.clone()));
+                let value = binding.value.clone();
+                if let Holder::Binding(binding) = holder {
+                    if guards
+                        .iter()
+                        .all(|guard| matches!(guard, ScopeGuard::Exact { .. }))
+                    {
+                        let guards = guards
+                            .into_iter()
+                            .map(|guard| match guard {
+                                ScopeGuard::Exact { scope, generation } => {
+                                    ExactGuard { scope, generation }
+                                }
+                                ScopeGuard::Layout(_) => unreachable!("checked exact guards"),
+                            })
+                            .collect();
+                        return Some((Self(PathKind::Exact(ExactPath { guards, binding })), value));
+                    }
+                }
+                return Some((
+                    Self(PathKind::Guarded(GuardedPath { guards, holder })),
+                    value,
+                ));
             }
             if Rc::ptr_eq(&current, &interp.global_env) {
                 if depth == 0 {
@@ -140,7 +225,10 @@ impl NamePath {
                     shape,
                     slot,
                 };
-                return Some((Self { guards, holder }, value));
+                return Some((
+                    Self(PathKind::Guarded(GuardedPath { guards, holder })),
+                    value,
+                ));
             }
             let parent = scope.parent.clone()?;
             drop(scope);
@@ -186,13 +274,55 @@ impl Chunk {
 
 #[cfg(test)]
 mod tests {
-    use super::NamePath;
+    use super::{NamePath, PathKind};
     use crate::interpreter::{
         new_scope, new_var_scope_with_bindings, Binding, BindingLayout, VarMap,
     };
     use crate::value::Value;
     use crate::Engine;
     use std::rc::Rc;
+
+    #[test]
+    fn exact_paths_read_live_bindings_and_reject_chain_changes() {
+        let engine = Engine::new();
+        let parent = new_scope(Some(engine.interp.global_env.clone()));
+        parent
+            .borrow_mut()
+            .vars
+            .insert("x", Binding::data(Value::Num(7.0), true, true));
+        let middle = new_scope(Some(parent.clone()));
+        let child = new_scope(Some(middle.clone()));
+        let (path, value) = NamePath::build(&engine.interp, &child, "x").unwrap();
+        assert!(matches!(path, NamePath(PathKind::Exact(_))));
+        assert!(matches!(value, Value::Num(7.0)));
+        parent.borrow_mut().vars.get_mut("x").unwrap().value = Value::Num(9.0);
+        assert!(matches!(
+            path.read(&engine.interp, &child),
+            Some(Value::Num(9.0))
+        ));
+
+        let other = new_scope(Some(middle.clone()));
+        assert!(path.read(&engine.interp, &other).is_none());
+        parent.borrow_mut().vars.get_mut("x").unwrap().initialized = false;
+        assert!(path.read(&engine.interp, &child).is_none());
+        parent.borrow_mut().vars.get_mut("x").unwrap().initialized = true;
+        parent.borrow_mut().vars.get_mut("x").unwrap().import_ref =
+            Some((engine.interp.global_env.clone(), "x".to_string()));
+        assert!(path.read(&engine.interp, &child).is_none());
+        parent.borrow_mut().vars.get_mut("x").unwrap().import_ref = None;
+        middle.borrow_mut().with_obj = Some(Value::Undefined);
+        assert!(path.read(&engine.interp, &child).is_none());
+        middle.borrow_mut().with_obj = None;
+        assert!(matches!(
+            path.read(&engine.interp, &child),
+            Some(Value::Num(9.0))
+        ));
+        middle
+            .borrow_mut()
+            .vars
+            .insert("x", Binding::data(Value::Num(11.0), true, true));
+        assert!(path.read(&engine.interp, &child).is_none());
+    }
 
     #[test]
     fn paths_follow_live_values_and_reject_shadowing_and_different_ancestors() {

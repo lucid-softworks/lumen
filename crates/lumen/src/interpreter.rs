@@ -235,6 +235,9 @@ impl Default for RegexpDependencyCache {
 
 pub struct Scope {
     pub vars: VarMap,
+    /// Fixed at construction while the scope is live. Cycle collection clears the link only
+    /// after proving the scope unreachable; guarded name paths rely on a live child's chain
+    /// retaining the same ancestor allocations.
     pub parent: Option<Env>,
     /// For a `with (obj)` block: identifier resolution checks `obj`'s properties before the parent.
     pub with_obj: Option<Value>,
