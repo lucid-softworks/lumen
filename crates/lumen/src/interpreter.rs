@@ -338,10 +338,11 @@ fn scope_registry_prune() -> usize {
 }
 
 /// The live scopes on this thread (purging dead weak entries as it goes).
-fn scope_snapshot() -> Vec<Env> {
+fn scope_snapshot_into(live: &mut Vec<Env>) {
+    live.clear();
     SCOPE_REGISTRY.with(|r| {
         let mut reg = r.borrow_mut();
-        let mut live = Vec::with_capacity(reg.len());
+        live.reserve(reg.len());
         reg.retain(|w| match w.upgrade() {
             Some(e) => {
                 live.push(e);
@@ -349,7 +350,6 @@ fn scope_snapshot() -> Vec<Env> {
             }
             None => false,
         });
-        live
     })
 }
 
@@ -793,6 +793,33 @@ struct ConstructIc {
     empty_base_class: bool,
 }
 
+#[derive(Default)]
+struct GcScratch {
+    live: Vec<Gc>,
+    scopes: Vec<Env>,
+    sidx: crate::fasthash::FastMap<usize, usize>,
+    s_internal: Vec<u32>,
+    s_mark: Vec<bool>,
+    object_refs: Vec<Gc>,
+    scope_refs: Vec<Env>,
+    stack: Vec<Gc>,
+    sstack: Vec<Env>,
+}
+
+impl GcScratch {
+    fn clear(&mut self) {
+        self.live.clear();
+        self.scopes.clear();
+        self.sidx.clear();
+        self.s_internal.clear();
+        self.s_mark.clear();
+        self.object_refs.clear();
+        self.scope_refs.clear();
+        self.stack.clear();
+        self.sstack.clear();
+    }
+}
+
 pub struct Interp {
     pub(crate) global: Gc,
     pub(crate) global_env: Env,
@@ -1038,6 +1065,9 @@ pub struct Interp {
     pub(crate) generators: crate::fasthash::FastMap<usize, crate::coroutine::Coroutine>,
     /// Live-object count above which the next allocation safe point runs the cycle collector.
     pub(crate) gc_next: i64,
+    /// Reusable cycle-collector graph buffers. Keeping these on the interpreter avoids repeated
+    /// temporary allocations on JIT-reached collection safe points without retaining JS objects.
+    gc_scratch: GcScratch,
     /// Call counter for [`Interp::gc_check_amortized`]. Layered calls poll every 256 calls; direct
     /// JIT calls compare live objects with `gc_next` exactly and use this only for sparse scope-
     /// registry maintenance.
@@ -1516,6 +1546,7 @@ impl Interp {
             host_state: Default::default(),
             generators: Default::default(),
             gc_next: GC_TRIGGER,
+            gc_scratch: GcScratch::default(),
             gc_tick: 0,
             scope_gc_next: SCOPE_GC_TRIGGER,
             constructing: false,
@@ -4312,40 +4343,50 @@ impl Interp {
 
     pub(crate) fn gc_collect(&mut self) {
         let _inline_roots = self.inline_gc_roots();
-        let live = crate::value::gc_snapshot();
+        let mut scratch = std::mem::take(&mut self.gc_scratch);
+        crate::value::gc_snapshot_into(&mut scratch.live);
         // Scopes are graph nodes too: a closure's captured environment references objects (its
         // bindings) and vice versa (`Callable::User`), so cycles routinely pass through them.
-        let scopes = scope_snapshot();
-        let sidx: crate::fasthash::FastMap<usize, usize> = scopes
-            .iter()
-            .enumerate()
-            .map(|(k, e)| (Rc::as_ptr(e) as usize, k))
-            .collect();
-        let mut s_internal = vec![0u32; scopes.len()];
-        let mut s_mark = vec![false; scopes.len()];
+        scope_snapshot_into(&mut scratch.scopes);
+        scratch.sidx.clear();
+        scratch.sidx.reserve(scratch.scopes.len());
+        for (k, e) in scratch.scopes.iter().enumerate() {
+            scratch.sidx.insert(Rc::as_ptr(e) as usize, k);
+        }
+        scratch.s_internal.clear();
+        scratch.s_internal.resize(scratch.scopes.len(), 0);
+        scratch.s_mark.clear();
+        scratch.s_mark.resize(scratch.scopes.len(), false);
+        let live = &scratch.live;
+        let scopes = &scratch.scopes;
+        let sidx = &scratch.sidx;
+        let s_internal = &mut scratch.s_internal;
+        let s_mark = &mut scratch.s_mark;
 
         // Reset scratch, then count references between heap nodes (objects and scopes).
-        for o in &live {
+        for o in live {
             let b = o.borrow();
             b.gc_mark.set(false);
             b.gc_internal.set(0);
         }
-        let mut object_refs = Vec::new();
-        let mut scope_refs = Vec::new();
-        for o in &live {
-            crate::value::gc_edges::object_refs_into(o, &mut object_refs);
+        let object_refs = &mut scratch.object_refs;
+        let scope_refs = &mut scratch.scope_refs;
+        object_refs.clear();
+        scope_refs.clear();
+        for o in live {
+            crate::value::gc_edges::object_refs_into(o, object_refs);
             for p in object_refs.drain(..) {
                 let pb = p.borrow();
                 pb.gc_internal.set(pb.gc_internal.get() + 1);
             }
-            self.obj_scope_refs_into(o, &mut scope_refs);
+            self.obj_scope_refs_into(o, scope_refs);
             for e in scope_refs.drain(..) {
                 if let Some(&k) = sidx.get(&(Rc::as_ptr(&e) as usize)) {
                     s_internal[k] += 1;
                 }
             }
         }
-        for e in &scopes {
+        for e in scopes {
             let b = e.borrow();
             if let Some(p) = &b.parent {
                 if let Some(&k) = sidx.get(&(Rc::as_ptr(p) as usize)) {
@@ -4378,9 +4419,11 @@ impl Interp {
         // Roots: nodes with a reference from outside the heap graph (the Rust call stack, the
         // Interp's own fields, module/realm registries, coroutine threads). `strong_count`
         // includes exactly one clone held by the snapshot, so external refs == strong - internal - 1.
-        let mut stack: Vec<Gc> = Vec::new();
-        let mut sstack: Vec<Env> = Vec::new();
-        for o in &live {
+        let stack = &mut scratch.stack;
+        let sstack = &mut scratch.sstack;
+        stack.clear();
+        sstack.clear();
+        for o in live {
             let internal = o.borrow().gc_internal.get() as usize;
             if Rc::strong_count(o) > internal + 1 {
                 o.borrow().gc_mark.set(true);
@@ -4397,7 +4440,7 @@ impl Interp {
         // names) with strong/internal counts — the fastest way to see WHAT pins a leaked graph.
         if std::env::var_os("LUMEN_GC_DUMP").is_some() {
             let mut shown = 0;
-            for o in &live {
+            for o in live {
                 let b = o.borrow();
                 if !b.gc_mark.get() {
                     continue;
@@ -4430,14 +4473,14 @@ impl Interp {
         // Mark everything reachable from the roots, across both node types.
         loop {
             if let Some(o) = stack.pop() {
-                crate::value::gc_edges::object_refs_into(&o, &mut object_refs);
+                crate::value::gc_edges::object_refs_into(&o, object_refs);
                 for p in object_refs.drain(..) {
                     if !p.borrow().gc_mark.get() {
                         p.borrow().gc_mark.set(true);
                         stack.push(p);
                     }
                 }
-                self.obj_scope_refs_into(&o, &mut scope_refs);
+                self.obj_scope_refs_into(&o, scope_refs);
                 for e in scope_refs.drain(..) {
                     if let Some(&k) = sidx.get(&(Rc::as_ptr(&e) as usize)) {
                         if !s_mark[k] {
@@ -4491,7 +4534,7 @@ impl Interp {
         // future object reusing the address can't inherit stale metadata.
         #[cfg(not(target_arch = "wasm32"))]
         let mut garbage = 0usize;
-        for o in &live {
+        for o in live {
             if !o.borrow().gc_mark.get() {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
@@ -4534,11 +4577,11 @@ impl Interp {
                 b.with_obj = None;
             }
         }
-        // Release the snapshot handles first: only then do swept objects and their property
-        // buffers reach the allocator's free lists. A high threshold confines the expensive
-        // platform pressure-relief call to phase changes, not ordinary generational churn.
-        drop(live);
-        drop(scopes);
+        // Release the snapshot handles before returning the scratch buffers. A high threshold
+        // confines the expensive platform pressure-relief call to phase changes, not ordinary
+        // generational churn.
+        scratch.clear();
+        self.gc_scratch = scratch;
         #[cfg(not(target_arch = "wasm32"))]
         if garbage >= 50_000 {
             crate::fastalloc::trim();
@@ -8277,5 +8320,59 @@ fn type_name(v: &Value) -> &'static str {
 impl Default for Interp {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod gc_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_collection_reuses_scratch_without_changing_lifetimes() {
+        let mut engine = crate::Engine::new();
+        engine.set_tier(crate::bytecode::Tier::Jit);
+        engine.set_tier_threshold(0);
+        engine
+            .eval(
+                "var kept={}; kept.self=kept; var doomed={}; doomed.self=doomed;",
+                false,
+            )
+            .unwrap();
+
+        let doomed = engine
+            .interp
+            .global
+            .borrow()
+            .props
+            .get("doomed")
+            .and_then(|property| match property.value() {
+                Value::Obj(object) => Some(Rc::downgrade(&object)),
+                _ => None,
+            })
+            .expect("test object binding");
+        engine.eval("doomed=null;", false).unwrap();
+
+        engine.interp.gc_collect();
+        assert!(doomed.upgrade().is_none(), "unreachable cycle was retained");
+        let capacities = (
+            engine.interp.gc_scratch.live.capacity(),
+            engine.interp.gc_scratch.scopes.capacity(),
+            engine.interp.gc_scratch.sidx.capacity(),
+        );
+        assert!(capacities.0 > 0 && capacities.1 > 0 && capacities.2 > 0);
+
+        engine.interp.gc_collect();
+        assert_eq!(
+            capacities,
+            (
+                engine.interp.gc_scratch.live.capacity(),
+                engine.interp.gc_scratch.scopes.capacity(),
+                engine.interp.gc_scratch.sidx.capacity(),
+            )
+        );
+        assert!(matches!(
+            engine.eval("kept.self === kept", false).unwrap(),
+            crate::Completion::Value(result) if result == "true"
+        ));
     }
 }

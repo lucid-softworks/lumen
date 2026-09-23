@@ -913,10 +913,19 @@ pub(crate) fn live_objects_ptr() -> *const i64 {
 /// Strong handles to every currently-live heap object. Registry slots are non-owning raw
 /// pointers tombstoned synchronously by `Object::drop`; while this thread-local borrow is held no
 /// object can disappear between reading a slot and incrementing its strong count.
+#[allow(dead_code)]
 pub fn gc_snapshot() -> Vec<Gc> {
+    let mut live = Vec::new();
+    gc_snapshot_into(&mut live);
+    live
+}
+
+/// Fill a reusable buffer with strong handles to every currently-live heap object.
+pub(crate) fn gc_snapshot_into(live: &mut Vec<Gc>) {
+    live.clear();
     GC_STATE.with(|state| {
         let reg = state.registry.borrow();
-        let mut live = Vec::with_capacity(reg.entries.len() - reg.free.len());
+        live.reserve(reg.entries.len().saturating_sub(reg.free.len()));
         for &ptr in &reg.entries {
             if ptr.is_null() {
                 continue;
@@ -926,7 +935,6 @@ pub fn gc_snapshot() -> Vec<Gc> {
                 live.push(Rc::from_raw(ptr));
             }
         }
-        live
     })
 }
 
