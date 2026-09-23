@@ -2034,7 +2034,7 @@ pub fn compile(
                     eprintln!("[jit-region] head {pc}: EMITTED numeric diamond");
                 }
             }
-            if !emitted_region {
+            if !emitted_region && cfg.loop_at_header(pc).is_some() {
                 numeric_loops::try_emit(
                     &mut a,
                     chunk,
