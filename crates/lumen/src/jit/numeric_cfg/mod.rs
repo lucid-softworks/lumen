@@ -1,4 +1,5 @@
 //! Register-resident numeric loops with general forward branches and multiple backedges.
+mod array_key;
 mod arrays;
 mod branches;
 mod emit;

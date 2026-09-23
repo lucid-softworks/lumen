@@ -43,12 +43,22 @@ pub(super) fn preamble(a: &mut asm::Asm, plan: &Plan, layout: &JitLayout, fail: 
     }
 }
 
-pub(super) fn read(a: &mut asm::Asm, plan: &Plan, slot: u16, key: u32, result: u32, fail: usize) {
+pub(super) fn read(
+    a: &mut asm::Asm,
+    plan: &Plan,
+    slot: u16,
+    key: u32,
+    result: u32,
+    fail: usize,
+    converted: bool,
+) {
     let (data, len) = registers(plan, slot);
-    a.fcvtzu_w_d(9, key);
-    a.ucvtf_d_w(0, 9);
-    a.fcmp(0, key);
-    a.b_cond(C_NE, fail); // Exact uint32 only; -0 correctly addresses element zero.
+    if !converted {
+        a.fcvtzu_w_d(9, key);
+        a.ucvtf_d_w(0, 9);
+        a.fcmp(0, key);
+        a.b_cond(C_NE, fail); // Exact uint32 only; -0 correctly addresses element zero.
+    }
     a.cmp_reg_x(9, len);
     a.b_cond(C_HS, fail);
     a.ldr_d_lsl3(result, data, 9);
@@ -131,6 +141,15 @@ mod tests {
             assert(keyed(b,3,NaN)===11);
             assert(keyed(b,3,Infinity)===9);
             assert(keyed(b,3,-0)===4);
+            function pair(a,b,n) {
+                var sum=0;
+                for(var i=0;i<n;i++) {if(i<10)sum+=a[i]*b[i];else sum--;}
+                return sum;
+            }
+            var short=[4],pairCalls=0,pairProto=Object.create(Array.prototype);
+            Object.defineProperty(pairProto,'1',{get(){pairCalls++;return 5;}});
+            Object.setPrototypeOf(short,pairProto);
+            assert(pair([1,2],short,2)===14 && pairCalls===1);
         "#,
             true,
             true,

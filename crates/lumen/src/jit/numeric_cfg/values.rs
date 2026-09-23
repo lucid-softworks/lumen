@@ -6,6 +6,7 @@ use crate::jit::{asm::Asm, UpdKind};
 pub(super) struct Values {
     stack: Vec<u32>,
     allocated: bool,
+    key: super::array_key::Cache,
 }
 
 impl Values {
@@ -13,6 +14,7 @@ impl Values {
         Self {
             stack: Vec::new(),
             allocated,
+            key: super::array_key::Cache::new(),
         }
     }
 
@@ -61,6 +63,7 @@ impl Values {
     }
 
     pub(super) fn comparison(&mut self) -> (u32, u32) {
+        self.key.clear();
         let rhs = self.pop();
         let lhs = self.pop();
         (lhs, rhs)
@@ -81,11 +84,14 @@ impl Values {
             key
         };
         // The guards precede the result write, including when it is coalesced into a local.
-        super::arrays::read(a, plan, slot, key, result, fail);
+        let converted = self.key.reused(key);
+        super::arrays::read(a, plan, slot, key, result, fail, converted);
+        self.key.record(key, result);
         self.stack.push(result);
     }
 
     pub(super) fn step(&mut self, a: &mut Asm, plan: &Plan, step: Step, next: Option<Step>) {
+        self.key.before(step);
         if !self.allocated {
             let mut depth = self.stack.len() as u32;
             fixed::step(a, plan, step, &mut depth);
