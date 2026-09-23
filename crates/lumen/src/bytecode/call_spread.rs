@@ -219,6 +219,19 @@ mod tests {
             function invokeThrows(a){return throws(...a);}
             var caught='';try{invokeThrows([]);}catch(e){caught=e.message;}
             assert(caught==='spread-target');
+
+            function reflected(){return reflected.caller===invokeReflected&&new.target===undefined;}
+            function invokeReflected(a){return reflected(...a);}
+            assert(invokeReflected([]));
+
+            function recursive(n){return n===0?true:recursive(...[n-1]);}
+            function invokeRecursive(a){return recursive(...a);}
+            assert(invokeRecursive([3]));
+
+            function base(a,b){return this.marker+a+b;}
+            var bound=base.bind({marker:4},5);
+            function invokeBound(a){return bound(...a);}
+            assert(invokeBound([6])===15);
             "#,
         );
     }
