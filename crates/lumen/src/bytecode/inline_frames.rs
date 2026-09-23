@@ -8,6 +8,7 @@ pub(super) struct Builder {
     sites: Vec<(u32, u32, bool)>,
     locations: Vec<u32>,
     current: u32,
+    closures: Vec<(u32, super::inline_closure::Guard)>,
 }
 
 impl Builder {
@@ -26,12 +27,16 @@ impl Builder {
     pub fn leave(&mut self, previous: u32) {
         self.current = previous;
     }
-    pub fn checkpoint(&self) -> usize {
-        self.sites.len()
+    pub fn checkpoint(&self) -> (usize, usize) {
+        (self.sites.len(), self.closures.len())
     }
-    pub fn rollback(&mut self, sites: usize, pc: usize) {
+    pub fn rollback(&mut self, (sites, closures): (usize, usize), pc: usize) {
         self.sites.truncate(sites);
+        self.closures.truncate(closures);
         self.locations.truncate(if sites == 0 { 0 } else { pc });
+    }
+    pub(super) fn closure(&mut self, target: u32, guard: super::inline_closure::Guard) {
+        self.closures.push((target, guard));
     }
     pub fn finish(self, targets: &[InlineTarget]) -> Option<Locations> {
         if self.sites.is_empty() {
@@ -39,15 +44,25 @@ impl Builder {
         }
         let mut states: Vec<Rc<InlineFrame>> = Vec::new();
         for (target, parent, strict) in self.sites {
+            let callee_slot = self
+                .closures
+                .iter()
+                .find(|(index, _)| *index == target)
+                .map(|(_, guard)| guard.slot);
+            let dynamic =
+                callee_slot.is_some() || parent != 0 && states[parent as usize - 1].dynamic;
             states.push(Rc::new(InlineFrame {
                 parent: (parent != 0).then(|| states[parent as usize - 1].clone()),
                 callee: targets[target as usize].pin.clone(),
                 strict,
+                callee_slot,
+                dynamic,
             }));
         }
         Some(Locations {
             states,
             locations: self.locations,
+            closures: self.closures,
         })
     }
 }
@@ -55,9 +70,30 @@ impl Builder {
 pub(super) struct Locations {
     states: Vec<Rc<InlineFrame>>,
     locations: Vec<u32>,
+    closures: Vec<(u32, super::inline_closure::Guard)>,
 }
 
 impl Chunk {
+    pub(crate) fn inline_closure_target(&self, target: u32) -> bool {
+        self.inline_closure(target).is_some()
+    }
+    pub(super) fn inline_closure(&self, target: u32) -> Option<&super::inline_closure::Guard> {
+        self.inline_frames
+            .as_ref()?
+            .closures
+            .iter()
+            .find(|(index, _)| *index == target)
+            .map(|(_, guard)| guard)
+    }
+    pub(crate) fn has_inline_closures(&self) -> bool {
+        self.inline_frames
+            .as_ref()
+            .is_some_and(|frames| !frames.closures.is_empty())
+    }
+    pub(crate) fn dynamic_inline_location(&self, pc: usize) -> bool {
+        // The returned immutable chain is owned by this live chunk.
+        unsafe { self.inline_location(pc).as_ref() }.is_some_and(|frame| frame.dynamic)
+    }
     pub(super) fn execution_strictness(&self, interp: &Interp, pc: usize) -> bool {
         if let Some(locations) = &self.inline_frames {
             let state = locations.locations[pc];
@@ -93,9 +129,38 @@ impl Chunk {
         }
     }
     #[inline]
-    pub(crate) fn record_inline_location(&self, interp: &mut Interp, pc: usize) {
+    pub(crate) fn record_inline_location(
+        &self,
+        interp: &mut Interp,
+        pc: usize,
+        slots: &[crate::value::Value],
+    ) {
         if let Some(frame) = interp.fn_frames.last_mut() {
-            frame.inline = self.inline_location(pc);
+            frame.record_inline(self.inline_location(pc), |slot| {
+                slots[slot as usize].clone()
+            });
+        }
+    }
+    /// # Safety
+    /// `ctx` owns initialized locals in the representation identified by `slots_packed`.
+    #[inline]
+    pub(crate) unsafe fn record_jit_inline_location(&self, ctx: &crate::jit::JitCtx, pc: usize) {
+        let interp = unsafe { &mut *ctx.interp };
+        if let Some(frame) = interp.fn_frames.last_mut() {
+            frame.record_inline(self.inline_location(pc), |slot| {
+                assert!((slot as usize) < ctx.n_slots);
+                if ctx.slots_packed {
+                    unsafe {
+                        &*ctx
+                            .slots
+                            .cast::<crate::value::PackedValue>()
+                            .add(slot as usize)
+                    }
+                    .unpack()
+                } else {
+                    unsafe { &*ctx.slots.add(slot as usize) }.clone()
+                }
+            });
         }
     }
 }

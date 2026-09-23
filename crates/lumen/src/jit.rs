@@ -96,6 +96,11 @@ mod numeric_expr;
     target_arch = "aarch64",
     any(target_os = "macos", target_os = "linux", target_os = "windows")
 ))]
+mod numeric_loops;
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 mod packed_element;
 #[cfg(all(
     target_arch = "aarch64",
@@ -485,6 +490,7 @@ pub(crate) fn helper_table() -> [usize; N_HELPERS] {
         crate::bytecode::collection_lookup::read as *const () as usize,
         crate::bytecode::collection_insert::map_set as *const () as usize,
         crate::bytecode::collection_insert::set_add as *const () as usize,
+        crate::bytecode::inline_closure::check_native as *const () as usize,
     ]
 }
 
@@ -653,7 +659,8 @@ pub const H_LOAD_CACHED_NAME: usize = 26;
 pub const H_COLLECTION_LOOKUP: usize = 27;
 pub const H_COLLECTION_MAP_SET: usize = 28;
 pub const H_COLLECTION_SET_ADD: usize = 29;
-pub const N_HELPERS: usize = 30;
+pub const H_INLINE_CLOSURE: usize = 30;
+pub const N_HELPERS: usize = 31;
 
 /// ARM64 condition codes used by the inline templates.
 #[cfg(all(
@@ -1567,10 +1574,16 @@ pub fn compile(
             }
         }
     }
-    let fast: u32 = std::env::var("LUMEN_JIT_FAST")
+    let template_fast: u32 = std::env::var("LUMEN_JIT_FAST")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(u32::MAX);
+    // Complex regions can consume inline call setup. Numeric-only regions preserve it.
+    let fast = if chunk.has_inline_closures() {
+        template_fast & !(1 << 15)
+    } else {
+        template_fast
+    };
     let array_intrinsics_on = std::env::var_os("LUMEN_JIT_NO_ARRAY_INTRINSICS").is_none();
     let function_call_intrinsic_on =
         std::env::var_os("LUMEN_JIT_NO_FUNCTION_CALL_INTRINSIC").is_none();
@@ -1697,26 +1710,28 @@ pub fn compile(
             a.bind(write_fallback_labels[pc]);
             continue;
         }
-        mixed_loop::try_emit(
-            &mut a,
-            chunk,
-            &cfg,
-            pc,
-            &write_fallback_labels,
-            &mut targeted,
-            layout,
-        );
-        guarded_write_region::try_emit(
-            &mut a,
-            chunk,
-            &cfg,
-            pc,
-            (&pc_labels, &write_fallback_labels),
-            &mut targeted,
-            layout,
-        );
+        if !chunk.has_inline_closures() {
+            mixed_loop::try_emit(
+                &mut a,
+                chunk,
+                &cfg,
+                pc,
+                &write_fallback_labels,
+                &mut targeted,
+                layout,
+            );
+            guarded_write_region::try_emit(
+                &mut a,
+                chunk,
+                &cfg,
+                pc,
+                (&pc_labels, &write_fallback_labels),
+                &mut targeted,
+                layout,
+            );
+        }
         a.bind(write_fallback_labels[pc]);
-        // Mixed object/numeric expressions retain their original templates on every guard miss.
+        // Expressions only publish operands; hidden callees remain in their owning locals.
         numeric_expr::try_emit(&mut a, chunk, &cfg, pc, &pc_labels, &mut targeted, layout);
         // A web-trace regexp workload is dominated by tiny loops whose body is exactly
         // `re.exec(strings[i])` with the result discarded. Let one guarded Rust entry process
@@ -1779,7 +1794,7 @@ pub fn compile(
         // IdleTask's dominant release arm is a whole-function guarded transaction. Success
         // returns directly; a declined guard lands on the untouched pc0 template so accessors,
         // coercions, partial effects, and the one final hold retain exact bytecode behavior.
-        if pc == 0 && rc_ok {
+        if pc == 0 && rc_ok && !chunk.has_inline_closures() {
             if let Some(plan) = plan_scheduler_idle_release(chunk, ops, &cfg, layout, fast) {
                 let plain_h = emit_scheduler_idle_release_region(&mut a, layout, &plan, l_ret_ok);
                 a.bind(plain_h);
@@ -2020,30 +2035,30 @@ pub fn compile(
                 }
             }
             if !emitted_region {
-                emitted_region = numeric_cfg::try_emit(
+                numeric_loops::try_emit(
                     &mut a,
                     chunk,
                     &cfg,
                     layout,
+                    fast,
                     pc,
-                    &pc_labels,
-                    &mut targeted,
+                    (&pc_labels, &mut targeted),
                 );
             }
-            if !emitted_region {
-                if let Some(plan) = plan_loop(chunk, ops, pc, &targeted, layout, fast, &cfg) {
-                    let plain_h = emit_loop_chain(&mut a, layout, &plan, &pc_labels);
-                    a.bind(plain_h);
-                    // Bails jump to interior pc labels, so the plain region below must never fuse
-                    // across them: mark every interior pc targeted (all fusions respect that).
-                    for p in pc + 1..=plan.jump_pc {
-                        targeted[p] = true;
-                    }
-                    // Fall through: the plain template for this op (and the rest of the region)
-                    // emits as usual.
-                }
-            }
         }
+        if chunk.has_inline_closures() && template_fast & 32768 != 0 && rc_ok && targeted[pc] {
+            numeric_loops::try_emit(
+                &mut a,
+                chunk,
+                &cfg,
+                layout,
+                template_fast,
+                pc,
+                (&pc_labels, &mut targeted),
+            );
+        }
+        // Region restrictions must not disable ordinary instruction fast paths.
+        let fast = template_fast;
         // Local identity/nullish comparison feeding a branch. Reading the two frame slots
         // non-owningly avoids two Value clones, their stack traffic, the equality helper, and
         // both refcount drops for hot `if (object != excluded)` loops. Unsupported/coercing
@@ -3053,13 +3068,25 @@ pub fn compile(
                 let id = guard_coverage
                     .as_ref()
                     .and_then(|coverage| coverage.ordinary(pc));
-                inline_guard_coverage::emit(
-                    &mut a,
-                    layout,
-                    chunk.jit_inline_target(*t),
-                    pc_labels[*target as usize],
-                    id,
-                );
+                if chunk.inline_closure_target(*t) {
+                    inline_guard_coverage::emit_closure(
+                        &mut a,
+                        chunk,
+                        pc as u32,
+                        layout,
+                        ilayout,
+                        pc_labels[*target as usize],
+                        id,
+                    );
+                } else {
+                    inline_guard_coverage::emit(
+                        &mut a,
+                        layout,
+                        chunk.jit_inline_target(*t),
+                        pc_labels[*target as usize],
+                        id,
+                    );
+                }
             }
             // Calls take the dedicated helper: same contract as the generic one, minus the full
             // op dispatch (they dominate helper traffic in call-heavy code). With bit 524288,
@@ -3072,7 +3099,7 @@ pub fn compile(
                 if chunk.has_inline_frames() {
                     inline_frames::record(&mut a, ilayout, chunk.inline_location(pc));
                 }
-                let inline_probe = fast & 524288 != 0;
+                let inline_probe = fast & 524288 != 0 && !chunk.dynamic_inline_location(pc);
                 let slow = a.new_label();
                 let done = a.new_label();
                 if inline_probe {
@@ -21766,6 +21793,8 @@ fn emit_loop_chain(
     // ---- rotated loop ----------------------------------------------------------------------
     emit_pass!(0..plan.cond_len, exit_a, Vec::new());
     a.bind(body_l);
+    #[cfg(test)]
+    numeric_loops::record_entry(a);
     emit_pass!(
         plan.cond_len..plan.chain.len(),
         exit_b,

@@ -18,12 +18,16 @@
 //! `--tier`, or `Engine::set_tier`.
 
 mod activation;
+mod call_site;
+pub use call_site::CallSite;
 pub(crate) mod array_destructure;
 pub(crate) mod array_iterator_step;
 pub(crate) mod collection_insert;
 pub(crate) mod collection_lookup;
 mod for_in;
+pub(crate) mod inline_closure;
 mod inline_frames;
+mod inlining;
 mod iterator_entry;
 mod name_path;
 pub(crate) use name_path::jit::load_cached as jit_load_cached_name;
@@ -346,40 +350,6 @@ pub static CALL_IC_EPOCH: std::sync::atomic::AtomicU32 = std::sync::atomic::Atom
 /// to four distinct callees.
 /// Way count of [`CallSite::entries`] — the JIT call template's inline probe walks all of them.
 pub const CALL_IC_WAYS: usize = 4;
-
-pub struct CallSite {
-    pub entries: [std::cell::Cell<CallIc>; CALL_IC_WAYS],
-    /// Round-robin fill cursor.
-    pub next: std::cell::Cell<u8>,
-}
-
-impl CallSite {
-    pub fn empty() -> CallSite {
-        CallSite {
-            entries: [
-                std::cell::Cell::new(CallIc::EMPTY),
-                std::cell::Cell::new(CallIc::EMPTY),
-                std::cell::Cell::new(CallIc::EMPTY),
-                std::cell::Cell::new(CallIc::EMPTY),
-            ],
-            next: std::cell::Cell::new(0),
-        }
-    }
-    /// Record `ic`, replacing an existing way for the same callee (epoch or realm refills must
-    /// not fan one callee across ways — the inline planner reads way-count as polymorphism),
-    /// else the next way round-robin.
-    pub fn fill(&self, ic: CallIc) {
-        for e in &self.entries {
-            if e.get().callee == ic.callee {
-                e.set(ic);
-                return;
-            }
-        }
-        let k = self.next.get() as usize & 3;
-        self.entries[k].set(ic);
-        self.next.set((k as u8 + 1) & 3);
-    }
-}
 
 /// Monomorphic `new`-site cache. Constructors are overwhelmingly fixed per source site, so this
 /// avoids the interpreter-wide constructor hash table after the first execution while retaining
@@ -741,6 +711,8 @@ pub struct Chunk {
     regexp_literals: Vec<std::cell::OnceCell<Rc<crate::regex::Regex>>>,
     /// One [`CallSite`] per `Call`/`CallWithThis` site (the JIT→JIT fast call's callee cache).
     call_caches: Vec<CallSite>,
+    /// Lazy, bounded runtime pins; never used to authorize baked optimizer pointers.
+    call_refresh_pins: std::cell::RefCell<crate::fasthash::FastMap<u32, Option<CallPin>>>,
     /// One monomorphic identity cache per `New` site.
     construct_caches: Vec<std::cell::Cell<ConstructSite>>,
     /// Weak handles pinning every callee address a call cache has ever recorded (see [`CallIc`]),
@@ -2211,6 +2183,7 @@ fn compile_inner(
         arguments_forwarder_runtime: std::cell::RefCell::new(None),
         regexp_literals: (0..op_count).map(|_| std::cell::OnceCell::new()).collect(),
         call_caches: c.call_caches,
+        call_refresh_pins: Default::default(),
         construct_caches: c.construct_caches,
         call_pins: std::cell::RefCell::new(c.call_pins),
         inline_frames: c.inline_frames.finish(&c.inline_targets),
@@ -2330,6 +2303,8 @@ pub struct InlineWay {
     pub free_names: Vec<Rc<str>>,
     /// Exact shared closure environment required by non-global free-name inlines.
     pub expected_env: usize,
+    /// Whether this is a shared non-global lexical environment.
+    pub shared_lexical: bool,
     /// The callee's OWN inline plan (depth-capped recursion): call sites inside the spliced
     /// body splice too, keyed by the callee-frame ordinal — its first-compile cache numbering,
     /// which the splice reproduces by walking the same AST in the same order.
@@ -2509,10 +2484,7 @@ impl Compiler {
             for (callee, pin) in pins {
                 self.call_pins.entry(callee).or_insert(pin);
             }
-            CallSite {
-                entries: std::array::from_fn(|way| std::cell::Cell::new(entries[way])),
-                next: std::cell::Cell::new(next),
-            }
+            CallSite::seeded(entries, next)
         } else {
             CallSite::empty()
         };
@@ -2575,220 +2547,6 @@ impl Compiler {
         }
     }
 
-    fn try_emit_inline(
-        &mut self,
-        entry: &InlinePlanEntry,
-        argc: u16,
-        cc: u32,
-        has_this: bool,
-    ) -> CResult {
-        if argc > 8 {
-            return Err(Bail); // the JIT guard peeks the callee with a ±256-byte unscaled load
-        }
-        // Per-way gates: a plain `Call` site has no `this` beneath the callee (a this-using
-        // callee needs the generic binding, and the guard's receiver peek would read past the
-        // operands); a caller binding (slot or captured) would shadow a global free name.
-        let ways: Vec<&InlineWay> = entry
-            .ways
-            .iter()
-            .filter(|w| {
-                (has_this || !w.uses_this)
-                    && (w.expected_env != 0
-                        || !w.free_names.iter().any(|name| {
-                            self.lookup(name).is_some() || self.env_names.contains_key(&**name)
-                        }))
-            })
-            .collect();
-        if ways.is_empty() {
-            return Err(Bail);
-        }
-        // Each way: identity guard → bind → spliced body → jump to the shared join; a guard
-        // mismatch falls to the next way, the last one to the generic call.
-        let mut end_jumps: Vec<usize> = Vec::new();
-        let mut pending_guard: Option<usize> = None;
-        for w in &ways {
-            if let Some(g) = pending_guard.take() {
-                self.patch(g); // previous way's mismatch lands on this way's guard
-            }
-            let guard = self.emit_inline_way(w, argc, has_this, &mut end_jumps)?;
-            pending_guard = Some(guard);
-        }
-        // ---- join: every way's result jumps here; the last mismatch runs the generic call.
-        self.patch(pending_guard.take().expect("at least one way"));
-        if has_this {
-            self.emit(Op::CallWithThis(argc, cc));
-        } else {
-            self.emit(Op::Call(argc, cc));
-        }
-        for j in end_jumps {
-            self.patch(j);
-        }
-        Ok(())
-    }
-
-    /// One guarded splice: emits the identity guard (returned unpatched — the caller chains it
-    /// to the next way or the generic call), the frame binds, and the body; the result-carrying
-    /// exits are appended to `end_jumps`.
-    fn emit_inline_way(
-        &mut self,
-        w: &InlineWay,
-        argc: u16,
-        has_this: bool,
-        end_jumps: &mut Vec<usize>,
-    ) -> Result<usize, Bail> {
-        let f = &w.f;
-        let t = self.inline_targets.len() as u32;
-        self.inline_targets.push(InlineTarget {
-            expected: Rc::as_ptr(&w.obj) as usize,
-            pin: Rc::downgrade(&w.obj),
-            expected_env: w.expected_env,
-            argc,
-            check_this: has_this && w.check_this,
-        });
-        let guard = self.emit(Op::InlineGuard(t, 0));
-
-        // ---- bind the callee frame into fresh caller slots ----
-        let n_params = f.params.len();
-        for _ in n_params..argc as usize {
-            self.emit(Op::Pop); // surplus arguments (evaluated; excess drops from the top)
-        }
-        for _ in argc as usize..n_params {
-            self.emit(Op::Undef); // missing arguments
-        }
-        let mut param_slots: Vec<u16> = Vec::with_capacity(n_params);
-        for p in &f.params {
-            let Pattern::Ident(name) = &p.pattern else {
-                return Err(Bail);
-            };
-            if p.default.is_some() || p.rest {
-                return Err(Bail);
-            }
-            param_slots.push(self.fresh_slot(name));
-        }
-        for &s in param_slots.iter().rev() {
-            self.emit(Op::StoreLocal(s));
-        }
-        self.emit(Op::Pop); // the method (identity proven; the value itself is dead)
-        let this_slot = if !has_this {
-            None // a plain Call site: nothing beneath the callee
-        } else if w.uses_this {
-            let s = self.fresh_slot("(inline this)");
-            self.emit(Op::StoreLocal(s));
-            Some(s)
-        } else {
-            self.emit(Op::Pop);
-            None
-        };
-
-        // ---- compile the body under the callee's (empty) namespace ----
-        let saved_scopes = std::mem::take(&mut self.scopes);
-        let saved_env_names = std::mem::take(&mut self.env_names);
-        let saved_loops = std::mem::take(&mut self.loops);
-        let saved_labels = std::mem::take(&mut self.pending_labels);
-        let saved_try = std::mem::replace(&mut self.try_depth, 0);
-        let saved_this = std::mem::replace(&mut self.inline_this, this_slot);
-        let saved_returns = std::mem::take(&mut self.inline_returns);
-        self.inline_depth += 1;
-        self.plan_stack.push((w.nested.clone(), 0));
-        let hot_chunk = f.code.get().and_then(Option::as_ref);
-        self.cache_seed_stack.push((
-            hot_chunk
-                .map(|chunk| property_cache_seeds(chunk))
-                .unwrap_or_default(),
-            0,
-        ));
-        self.name_seed_stack.push((
-            hot_chunk
-                .map(|chunk| name_cache_seeds(chunk))
-                .unwrap_or_default(),
-            0,
-        ));
-        self.call_seed_stack.push((
-            hot_chunk
-                .map(|chunk| call_cache_seeds(chunk))
-                .unwrap_or_default(),
-            0,
-        ));
-        self.scopes.push(Vec::new());
-        for (k, p) in f.params.iter().enumerate() {
-            let Pattern::Ident(name) = &p.pattern else {
-                unreachable!()
-            };
-            self.scope_bind(name, param_slots[k], false);
-        }
-        let frame_context = self.inline_frames.enter(t, f.is_strict, self.ops.len());
-        let r = self.inline_body(f);
-        self.inline_frames.leave(frame_context);
-        self.call_seed_stack.pop();
-        self.name_seed_stack.pop();
-        self.cache_seed_stack.pop();
-        self.plan_stack.pop();
-        self.inline_depth -= 1;
-        let returns = std::mem::replace(&mut self.inline_returns, saved_returns);
-        self.inline_this = saved_this;
-        self.try_depth = saved_try;
-        self.pending_labels = saved_labels;
-        self.loops = saved_loops;
-        self.env_names = saved_env_names;
-        self.scopes = saved_scopes;
-        r?;
-
-        end_jumps.push(self.emit(Op::Jump(0)));
-        end_jumps.extend(returns);
-        Ok(guard)
-    }
-
-    /// Compile a spliced callee body: mirrors `compile_inner`'s hoist + lexical + statement
-    /// sequence, with explicit per-execution resets replacing the fresh frame's zeroed slots.
-    fn inline_body(&mut self, f: &Function) -> CResult {
-        // Hoisted vars start undefined on EVERY pass through the site; fused-reset runs are
-        // emitted per contiguous slot range (fresh slots are consecutive, so usually one op).
-        let mut resets: Vec<u16> = Vec::new();
-        for op in crate::interpreter::collect_hoist_ops(&f.body, f.is_strict, &[]) {
-            match op {
-                HoistOp::Var(name) => {
-                    if self.lookup(&name).is_none() {
-                        let slot = self.fresh_slot(&name);
-                        self.scope_bind(&name, slot, false);
-                        resets.push(slot);
-                    }
-                }
-                HoistOp::VarForce(name) => {
-                    let slot = match self.lookup(&name) {
-                        Some((s, _)) => s,
-                        None => {
-                            let s = self.fresh_slot(&name);
-                            self.scope_bind(&name, s, false);
-                            s
-                        }
-                    };
-                    if !resets.contains(&slot) {
-                        resets.push(slot);
-                    }
-                }
-                HoistOp::Fn(..) | HoistOp::AnnexB(..) => return Err(Bail),
-            }
-        }
-        resets.sort_unstable();
-        let mut k = 0;
-        while k < resets.len() {
-            let start = resets[k];
-            let mut count = 1u16;
-            while k + (count as usize) < resets.len() && resets[k + count as usize] == start + count
-            {
-                count += 1;
-            }
-            self.emit(Op::ResetSlots(start, count));
-            k += count as usize;
-        }
-        let empty = std::collections::HashSet::new();
-        self.declare_body_lexicals(&f.body, &empty)?;
-        for stmt in &f.body {
-            self.stmt(stmt)?;
-        }
-        self.emit(Op::Undef); // implicit return value
-        Ok(())
-    }
     /// Declare every binding a lexical declaration pattern introduces, in source order (slot +
     /// TDZ each, like the plain-identifier path). Only the destructuring subset the compiler
     /// can lower is accepted (see `destructure_store`); anything else bails to the tree-walker.
@@ -4780,7 +4538,7 @@ fn run_vm(
         };
     }
     loop {
-        chunk.record_inline_location(i, *pc);
+        chunk.record_inline_location(i, *pc, slots);
         let op = chunk.ops[*pc];
         *pc += 1;
         match op {
@@ -5388,14 +5146,14 @@ fn run_vm(
             Op::InlineGuard(t, target) => {
                 let it = &chunk.inline_targets[t as usize];
                 let d = it.argc as usize + 1;
-                let callee_ok = matches!(
+                let callee_ok = chunk.inline_guard_matches(
+                    i,
+                    t,
                     &stack[stack.len() - d],
-                    Value::Obj(o) if Rc::as_ptr(o) as usize == it.expected
+                    it.check_this.then(|| &stack[stack.len() - d - 1]),
+                    Rc::as_ptr(env),
                 );
-                let this_ok =
-                    !it.check_this || matches!(&stack[stack.len() - d - 1], Value::Obj(_));
-                let env_ok = it.expected_env == 0 || Rc::as_ptr(env) as usize == it.expected_env;
-                if !(callee_ok && this_ok && env_ok) {
+                if !callee_ok {
                     *pc = target as usize;
                 }
             }
@@ -6818,7 +6576,7 @@ pub(crate) unsafe extern "C" fn jit_make_regexp(
     pc: u32,
     sp: *mut Value,
 ) -> crate::jit::SpFlag {
-    (*(*ctx).chunk).record_inline_location(&mut *(*ctx).interp, pc as usize);
+    (*(*ctx).chunk).record_jit_inline_location(&*ctx, pc as usize);
     let ctx = unsafe { &mut *ctx };
     let chunk = unsafe { &*ctx.chunk };
     let Op::MakeRegExp(body, flags) = chunk.ops[pc as usize] else {
@@ -6848,7 +6606,7 @@ pub(crate) unsafe extern "C" fn jit_add_strings(
     pc: u32,
     sp: *mut Value,
 ) -> crate::jit::SpFlag {
-    (*(*ctx).chunk).record_inline_location(&mut *(*ctx).interp, pc as usize);
+    (*(*ctx).chunk).record_jit_inline_location(&*ctx, pc as usize);
     let base = unsafe { sp.sub(2) };
     if !matches!(unsafe { &*base }, Value::Str(_))
         || !matches!(unsafe { &*base.add(1) }, Value::Str(_))
@@ -6890,7 +6648,7 @@ pub(crate) unsafe extern "C" fn jit_intrinsic(
     packed: u32,
     sp: *mut Value,
 ) -> crate::jit::SpFlag {
-    (*(*ctx).chunk).record_inline_location(&mut *(*ctx).interp, (packed & 0xffff) as usize);
+    (*(*ctx).chunk).record_jit_inline_location(&*ctx, (packed & 0xffff) as usize);
     let ctx = &mut *ctx;
     let i = &mut *ctx.interp;
     let intrinsic = (packed >> 16) as u8;
@@ -7197,7 +6955,7 @@ pub(crate) unsafe extern "C" fn jit_regexp_exec_loop(
     ctx: *mut crate::jit::JitCtx,
     head: u32,
 ) -> u64 {
-    (*(*ctx).chunk).record_inline_location(&mut *(*ctx).interp, head as usize);
+    (*(*ctx).chunk).record_jit_inline_location(&*ctx, head as usize);
     macro_rules! decline {
         () => {{
             return 0;
@@ -7359,7 +7117,7 @@ pub(crate) unsafe extern "C" fn jit_regexp_literal_exec_discard(
     ctx: *mut crate::jit::JitCtx,
     literal_pc: u32,
 ) -> u64 {
-    (*(*ctx).chunk).record_inline_location(&mut *(*ctx).interp, literal_pc as usize);
+    (*(*ctx).chunk).record_jit_inline_location(&*ctx, literal_pc as usize);
     macro_rules! decline {
         () => {{
             return 0;
@@ -7471,7 +7229,7 @@ pub(crate) unsafe extern "C" fn jit_regexp_literal_replace_discard(
     ctx: *mut crate::jit::JitCtx,
     start_pc: u32,
 ) -> u64 {
-    (*(*ctx).chunk).record_inline_location(&mut *(*ctx).interp, start_pc as usize);
+    (*(*ctx).chunk).record_jit_inline_location(&*ctx, start_pc as usize);
     macro_rules! decline {
         () => {{
             return 0;
@@ -7568,7 +7326,7 @@ pub(crate) unsafe extern "C" fn jit_regexp_literal_match_discard(
     ctx: *mut crate::jit::JitCtx,
     start_pc: u32,
 ) -> u64 {
-    (*(*ctx).chunk).record_inline_location(&mut *(*ctx).interp, start_pc as usize);
+    (*(*ctx).chunk).record_jit_inline_location(&*ctx, start_pc as usize);
     macro_rules! decline {
         () => {{
             return 0;
@@ -8285,13 +8043,7 @@ unsafe fn jit_call_inner(
     } else {
         &raw mut *undef as *const Value
     };
-    let mut r = i.call_jit_cached(
-        &chunk.call_caches[c as usize],
-        &*sp.sub(argc + 1),
-        this_slot,
-        args_ptr,
-        argc,
-    );
+    let mut r = i.call_jit_cached(chunk, c, &*sp.sub(argc + 1), this_slot, args_ptr, argc);
     if r.is_none() {
         // Plain-native fast call: a bare `fn` callee in a proxy-free single-realm engine skips the
         // call/call_inner/call_dispatch layering. The callee is ALSO recorded as a native IC
@@ -8625,7 +8377,7 @@ pub(crate) fn jit_opstat_enabled() -> bool {
 
 #[inline(always)]
 unsafe fn jit_opstat(ctx: &mut crate::jit::JitCtx, pc: u32) {
-    (*ctx.chunk).record_inline_location(&mut *ctx.interp, pc as usize);
+    (*ctx.chunk).record_jit_inline_location(ctx, pc as usize);
     {
         if ctx.opstat_enabled {
             struct OpstatDump(crate::fasthash::FastMap<String, u64>);
@@ -9251,7 +9003,8 @@ unsafe fn jit_exec_inner(
             // a miss falls into `call_jit_fast`, which refills it.
             let mut undef = std::mem::ManuallyDrop::new(Value::Undefined);
             let mut r = i.call_jit_cached(
-                &chunk.call_caches[c as usize],
+                chunk,
+                c,
                 &*sp.sub(argc + 1),
                 &raw mut *undef as *const Value,
                 args_ptr,
@@ -9297,7 +9050,8 @@ unsafe fn jit_exec_inner(
             let argc = argc as usize;
             let args_ptr = sp.sub(argc);
             let mut r = i.call_jit_cached(
-                &chunk.call_caches[c as usize],
+                chunk,
+                c,
                 &*sp.sub(argc + 1),
                 sp.sub(argc + 2),
                 args_ptr,

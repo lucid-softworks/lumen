@@ -1,4 +1,5 @@
-//! Function-keyed call retry. The returned IC is ephemeral and owns no extra roots.
+//! Function-keyed call retry with optional bounded identity-cache refresh.
+mod cache;
 use super::{Callable, Env, Interp};
 use crate::bytecode::{CallIc, CallSite, CALL_IC_NEEDS_ENV};
 use crate::value::Gc;
@@ -13,6 +14,10 @@ fn enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("LUMEN_JIT_FRESH_CLOSURE_RETRY").is_some())
 }
 
+pub(super) fn refresh_enabled() -> bool {
+    cache::enabled()
+}
+
 impl Interp {
     pub(super) fn fresh_call_ic(
         &self,
@@ -24,9 +29,10 @@ impl Interp {
     ) -> Option<CallIc> {
         self.activation_call_ic(site, o, key, genv, epoch)
             .or_else(|| {
-                enabled()
-                    .then(|| self.lean_call_ic(site, o, key, genv, epoch))
-                    .flatten()
+                if !(enabled() || cache::enabled()) {
+                    return None;
+                }
+                self.lean_call_ic(site, o, key, genv, epoch)
             })
     }
 
@@ -150,9 +156,7 @@ impl Interp {
             {
                 continue;
             }
-            let mut ic = *ic;
-            ic.callee = key;
-            ic.env = Rc::as_ptr(&user.env);
+            let ic = cache::rebind(*ic, key, user, selected, code);
             #[cfg(test)]
             HITS.with(|v| v.set(v.get() + 1));
             return Some(ic);
@@ -313,11 +317,9 @@ mod tests {
             "fresh calls never reached recompile trigger"
         );
     }
-    #[test]
-    fn matching_live_pointers_cannot_authorize_stale_frame_metadata() {
-        let mut engine = engine();
+    fn cached_target(engine: &mut Engine) -> (Gc, CallIc, (*const u8, *const u32, u8)) {
         run(
-            &mut engine,
+            engine,
             "var target=function(x){return this.bias+x;};target.call({bias:3},4);",
         );
         let global = crate::value::Value::Obj(engine.interp.global.clone());
@@ -332,6 +334,7 @@ mod tests {
         let genv = Rc::as_ptr(&engine.interp.global_env) as usize;
         let epoch = crate::bytecode::CALL_IC_EPOCH.load(std::sync::atomic::Ordering::Relaxed);
         let mut baseline = CallIc::EMPTY;
+        let expected_native;
         {
             let object = target.borrow();
             let Callable::User(user) = &object.call else {
@@ -362,13 +365,32 @@ mod tests {
             baseline.uses_this = selected.uses_this();
             baseline.n_params = u16::try_from(params).unwrap();
             baseline.n_slots = u16::try_from(slots).unwrap();
+            expected_native = (
+                code.mem_ptr(),
+                code.pc_offsets_ptr(),
+                selected.jit_direct_flags(code),
+            );
         }
+        (target, baseline, expected_native)
+    }
+
+    #[test]
+    fn matching_live_pointers_cannot_authorize_stale_frame_metadata() {
+        let mut engine = engine();
+        let (target, baseline, expected_native) = cached_target(&mut engine);
+        let (key, genv, epoch) = (baseline.callee, baseline.global_env, baseline.epoch);
         let site = CallSite::empty();
         site.entries[0].set(baseline);
-        assert!(engine
+        let rebound = engine
             .interp
             .lean_call_ic(&site, &target, key, genv, epoch)
-            .is_some());
+            .expect("valid frame metadata");
+        // The cached native addresses/flags are deliberately still EMPTY. They must
+        // be derived again before the returned IC is published for machine-code probes.
+        assert_eq!(
+            (rebound.code_mem, rebound.pc_offs_ptr, rebound.direct),
+            expected_native
+        );
         for field in 0..4 {
             let mut stale = baseline;
             match field {

@@ -320,4 +320,58 @@ mod tests {
         assert!(prefixes > 0, "pending-accumulator region never committed");
         assert!(hints > 0, "no warmed own-property hint succeeded");
     }
+
+    #[test]
+    fn fresh_inline_expression_preserves_owners_on_getter_fallback() {
+        crate::bytecode::inline_closure::test_with_enabled(|| {
+            let mut engine = Engine::new();
+            engine.set_tier(Tier::Jit);
+            engine.set_tier_threshold(0);
+            let source = r#"
+                function make(seed) {
+                    function leaf(o) {var amount=o.src.value*o.scale.value;return seed+amount;}
+                    function invoke(o) {return leaf(o);}
+                    return {leaf:leaf,invoke:invoke};
+                }
+                var first=make(20), input={src:{value:2},scale:{value:3}};
+                function warm() {for(var i=0;i<500;i++) if(first.invoke(input)!==26) throw 'warm';}
+                warm(); 'passed'
+            "#;
+            assert!(
+                matches!(engine.eval(source,false).unwrap(), Completion::Value(v) if v=="passed")
+            );
+            super::SUCCESSES.with(|n| n.set(0));
+            let source = r#"
+                var next=make(30);
+                if(next.invoke(input)!==36) throw 'fresh';
+                'passed'
+            "#;
+            assert!(
+                matches!(engine.eval(source,false).unwrap(), Completion::Value(v) if v=="passed")
+            );
+            assert!(
+                super::SUCCESSES.with(|n| n.get()) > 0,
+                "fresh expression never executed"
+            );
+            let source = r#"
+                var reads=0, fail=false;
+                Object.defineProperty(input.src,'value',{get:function inspect(){
+                    reads++;
+                    if(inspect.caller!==next.leaf) throw 'wrong inline identity';
+                    if(fail) throw new Error('expected');
+                    return 4;
+                }});
+                if(next.invoke(input)!==42 || reads!==1) throw 'getter fallback';
+                fail=true; var caught=false;
+                try {next.invoke(input);} catch(e) {caught=e.message==='expected';}
+                if(!caught || next.leaf.caller!==null) throw 'unwind';
+                'passed'
+            "#;
+            match engine.eval(source, false).unwrap() {
+                Completion::Value(v) => assert_eq!(v, "passed"),
+                Completion::Throw { name, message } => panic!("{name}: {message}"),
+            }
+            assert!(engine.interp.fn_frames.is_empty());
+        });
+    }
 }

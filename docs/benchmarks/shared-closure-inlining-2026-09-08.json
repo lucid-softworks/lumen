@@ -1,0 +1,1173 @@
+{
+  "date": "2026-09-08",
+  "machine": "Apple M4 / macOS arm64",
+  "base_commit": "2f879b5",
+  "baseline_binary_commit": "2faa9d7",
+  "implementation_commits": [
+    "09f7025",
+    "835d2fd"
+  ],
+  "candidate_sha256": "142a99f3a6d34f54851eaec598021a3ac04d6ef1965e84957a5b0fb0030cd9f1",
+  "baseline_sha256": "0e6b452bed4e027ccbe035704d0dc667457b826440c51bf794f3fc7b6c4161e8",
+  "workload_sha256": {
+    "shared": "573b0376c57e279007dc29ace220a50ff716800102e4db0a86f0c66f3498589d",
+    "closure-batch": "bd83729613700cf6cae03b7749a4020845f844a7d696e6be46940b980ef8955e",
+    "djot": "55ebab9bfc306f8dea3843fd9699ecdb3fa2c709d8e9943a7d52967e35058608",
+    "delta": "ecc3f89e50b1a071f3f2549436eb4f01d7cb2d54e3a928938e6c8164452bf22b",
+    "classic": "077a1dd6ea48ddd00471cff26f1556a7caecb0992fd206d348db7cdeeac9e4fb"
+  },
+  "mode_environment": {
+    "retained": {},
+    "off": {},
+    "inline": {
+      "LUMEN_JIT_INLINE_CLOSURES": "1"
+    },
+    "combined": {
+      "LUMEN_JIT_INLINE_CLOSURES": "1",
+      "LUMEN_JIT_REFRESH_CLOSURE_CACHE": "1"
+    }
+  },
+  "method": "Three sequential fresh-process rounds per workload; rotate retained, off, inline, combined. No task builds/tests/profiles overlap timing; unrelated machine activity is not controlled.",
+  "metrics": {
+    "shared": {
+      "retained": {
+        "samples": [
+          102,
+          101,
+          104
+        ],
+        "median": 102
+      },
+      "off": {
+        "samples": [
+          101,
+          101,
+          102
+        ],
+        "median": 101
+      },
+      "inline": {
+        "samples": [
+          55,
+          55,
+          56
+        ],
+        "median": 55
+      },
+      "combined": {
+        "samples": [
+          56,
+          55,
+          56
+        ],
+        "median": 56
+      }
+    },
+    "closure-batch": {
+      "retained": {
+        "samples": [
+          113,
+          111,
+          113
+        ],
+        "median": 113
+      },
+      "off": {
+        "samples": [
+          114,
+          112,
+          112
+        ],
+        "median": 112
+      },
+      "inline": {
+        "samples": [
+          114,
+          114,
+          110
+        ],
+        "median": 114
+      },
+      "combined": {
+        "samples": [
+          79,
+          79,
+          79
+        ],
+        "median": 79
+      }
+    },
+    "djot": {
+      "retained": {
+        "samples": [
+          3535,
+          3448,
+          3449
+        ],
+        "median": 3449
+      },
+      "off": {
+        "samples": [
+          3556,
+          3424,
+          3457
+        ],
+        "median": 3457
+      },
+      "inline": {
+        "samples": [
+          3556,
+          3499,
+          3496
+        ],
+        "median": 3499
+      },
+      "combined": {
+        "samples": [
+          3458,
+          3427,
+          3423
+        ],
+        "median": 3427
+      }
+    },
+    "delta": {
+      "retained": {
+        "samples": [
+          8251,
+          8297,
+          8307
+        ],
+        "median": 8297
+      },
+      "off": {
+        "samples": [
+          8298,
+          8413,
+          8317
+        ],
+        "median": 8317
+      },
+      "inline": {
+        "samples": [
+          8323,
+          8354,
+          8274
+        ],
+        "median": 8323
+      },
+      "combined": {
+        "samples": [
+          8430,
+          8306,
+          8333
+        ],
+        "median": 8333
+      }
+    },
+    "classic": {
+      "retained": {
+        "samples": [
+          8712,
+          8713,
+          8324
+        ],
+        "median": 8712
+      },
+      "off": {
+        "samples": [
+          8677,
+          8299,
+          8595
+        ],
+        "median": 8595
+      },
+      "inline": {
+        "samples": [
+          8603,
+          8517,
+          8549
+        ],
+        "median": 8549
+      },
+      "combined": {
+        "samples": [
+          8572,
+          8557,
+          8472
+        ],
+        "median": 8557
+      }
+    }
+  },
+  "classic_components": {
+    "Richards": {
+      "retained": {
+        "samples": [
+          23455,
+          23539,
+          23310
+        ],
+        "median": 23455
+      },
+      "off": {
+        "samples": [
+          23536,
+          23511,
+          23193
+        ],
+        "median": 23511
+      },
+      "inline": {
+        "samples": [
+          23488,
+          23624,
+          23344
+        ],
+        "median": 23488
+      },
+      "combined": {
+        "samples": [
+          23553,
+          23557,
+          23406
+        ],
+        "median": 23553
+      }
+    },
+    "DeltaBlue": {
+      "retained": {
+        "samples": [
+          4013,
+          3957,
+          3954
+        ],
+        "median": 3957
+      },
+      "off": {
+        "samples": [
+          3894,
+          3861,
+          3897
+        ],
+        "median": 3894
+      },
+      "inline": {
+        "samples": [
+          3914,
+          3970,
+          3947
+        ],
+        "median": 3947
+      },
+      "combined": {
+        "samples": [
+          3881,
+          3808,
+          3769
+        ],
+        "median": 3808
+      }
+    },
+    "Crypto": {
+      "retained": {
+        "samples": [
+          24098,
+          24046,
+          21626
+        ],
+        "median": 24046
+      },
+      "off": {
+        "samples": [
+          24003,
+          23999,
+          23785
+        ],
+        "median": 23999
+      },
+      "inline": {
+        "samples": [
+          23917,
+          23457,
+          23843
+        ],
+        "median": 23843
+      },
+      "combined": {
+        "samples": [
+          24056,
+          23959,
+          23680
+        ],
+        "median": 23959
+      }
+    },
+    "RayTrace": {
+      "retained": {
+        "samples": [
+          6454,
+          6480,
+          5544
+        ],
+        "median": 6454
+      },
+      "off": {
+        "samples": [
+          6480,
+          6374,
+          6406
+        ],
+        "median": 6406
+      },
+      "inline": {
+        "samples": [
+          6512,
+          6197,
+          6400
+        ],
+        "median": 6400
+      },
+      "combined": {
+        "samples": [
+          6246,
+          6486,
+          6234
+        ],
+        "median": 6246
+      }
+    },
+    "EarleyBoyer": {
+      "retained": {
+        "samples": [
+          3638,
+          3648,
+          3551
+        ],
+        "median": 3638
+      },
+      "off": {
+        "samples": [
+          3574,
+          3119,
+          3540
+        ],
+        "median": 3540
+      },
+      "inline": {
+        "samples": [
+          3545,
+          3534,
+          3499
+        ],
+        "median": 3534
+      },
+      "combined": {
+        "samples": [
+          3645,
+          3629,
+          3585
+        ],
+        "median": 3629
+      }
+    },
+    "RegExp": {
+      "retained": {
+        "samples": [
+          1632,
+          1626,
+          1620
+        ],
+        "median": 1626
+      },
+      "off": {
+        "samples": [
+          1626,
+          1471,
+          1604
+        ],
+        "median": 1604
+      },
+      "inline": {
+        "samples": [
+          1622,
+          1615,
+          1616
+        ],
+        "median": 1616
+      },
+      "combined": {
+        "samples": [
+          1617,
+          1612,
+          1603
+        ],
+        "median": 1612
+      }
+    },
+    "Splay": {
+      "retained": {
+        "samples": [
+          9909,
+          9999,
+          9820
+        ],
+        "median": 9909
+      },
+      "off": {
+        "samples": [
+          9942,
+          9339,
+          9885
+        ],
+        "median": 9885
+      },
+      "inline": {
+        "samples": [
+          9942,
+          9787,
+          9820
+        ],
+        "median": 9820
+      },
+      "combined": {
+        "samples": [
+          9885,
+          9885,
+          9852
+        ],
+        "median": 9885
+      }
+    },
+    "NavierStokes": {
+      "retained": {
+        "samples": [
+          38507,
+          38584,
+          36952
+        ],
+        "median": 38507
+      },
+      "off": {
+        "samples": [
+          39029,
+          37804,
+          38507
+        ],
+        "median": 38507
+      },
+      "inline": {
+        "samples": [
+          36655,
+          36358,
+          36545
+        ],
+        "median": 36545
+      },
+      "combined": {
+        "samples": [
+          36434,
+          35657,
+          35989
+        ],
+        "median": 35989
+      }
+    }
+  },
+  "diagnostic_guards": {
+    "handleEvent -> topContainer": {
+      "hit": 159965,
+      "miss": 0,
+      "site": "[inline-guard-site] compile=66 id=67 pc=65 ordinary=true installed=true target=0 fallback=88 argc=0 check_this=false expected_env=51565975696 expected=51566363408 pin_live=true adjacent_method=false callee_object=51566363408 callee_function=51562595280 callee_source=Some(\"function() {\\n        if (containers.length > 0) {\\n          return containers[containers.length - 1];\\n        } else {\\n          throw new Error(\\\"Container stack is empty (topContainer)\\\");\\n        }\\n      }\")"
+    },
+    "pushContainer -> addBlockAttributes": {
+      "hit": 159751,
+      "miss": 0,
+      "site": "[inline-guard-site] compile=111 id=112 pc=9 ordinary=true installed=true target=0 fallback=53 argc=1 check_this=false expected_env=51567021136 expected=51567596816 pin_live=true adjacent_method=false callee_object=51567596816 callee_function=51560775312 callee_source=Some(\"function(container) {\\n        if (Object.keys(blockAttributes).length > 0) {\\n          container.attributes = container.attributes || {};\\n          for (const k in blockAttributes) {\\n            container.attributes[k] = blockAttributes[k];\\n            delete blockAttributes[k];\\n          }\\n        }\\n      }\")"
+    }
+  },
+  "validation": {
+    "engine_off": {
+      "passed": 801,
+      "failed": 0
+    },
+    "engine_on_final": {
+      "passed": 801,
+      "failed": 0
+    },
+    "workspace_on_09f7025": {
+      "passed": 1087,
+      "failed": 0,
+      "ignored": 2,
+      "excluded_preexisting_targets": [
+        "lumen-runtime/http2_client",
+        "lumen-runtime/http2_secure_client",
+        "lumen-runtime/http2_server"
+      ]
+    },
+    "test262_off": {
+      "passed": 20438,
+      "failed": 1
+    },
+    "test262_on_final": {
+      "passed": 20438,
+      "failed": 1,
+      "failure": "async: TestError: TestError: The import of C"
+    },
+    "differential_on_final": {
+      "agreements": 1996,
+      "budget_skips": 4,
+      "seed_start": 1,
+      "seed_end_inclusive": 2000
+    },
+    "clippy": "Same error-message multiset as exported main: 86 lib errors / 88 lib-test errors. No additional diagnostics.",
+    "format_and_focused_structure_audit": "pass"
+  },
+  "runs": [
+    {
+      "workload": "shared",
+      "round": 0,
+      "mode": "retained",
+      "elapsed": 0.12786645800000002,
+      "stdout": "SharedClosureBatch: 102 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "shared",
+      "round": 0,
+      "mode": "off",
+      "elapsed": 0.12457291700000003,
+      "stdout": "SharedClosureBatch: 101 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "shared",
+      "round": 0,
+      "mode": "inline",
+      "elapsed": 0.06844245900000001,
+      "stdout": "SharedClosureBatch: 55 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "shared",
+      "round": 0,
+      "mode": "combined",
+      "elapsed": 0.067816125,
+      "stdout": "SharedClosureBatch: 56 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "shared",
+      "round": 1,
+      "mode": "off",
+      "elapsed": 0.12338583400000003,
+      "stdout": "SharedClosureBatch: 101 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "shared",
+      "round": 1,
+      "mode": "inline",
+      "elapsed": 0.066870125,
+      "stdout": "SharedClosureBatch: 55 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "shared",
+      "round": 1,
+      "mode": "combined",
+      "elapsed": 0.066910625,
+      "stdout": "SharedClosureBatch: 55 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "shared",
+      "round": 1,
+      "mode": "retained",
+      "elapsed": 0.12239458299999995,
+      "stdout": "SharedClosureBatch: 101 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "shared",
+      "round": 2,
+      "mode": "inline",
+      "elapsed": 0.06921925000000007,
+      "stdout": "SharedClosureBatch: 56 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "shared",
+      "round": 2,
+      "mode": "combined",
+      "elapsed": 0.06769404099999998,
+      "stdout": "SharedClosureBatch: 56 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "shared",
+      "round": 2,
+      "mode": "retained",
+      "elapsed": 0.12616704200000006,
+      "stdout": "SharedClosureBatch: 104 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "shared",
+      "round": 2,
+      "mode": "off",
+      "elapsed": 0.12375870900000008,
+      "stdout": "SharedClosureBatch: 102 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "closure-batch",
+      "round": 0,
+      "mode": "retained",
+      "elapsed": 0.13695566700000006,
+      "stdout": "ClosureBatch: 113 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "closure-batch",
+      "round": 0,
+      "mode": "off",
+      "elapsed": 0.13696895799999997,
+      "stdout": "ClosureBatch: 114 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "closure-batch",
+      "round": 0,
+      "mode": "inline",
+      "elapsed": 0.1374752920000002,
+      "stdout": "ClosureBatch: 114 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "closure-batch",
+      "round": 0,
+      "mode": "combined",
+      "elapsed": 0.097126292,
+      "stdout": "ClosureBatch: 79 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "closure-batch",
+      "round": 1,
+      "mode": "off",
+      "elapsed": 0.1356486669999999,
+      "stdout": "ClosureBatch: 112 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "closure-batch",
+      "round": 1,
+      "mode": "inline",
+      "elapsed": 0.13737029199999995,
+      "stdout": "ClosureBatch: 114 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "closure-batch",
+      "round": 1,
+      "mode": "combined",
+      "elapsed": 0.09761120799999978,
+      "stdout": "ClosureBatch: 79 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "closure-batch",
+      "round": 1,
+      "mode": "retained",
+      "elapsed": 0.13344187499999993,
+      "stdout": "ClosureBatch: 111 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "closure-batch",
+      "round": 2,
+      "mode": "inline",
+      "elapsed": 0.13395,
+      "stdout": "ClosureBatch: 110 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "closure-batch",
+      "round": 2,
+      "mode": "combined",
+      "elapsed": 0.09690908300000034,
+      "stdout": "ClosureBatch: 79 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "closure-batch",
+      "round": 2,
+      "mode": "retained",
+      "elapsed": 0.13609058400000018,
+      "stdout": "ClosureBatch: 113 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "closure-batch",
+      "round": 2,
+      "mode": "off",
+      "elapsed": 0.13478612499999976,
+      "stdout": "ClosureBatch: 112 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 0,
+      "mode": "retained",
+      "elapsed": 3.5481018340000006,
+      "stdout": "Djot: 3535 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 0,
+      "mode": "off",
+      "elapsed": 3.5695495,
+      "stdout": "Djot: 3556 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 0,
+      "mode": "inline",
+      "elapsed": 3.569479750000001,
+      "stdout": "Djot: 3556 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 0,
+      "mode": "combined",
+      "elapsed": 3.4715287079999992,
+      "stdout": "Djot: 3458 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 1,
+      "mode": "off",
+      "elapsed": 3.437510333999999,
+      "stdout": "Djot: 3424 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 1,
+      "mode": "inline",
+      "elapsed": 3.5129597499999967,
+      "stdout": "Djot: 3499 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 1,
+      "mode": "combined",
+      "elapsed": 3.440488416000001,
+      "stdout": "Djot: 3427 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 1,
+      "mode": "retained",
+      "elapsed": 3.4619584590000017,
+      "stdout": "Djot: 3448 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 2,
+      "mode": "inline",
+      "elapsed": 3.510013875000002,
+      "stdout": "Djot: 3496 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 2,
+      "mode": "combined",
+      "elapsed": 3.4366085419999948,
+      "stdout": "Djot: 3423 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 2,
+      "mode": "retained",
+      "elapsed": 3.463050082999999,
+      "stdout": "Djot: 3449 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "djot",
+      "round": 2,
+      "mode": "off",
+      "elapsed": 3.471098416999993,
+      "stdout": "Djot: 3457 ms; 3160000 HTML characters\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "delta",
+      "round": 0,
+      "mode": "retained",
+      "elapsed": 8.255676375,
+      "stdout": "DeltaBlue: 8251 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "delta",
+      "round": 0,
+      "mode": "off",
+      "elapsed": 8.303583209000003,
+      "stdout": "DeltaBlue: 8298 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "delta",
+      "round": 0,
+      "mode": "inline",
+      "elapsed": 8.327775792000004,
+      "stdout": "DeltaBlue: 8323 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "delta",
+      "round": 0,
+      "mode": "combined",
+      "elapsed": 8.435051583000003,
+      "stdout": "DeltaBlue: 8430 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "delta",
+      "round": 1,
+      "mode": "off",
+      "elapsed": 8.418184249999996,
+      "stdout": "DeltaBlue: 8413 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "delta",
+      "round": 1,
+      "mode": "inline",
+      "elapsed": 8.358694666999995,
+      "stdout": "DeltaBlue: 8354 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "delta",
+      "round": 1,
+      "mode": "combined",
+      "elapsed": 8.310647834000008,
+      "stdout": "DeltaBlue: 8306 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "delta",
+      "round": 1,
+      "mode": "retained",
+      "elapsed": 8.302113417000001,
+      "stdout": "DeltaBlue: 8297 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "delta",
+      "round": 2,
+      "mode": "inline",
+      "elapsed": 8.278937833,
+      "stdout": "DeltaBlue: 8274 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "delta",
+      "round": 2,
+      "mode": "combined",
+      "elapsed": 8.338017124999993,
+      "stdout": "DeltaBlue: 8333 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "delta",
+      "round": 2,
+      "mode": "retained",
+      "elapsed": 8.311299542,
+      "stdout": "DeltaBlue: 8307 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "delta",
+      "round": 2,
+      "mode": "off",
+      "elapsed": 8.321769625000002,
+      "stdout": "DeltaBlue: 8317 ms\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 0,
+      "mode": "retained",
+      "elapsed": 22.477288375,
+      "stdout": "Richards: 23455\nDeltaBlue: 4013\nCrypto: 24098\nRayTrace: 6454\nEarleyBoyer: 3638\nRegExp: 1632\nSplay: 9909\nNavierStokes: 38507\n----\nScore (version 7): 8712\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 0,
+      "mode": "off",
+      "elapsed": 22.422582667,
+      "stdout": "Richards: 23536\nDeltaBlue: 3894\nCrypto: 24003\nRayTrace: 6480\nEarleyBoyer: 3574\nRegExp: 1626\nSplay: 9942\nNavierStokes: 39029\n----\nScore (version 7): 8677\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 0,
+      "mode": "inline",
+      "elapsed": 22.481148915999995,
+      "stdout": "Richards: 23488\nDeltaBlue: 3914\nCrypto: 23917\nRayTrace: 6512\nEarleyBoyer: 3545\nRegExp: 1622\nSplay: 9942\nNavierStokes: 36655\n----\nScore (version 7): 8603\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 0,
+      "mode": "combined",
+      "elapsed": 22.496846167,
+      "stdout": "Richards: 23553\nDeltaBlue: 3881\nCrypto: 24056\nRayTrace: 6246\nEarleyBoyer: 3645\nRegExp: 1617\nSplay: 9885\nNavierStokes: 36434\n----\nScore (version 7): 8572\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 1,
+      "mode": "off",
+      "elapsed": 22.516528499999993,
+      "stdout": "Richards: 23511\nDeltaBlue: 3861\nCrypto: 23999\nRayTrace: 6374\nEarleyBoyer: 3119\nRegExp: 1471\nSplay: 9339\nNavierStokes: 37804\n----\nScore (version 7): 8299\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 1,
+      "mode": "inline",
+      "elapsed": 22.46979620799999,
+      "stdout": "Richards: 23624\nDeltaBlue: 3970\nCrypto: 23457\nRayTrace: 6197\nEarleyBoyer: 3534\nRegExp: 1615\nSplay: 9787\nNavierStokes: 36358\n----\nScore (version 7): 8517\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 1,
+      "mode": "combined",
+      "elapsed": 22.484970333000035,
+      "stdout": "Richards: 23557\nDeltaBlue: 3808\nCrypto: 23959\nRayTrace: 6486\nEarleyBoyer: 3629\nRegExp: 1612\nSplay: 9885\nNavierStokes: 35657\n----\nScore (version 7): 8557\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 1,
+      "mode": "retained",
+      "elapsed": 22.409973165999986,
+      "stdout": "Richards: 23539\nDeltaBlue: 3957\nCrypto: 24046\nRayTrace: 6480\nEarleyBoyer: 3648\nRegExp: 1626\nSplay: 9999\nNavierStokes: 38584\n----\nScore (version 7): 8713\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 2,
+      "mode": "inline",
+      "elapsed": 22.50197750000001,
+      "stdout": "Richards: 23344\nDeltaBlue: 3947\nCrypto: 23843\nRayTrace: 6400\nEarleyBoyer: 3499\nRegExp: 1616\nSplay: 9820\nNavierStokes: 36545\n----\nScore (version 7): 8549\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 2,
+      "mode": "combined",
+      "elapsed": 22.476072124999973,
+      "stdout": "Richards: 23406\nDeltaBlue: 3769\nCrypto: 23680\nRayTrace: 6234\nEarleyBoyer: 3585\nRegExp: 1603\nSplay: 9852\nNavierStokes: 35989\n----\nScore (version 7): 8472\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 2,
+      "mode": "retained",
+      "elapsed": 22.418921915999988,
+      "stdout": "Richards: 23310\nDeltaBlue: 3954\nCrypto: 21626\nRayTrace: 5544\nEarleyBoyer: 3551\nRegExp: 1620\nSplay: 9820\nNavierStokes: 36952\n----\nScore (version 7): 8324\n",
+      "stderr": "",
+      "returncode": 0
+    },
+    {
+      "workload": "classic",
+      "round": 2,
+      "mode": "off",
+      "elapsed": 22.45504516599999,
+      "stdout": "Richards: 23193\nDeltaBlue: 3897\nCrypto: 23785\nRayTrace: 6406\nEarleyBoyer: 3540\nRegExp: 1604\nSplay: 9885\nNavierStokes: 38507\n----\nScore (version 7): 8595\n",
+      "stderr": "",
+      "returncode": 0
+    }
+  ],
+  "reference_runs": {
+    "versions": {
+      "node": "v24.18.0",
+      "bun": "1.3.14"
+    },
+    "method": "Three fresh-process runs after the Lumen comparison; alternate Node/Bun order. Same fixture files and timed workload; runtimes are not interleaved with Lumen.",
+    "runs": [
+      {
+        "workload": "shared",
+        "round": 0,
+        "engine": "node",
+        "stdout": "SharedClosureBatch: 2 ms\n",
+        "stderr": "",
+        "returncode": 0
+      },
+      {
+        "workload": "shared",
+        "round": 0,
+        "engine": "bun",
+        "stdout": "SharedClosureBatch: 5 ms\n",
+        "stderr": "",
+        "returncode": 0
+      },
+      {
+        "workload": "shared",
+        "round": 1,
+        "engine": "bun",
+        "stdout": "SharedClosureBatch: 2 ms\n",
+        "stderr": "",
+        "returncode": 0
+      },
+      {
+        "workload": "shared",
+        "round": 1,
+        "engine": "node",
+        "stdout": "SharedClosureBatch: 1 ms\n",
+        "stderr": "",
+        "returncode": 0
+      },
+      {
+        "workload": "shared",
+        "round": 2,
+        "engine": "node",
+        "stdout": "SharedClosureBatch: 1 ms\n",
+        "stderr": "",
+        "returncode": 0
+      },
+      {
+        "workload": "shared",
+        "round": 2,
+        "engine": "bun",
+        "stdout": "SharedClosureBatch: 2 ms\n",
+        "stderr": "",
+        "returncode": 0
+      },
+      {
+        "workload": "djot",
+        "round": 0,
+        "engine": "node",
+        "stdout": "Djot: 222 ms; 3160000 HTML characters\n",
+        "stderr": "",
+        "returncode": 0
+      },
+      {
+        "workload": "djot",
+        "round": 0,
+        "engine": "bun",
+        "stdout": "Djot: 141 ms; 3160000 HTML characters\n",
+        "stderr": "",
+        "returncode": 0
+      },
+      {
+        "workload": "djot",
+        "round": 1,
+        "engine": "bun",
+        "stdout": "Djot: 140 ms; 3160000 HTML characters\n",
+        "stderr": "",
+        "returncode": 0
+      },
+      {
+        "workload": "djot",
+        "round": 1,
+        "engine": "node",
+        "stdout": "Djot: 225 ms; 3160000 HTML characters\n",
+        "stderr": "",
+        "returncode": 0
+      },
+      {
+        "workload": "djot",
+        "round": 2,
+        "engine": "node",
+        "stdout": "Djot: 224 ms; 3160000 HTML characters\n",
+        "stderr": "",
+        "returncode": 0
+      },
+      {
+        "workload": "djot",
+        "round": 2,
+        "engine": "bun",
+        "stdout": "Djot: 144 ms; 3160000 HTML characters\n",
+        "stderr": "",
+        "returncode": 0
+      }
+    ]
+  }
+}

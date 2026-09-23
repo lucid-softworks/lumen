@@ -3892,3 +3892,65 @@ and `fresh-call-gated-*` for the current revision. The stopped batch is explicit
 marked `stopped_by_user`; pre-lint artifacts are separately preserved. These raw
 archives live outside the repository. This draft preserves the experiment for
 review, not as a completed performance milestone. The within-2x objective is unmet.
+
+### Bounded fresh-closure identity-cache refresh (2026-09-08)
+
+Branch `perf/closure-call-inlining`, based on fast-forward-pulled local main at
+`6976d91`, adds an opt-in follow-up in `2faa9d7`. A validated no-activation retry
+can publish a bounded, weakly pinned identity entry, allowing repeated calls to
+the same fresh closure to use ordinary native dispatch. Native addresses and
+dispatch flags are rebuilt from live code. Public `CallSite` layout is preserved;
+replaceable pins belong to the chunk and cannot authorize baked optimizer pointers.
+
+Three rotated final comparisons reduce a verified 1.6-million-call closure fixture
+from 111 to 78 ms. Djot changes from 3457 to 3402 ms against the same binary with
+refresh disabled; DeltaBlue changes from 8269 to 8288 ms, and classic score from
+8662 to 8735. Host variation and the small broader changes limit these conclusions.
+`LUMEN_JIT_REFRESH_CLOSURE_CACHE=1` remains opt-in; the within-2x objective is unmet.
+
+The [focused report](closure-call-cache.md) contains raw results, reproduction,
+ownership details, and validation, including inherited HTTP/2 and Clippy failures
+and the identical enabled/disabled selected-conformance failure.
+
+### Shared live-closure inlining (2026-09-08)
+
+Commits `09f7025` and `835d2fd` add `LUMEN_JIT_INLINE_CLOSURES=1`. Shared
+non-global closures can inline when their AST Function and live lexical
+caller environment match. The original native identity check remains the first
+path for stable closures. A hidden local owns the actual callee; reflection and
+GC resolve weak identity snapshots from that local, including nested inlines.
+
+The verified shared-closure fixture falls from 101 to 55 ms (45.5% less time),
+but broader results are mixed: Djot changes from 3457 to 3499 ms, standalone
+DeltaBlue from 8317 to 8323 ms, and classic score from 8595 to 8549. Combining
+this with cache refresh gives 3427 ms Djot and preserves the earlier closure
+fixture's improvement. NavierStokes regresses; checked calls and conservative
+region restrictions remain. The new switch is off by default.
+
+Both previously cold Djot closure guards now record only hits. That is a proven
+change in execution coverage, not evidence of a whole-engine speedup. Same-input
+Djot reference medians are 224 ms for Node and 141 ms for Bun, leaving the
+within-2x objective unmet. See the [implementation and validation report](shared-closure-inlining.md)
+and its checked-in raw samples for the complete comparison and inherited failures.
+
+### Restore numeric regions around shared-closure inlines (2026-09-08)
+
+`fb5995a` narrows the previous chunk-wide restriction. Existing numeric CFG and
+linear loops preserve the canonical hidden callee owner and materialize numeric
+state on side exits. Numeric field expressions only publish terminal operands,
+so they are restored too. Complex call-spanning/speculative-write regions remain
+restricted; ordinary instruction templates retain their requested fast mask.
+
+Three rotated comparisons recover standalone NavierStokes from 36693 to 38951,
+versus 38842 with inlining off. Full classic score changes from 8557 to 8642,
+versus 8641 off. The shared-closure fixture remains faster than Off (56 vs 100 ms).
+Djot remains roughly flat with Inline; Combined measures 3448 ms against Node's
+222 and Bun's 144 ms. Both switches remain opt-in; the within-2x objective is unmet.
+
+All 300 sampled fluid-field values after 150 frames agree exactly with Node/Bun.
+The new tests exercise native loops, bounded continuations, getter side exits,
+GC, inline identity and exceptions. A fresh 5104-sample parser profile continues
+to show material allocation, destruction and collector work, with no single
+small arithmetic site explaining the application gap. See the
+[numeric-region report](closure-numeric-regions.md) for complete measurements,
+profile limitations, validation and the checked-in raw report.
