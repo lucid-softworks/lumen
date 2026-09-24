@@ -10,27 +10,27 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
 name = "cfg-if"
-version = "1.0.4"
+version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "futures-core"
-version = "0.3.33"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cd50c473c80f6d7c3670a752354b8e569b1a7cbfdc0419ec88e5edad85e0dc7"
+checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
 
 [[package]]
 name = "futures-task"
-version = "0.3.33"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b231ed28831efb4a61a08580c4bc233ec56bc009f4cd8f52da2c3cb97df0c109"
+checksum = "cd417de3d1d015fc3bfd2b1ea46dfc7bab72ef86f1cc7cc9c78e728b34a6d1fd"
 
 [[package]]
 name = "futures-util"
-version = "0.3.33"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a77a90a256fce34da66415271e30f94ee91c57b04b8a2c042d9cf3220179deaa"
+checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
 dependencies = [
  "futures-core",
  "futures-task",
@@ -40,9 +40,9 @@ dependencies = [
 
 [[package]]
 name = "js-sys"
-version = "0.3.103"
+version = "0.3.105"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53b44bfcdb3f8d5837a46dae1ca9660a837176eee74a28b229bc626816589102"
+checksum = "ce57d20d1ea864ce2ac172ab472d409214f4fd359f0b2a2775abdf522e2af99e"
 dependencies = [
  "cfg-if",
  "futures-util",
@@ -51,11 +51,11 @@ dependencies = [
 
 [[package]]
 name = "lumen"
-version = "0.1.3"
+version = "0.1.4"
 
 [[package]]
 name = "lumen-cli"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "lumen-host",
  "lumen-repl",
@@ -64,28 +64,28 @@ dependencies = [
 
 [[package]]
 name = "lumen-difftest"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "lumen",
 ]
 
 [[package]]
 name = "lumen-fs"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "lumen-host",
 ]
 
 [[package]]
 name = "lumen-host"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "lumen",
 ]
 
 [[package]]
 name = "lumen-node"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "lumen",
  "lumen-host",
@@ -94,7 +94,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-repl"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "lumen-host",
  "lumen-runtime",
@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-runtime"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "lumen-fs",
  "lumen-host",
@@ -113,22 +113,22 @@ dependencies = [
 
 [[package]]
 name = "lumen-timers"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "lumen-host",
 ]
 
 [[package]]
 name = "lumen-tls"
-version = "0.1.3"
+version = "0.1.4"
 
 [[package]]
 name = "lumen-typescript"
-version = "0.1.3"
+version = "0.1.4"
 
 [[package]]
 name = "lumen-wasm"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "js-sys",
  "lumen",
@@ -137,7 +137,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-web"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "lumen",
  "lumen-host",
@@ -188,9 +188,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "syn"
-version = "2.0.119"
+version = "3.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
+checksum = "8593e8e72159ed2257d083c7a454a85cbf854f37a0966d8d483aff8c8a3ebcee"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -199,22 +199,22 @@ dependencies = [
 
 [[package]]
 name = "test262-runner"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "lumen",
 ]
 
 [[package]]
 name = "unicode-ident"
-version = "1.0.24"
+version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
 
 [[package]]
 name = "wasm-bindgen"
-version = "0.2.126"
+version = "0.2.128"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b067c0c11094aef6b7a801c1e34a26affafdf3d051dba08456b868789aaf9a4"
+checksum = "aecb87a33d3b0c5e3b7aa46336eaf486cffafbd281b195e4c8b80d50df2351bf"
 dependencies = [
  "cfg-if",
  "once_cell",
@@ -225,9 +225,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro"
-version = "0.2.126"
+version = "0.2.128"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "167ce5e579f6bcf889c4f7175a8a5a585de84e8ff93976ce393efa5f2837aab1"
+checksum = "a690d511e3c1a8b3a55e33511e3c2c00c78415cd23650f32b808627f5696b9ed"
 dependencies = [
  "quote",
  "wasm-bindgen-macro-support",
@@ -235,9 +235,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro-support"
-version = "0.2.126"
+version = "0.2.128"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3997c7839262f4ef12cf90b818d6340c18e80f263f1a94bf157d0ec4420380e"
+checksum = "411e4887f0071ef2d2164a9d5fdf2d20efbef78fccd3a78b0c10a1dc5295e48a"
 dependencies = [
  "bumpalo",
  "proc-macro2",
@@ -248,9 +248,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-shared"
-version = "0.2.126"
+version = "0.2.128"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc1b4cb0cc549fcf58d7dfc081778139b3d283a081644e833e84682ad71cea24"
+checksum = "81941cd78d0c92026c33e5e01312845a4cb1e9af3407f9134b100dd03144103e"
 dependencies = [
  "unicode-ident",
 ]
