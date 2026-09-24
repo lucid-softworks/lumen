@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/lucid-softworks/lumen/compare/v0.1.3...v0.1.4) - 2026-09-24
+
+### Added
+
+- *(lumen)* add default-on temporal feature
+
+### Other
+
+- *(jit)* inline numeric branch conditions
+- *(jit)* reuse cycle collector scratch buffers
+- *(lumen)* streamline exact name cache paths
+- *(jit)* scalar-replace dense call spreads
+- *(jit)* fast-path numeric modulo operations
+- *(lumen)* avoid fixed-width element write allocations
+- *(jit)* fast-path string operands in binary add
+- *(jit)* reuse numeric CFG array index conversions
+- *(jit)* skip impossible scheduler planner starts
+- *(lumen)* accelerate typed array numeric reads
+- *(lumen)* cache empty base-class construction
+- *(jit)* borrow local property receivers
+- *(jit)* skip non-loop region planning
+- *(lumen)* optimize repeated closure calls
+- *(lumen)* expand optimizing JIT coverage and runtime fast paths ([#20](https://github.com/lucid-softworks/lumen/pull/20))
+- *(lumen)* improve JIT and runtime performance ([#19](https://github.com/lucid-softworks/lumen/pull/19))
+
 ### Added
 
 - *(lumen)* gate the Temporal API behind a default-on `temporal` Cargo feature
