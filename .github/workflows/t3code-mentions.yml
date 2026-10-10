@@ -1,0 +1,46 @@
+name: T3 Code mention
+
+on:
+  issues:
+    types: [opened, edited]
+  pull_request:
+    types: [opened, edited]
+  issue_comment:
+    types: [created, edited]
+  pull_request_review:
+    types: [submitted, edited]
+  pull_request_review_comment:
+    types: [created, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    if: >-
+      github.event.sender.login == 'ImLunaHey' &&
+      contains(
+        github.event.comment.body ||
+        github.event.review.body ||
+        github.event.issue.body ||
+        github.event.pull_request.body ||
+        '',
+        '@lumen-t3code'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch mention to T3 Code
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PAYLOAD: ${{ toJSON(github.event) }}
+          WEBHOOK_URL: ${{ secrets.T3CODE_MENTION_WEBHOOK_URL }}
+        run: |
+          curl --fail-with-body --silent --show-error \
+            --retry 2 \
+            --retry-all-errors \
+            --request POST \
+            --header 'content-type: application/json' \
+            --header "x-github-event: ${EVENT_NAME}" \
+            --header "x-github-delivery: actions-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --data-binary "${PAYLOAD}" \
+            "${WEBHOOK_URL}"
