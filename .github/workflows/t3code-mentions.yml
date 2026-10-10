@@ -17,19 +17,28 @@ permissions:
 
 jobs:
   dispatch:
-    if: >-
-      github.event.sender.login == 'ImLunaHey' &&
-      contains(
-        github.event.comment.body ||
-        github.event.review.body ||
-        github.event.issue.body ||
-        github.event.pull_request.body ||
-        '',
-        '@lumen-t3code'
-      )
+    if: github.event.sender.login == 'ImLunaHey'
     runs-on: ubuntu-latest
     steps:
+      - name: Recognize a bot command
+        id: command
+        env:
+          BODY: >-
+            ${{
+              github.event.comment.body ||
+              github.event.review.body ||
+              github.event.issue.body ||
+              github.event.pull_request.body ||
+              ''
+            }}
+        run: |
+          if grep --extended-regexp --ignore-case --quiet \
+            '(^|[[:space:]])@lumen-t3code([[:space:]]|$)' <<<"${BODY}"; then
+            echo 'recognized=true' >>"${GITHUB_OUTPUT}"
+          fi
+
       - name: Dispatch mention to T3 Code
+        if: steps.command.outputs.recognized == 'true'
         env:
           EVENT_NAME: ${{ github.event_name }}
           PAYLOAD: ${{ toJSON(github.event) }}
