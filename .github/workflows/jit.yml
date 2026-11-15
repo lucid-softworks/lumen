@@ -32,8 +32,12 @@ jobs:
           - windows-latest
     runs-on: ${{ matrix.os }}
     env:
-      # Basic optimization speeds up the interpreter and JIT runtime helpers.
-      CARGO_PROFILE_TEST_OPT_LEVEL: '1'
+      # x64 benefits from faster runtime helpers; ARM tests are already quick,
+      # so avoid the larger cold-build cost of optimizing the ARM JIT backend.
+      CARGO_PROFILE_TEST_OPT_LEVEL: ${{ (matrix.os == 'ubuntu-24.04-arm' || matrix.os == 'macos-latest') && '0' || '1' }}
+      # Split code generation into smaller units without cross-unit LTO work.
+      CARGO_PROFILE_TEST_CODEGEN_UNITS: '256'
+      CARGO_PROFILE_TEST_LTO: 'off'
       # Retain backtraces without storing full variable/type debug information.
       CARGO_PROFILE_TEST_DEBUG: '1'
       CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: 'true'
@@ -55,10 +59,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.KACHE_CACHE_DIR }}
-          key: kache-jit-v2.1.1-opt1-debug1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          key: kache-jit-v2.1.1-opt${{ env.CARGO_PROFILE_TEST_OPT_LEVEL }}-debug1-cgu256-ltooff-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
-            kache-jit-v2.1.1-opt1-debug1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-
-            kache-jit-v2.1.1-opt1-debug1-${{ runner.os }}-${{ runner.arch }}-
+            kache-jit-v2.1.1-opt${{ env.CARGO_PROFILE_TEST_OPT_LEVEL }}-debug1-cgu256-ltooff-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-
+            kache-jit-v2.1.1-opt${{ env.CARGO_PROFILE_TEST_OPT_LEVEL }}-debug1-cgu256-ltooff-${{ runner.os }}-${{ runner.arch }}-
       - name: Download V8 benchmark test fixtures
         shell: bash
         env:
