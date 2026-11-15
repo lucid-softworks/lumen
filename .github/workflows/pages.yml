@@ -24,7 +24,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
+      - name: Cache Rust compilations
+        uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v1
+        with:
+          version: '2.1.1'
+          cache-key-prefix: kache-wasm
+          max-size: '2GiB'
+          pr-comment: false
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack
