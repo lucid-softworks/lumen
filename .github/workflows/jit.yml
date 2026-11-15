@@ -42,6 +42,8 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: '1'
       CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: 'true'
       CARGO_PROFILE_TEST_OVERFLOW_CHECKS: 'true'
+      # Wait for MSVC hashes instead of letting the first executables bypass caching.
+      KACHE_NATIVE_RUNTIME_WARMUP: '0'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -59,10 +61,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.KACHE_CACHE_DIR }}
-          key: kache-jit-v2.1.1-opt${{ env.CARGO_PROFILE_TEST_OPT_LEVEL }}-debug1-cgu256-ltooff-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          key: kache-jit-v2.1.1-opt${{ env.CARGO_PROFILE_TEST_OPT_LEVEL }}-debug1-cgu256-ltooff${{ runner.os == 'Windows' && '-msvc-sync' || '' }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
-            kache-jit-v2.1.1-opt${{ env.CARGO_PROFILE_TEST_OPT_LEVEL }}-debug1-cgu256-ltooff-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-
-            kache-jit-v2.1.1-opt${{ env.CARGO_PROFILE_TEST_OPT_LEVEL }}-debug1-cgu256-ltooff-${{ runner.os }}-${{ runner.arch }}-
+            kache-jit-v2.1.1-opt${{ env.CARGO_PROFILE_TEST_OPT_LEVEL }}-debug1-cgu256-ltooff${{ runner.os == 'Windows' && '-msvc-sync' || '' }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-
+            kache-jit-v2.1.1-opt${{ env.CARGO_PROFILE_TEST_OPT_LEVEL }}-debug1-cgu256-ltooff${{ runner.os == 'Windows' && '-msvc-sync' || '' }}-${{ runner.os }}-${{ runner.arch }}-
       - name: Download V8 benchmark test fixtures
         shell: bash
         env:
