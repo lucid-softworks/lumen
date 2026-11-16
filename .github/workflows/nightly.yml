@@ -32,7 +32,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Cache Rust compilations
+        uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v1
+        with:
+          version: '2.1.1'
+          cache-key-prefix: kache-release
+          max-size: '2GiB'
+          pr-comment: false
       - name: Set the nightly version suffix
         run: echo "LUMEN_VERSION_SUFFIX=-nightly (${GITHUB_SHA:0:7})" >> "$GITHUB_ENV"
       - run: cargo build --release -p lumen --bin lumen
