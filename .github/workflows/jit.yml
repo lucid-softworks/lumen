@@ -77,6 +77,14 @@ jobs:
               --output "v8-v7/${fixture}"
           done
       - name: Compile tests
-        run: cargo test -p lumen --no-run
+        run: cargo test -p lumen --no-run --timings
       - name: Run tests
         run: cargo test -p lumen
+      - name: Upload compilation timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-timings-jit-${{ matrix.os }}
+          path: target/cargo-timings/
+          if-no-files-found: ignore
+          retention-days: 7
