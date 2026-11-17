@@ -3,8 +3,6 @@ name: T3 Code mention
 on:
   issues:
     types: [opened, edited]
-  pull_request:
-    types: [opened, edited, synchronize]
   issue_comment:
     types: [created, edited]
   pull_request_review:
@@ -28,7 +26,6 @@ jobs:
               github.event.comment.body ||
               github.event.review.body ||
               github.event.issue.body ||
-              github.event.pull_request.body ||
               ''
             }}
         run: |
