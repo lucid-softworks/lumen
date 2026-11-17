@@ -1,6 +1,7 @@
 name: JIT targets
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
@@ -28,7 +29,6 @@ jobs:
           - ubuntu-latest
           - ubuntu-24.04-arm
           - macos-latest
-          - macos-15-intel
           - windows-latest
     runs-on: ${{ matrix.os }}
     env:
@@ -80,3 +80,64 @@ jobs:
         run: cargo test -p lumen --no-run
       - name: Run tests
         run: cargo test -p lumen
+
+  # Intel macOS runners are slow to compile on, so build the x86_64 test archive on Apple Silicon
+  # and spend the Intel runners only on running tests.
+  build-intel:
+    runs-on: macos-latest
+    env:
+      CARGO_PROFILE_TEST_OPT_LEVEL: '1'
+      CARGO_PROFILE_TEST_CODEGEN_UNITS: '256'
+      CARGO_PROFILE_TEST_LTO: 'off'
+      CARGO_PROFILE_TEST_DEBUG: '1'
+      CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: 'true'
+      CARGO_PROFILE_TEST_OVERFLOW_CHECKS: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - name: Download V8 benchmark test fixtures
+        shell: bash
+        env:
+          V8_BENCHMARK_REV: 0e2160885d0ca693577d54f1bbbe572f052282c6
+        run: |
+          mkdir -p v8-v7
+          for fixture in base.js richards.js; do
+            curl --fail --silent --show-error --location \
+              "https://raw.githubusercontent.com/mozilla/arewefastyet/${V8_BENCHMARK_REV}/benchmarks/v8-v7/${fixture}" \
+              --output "v8-v7/${fixture}"
+          done
+      - name: Build x86_64 test archive
+        run: cargo nextest archive -p lumen --target x86_64-apple-darwin --archive-file lumen-x86_64-apple-darwin.tar.zst
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lumen-x86_64-apple-darwin
+          path: lumen-x86_64-apple-darwin.tar.zst
+          retention-days: 1
+
+  test-intel:
+    needs: build-intel
+    runs-on: macos-15-intel
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - uses: actions/download-artifact@v4
+        with:
+          name: lumen-x86_64-apple-darwin
+      - name: Run tests (shard ${{ matrix.shard }}/3)
+        run: >-
+          cargo-nextest nextest run
+          --archive-file lumen-x86_64-apple-darwin.tar.zst
+          --workspace-remap .
+          --partition count:${{ matrix.shard }}/3
+          --no-fail-fast
