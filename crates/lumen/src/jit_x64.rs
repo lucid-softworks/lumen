@@ -277,9 +277,9 @@ fn a_jne_or_unordered(a: &mut Asm, slow: usize) {
     a.jcc(0x8a, slow);
 }
 
-/// Compact monomorphic property-number load. Every cached structural fact is rechecked against
+/// Compact monomorphic property load. Every cached structural fact is rechecked against
 /// the live object graph; a miss reaches H_GET_PROP before stack or refcount state changes.
-fn emit_prop_num(
+fn emit_prop_value(
     a: &mut Asm,
     layout: &crate::value::JitLayout,
     st: crate::bytecode::IcState,
@@ -310,6 +310,14 @@ fn emit_prop_num(
     };
     let Ok(entries) = i32::try_from(layout.obj_props + layout.props_entries + layout.vec_ptr_off)
     else {
+        return false;
+    };
+    let Ok(entries_len) =
+        i32::try_from(layout.obj_props + layout.props_entries + layout.vec_len_off)
+    else {
+        return false;
+    };
+    let Ok(strong) = i32::try_from(layout.rc_strong_off) else {
         return false;
     };
     let Some(entry_base) = layout.entry_size.checked_mul(st.slot as usize) else {
@@ -381,7 +389,12 @@ fn emit_prop_num(
         guard_object(a, st.holder_shape, slow);
     }
 
-    // rax=entries data; reject a live accessor descriptor, then decode only packed Numbers.
+    // Recheck the live length before dereferencing a cached entry, even after shape guards.
+    a.bytes(&[0x49, 0x81, 0xbb]); // cmp qword [r11+entries_len],slot
+    a.bytes(&entries_len.to_le_bytes());
+    a.bytes(&st.slot.to_le_bytes());
+    a.jcc(0x86, slow);
+    // rax=entries data; reject a live accessor descriptor, then clone its packed value.
     a.bytes(&[0x49, 0x8b, 0x83]);
     a.bytes(&entries.to_le_bytes());
     a.bytes(&[0xf6, 0x80]);
@@ -392,17 +405,56 @@ fn emit_prop_num(
     a.bytes(&value_off.to_le_bytes());
     a.bytes(&[0x48, 0x89, 0xd0, 0x48, 0xc1, 0xe8, 0x30]); // eax=upper 16 bits
     let number = a.label();
+    let object = a.label();
+    let string = a.label();
+    let symbol = a.label();
+    let boolean = a.label();
+    let scalar = a.label();
+    let decoded = a.label();
+    let clone_rc = a.label();
+    a.bytes(&[0x3d]);
+    a.bytes(&0xfff9u32.to_le_bytes());
+    a.jcc(0x84, object);
     a.bytes(&[0x3d]);
     a.bytes(&0x7ff9u32.to_le_bytes());
     a.jcc(0x82, number);
     a.bytes(&[0x3d]);
     a.bytes(&0x7fffu32.to_le_bytes());
-    a.jcc(0x86, slow); // boxed positive tag
-    a.bytes(&[0x3d]);
-    a.bytes(&0xfff9u32.to_le_bytes());
-    a.jcc(0x83, slow); // PACK_OBJ or a non-canonical negative NaN
+    a.jcc(0x87, number);
+    for (tag, label) in [
+        (0x7ffc_u32, boolean),
+        (0x7ffe, string),
+        (0x7fff, symbol),
+        (0x7ffd, slow),
+    ] {
+        a.bytes(&[0x3d]);
+        a.bytes(&tag.to_le_bytes());
+        a.jcc(0x84, label);
+    }
+    a.jmp(scalar);
     a.bind(number);
     a.bytes(&[0xb8, 4, 0, 0, 0]); // Value::Num word 0
+    a.jmp(decoded);
+    a.bind(scalar); // Undefined, Empty and Null map to wide tags 0, 1 and 2.
+    a.bytes(&[0x2d]);
+    a.bytes(&0x7ff9u32.to_le_bytes());
+    a.bytes(&[0x31, 0xd2]);
+    a.jmp(decoded);
+    a.bind(boolean);
+    a.bytes(&[
+        0x89, 0xd0, 0x83, 0xe0, 1, 0xc1, 0xe0, 8, 0x83, 0xc8, 3, 0x31, 0xd2,
+    ]);
+    a.jmp(decoded);
+    for (label, tag) in [(string, 6u32), (symbol, 7), (object, 8)] {
+        a.bind(label);
+        a.bytes(&[0xb8]);
+        a.bytes(&tag.to_le_bytes());
+        a.jmp(clone_rc);
+    }
+    a.bind(clone_rc);
+    a.bytes(&[0x48, 0xc1, 0xe2, 16, 0x48, 0xc1, 0xea, 16]); // remove packed tag
+    a.inc_strong_rdx(strong);
+    a.bind(decoded);
     a.store_pair_r13(0);
     a.add_sp(16);
     true
@@ -780,7 +832,7 @@ pub(super) fn compile(
                 let done = a.label();
                 let emitted = chunk
                     .jit_cache_preferred(*cache)
-                    .is_some_and(|st| emit_prop_num(&mut a, layout, st, PropRecv::This, slow));
+                    .is_some_and(|st| emit_prop_value(&mut a, layout, st, PropRecv::This, slow));
                 if emitted {
                     a.jmp(done);
                     a.bind(slow);
@@ -794,7 +846,7 @@ pub(super) fn compile(
                 let slow = a.label();
                 let done = a.label();
                 let emitted = chunk.jit_cache_preferred(*cache).is_some_and(|st| {
-                    emit_prop_num(&mut a, layout, st, PropRecv::Slot(*slot), slow)
+                    emit_prop_value(&mut a, layout, st, PropRecv::Slot(*slot), slow)
                 });
                 if emitted {
                     a.jmp(done);
