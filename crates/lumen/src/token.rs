@@ -64,6 +64,7 @@ pub enum TplPart {
 /// Contextual keywords (`let`, `const` is reserved but `of`/`async`/`get`/`set`/`static`/`yield`/
 /// `await`/`as`/`from`) are deliberately NOT here — they are valid identifiers in many positions,
 /// so they stay `Ident` and the parser recognises them by text where the grammar calls for them.
+// Keep lexicographically sorted: the lexer uses binary search for identifier classification.
 pub const KEYWORDS: &[&str] = &[
     "break",
     "case",
@@ -110,3 +111,11 @@ pub const PUNCTUATORS: &[&str] = &[
     "**", "<<", ">>", "{", "}", "(", ")", "[", "]", ".", ";", ",", "<", ">", "+", "-", "*", "/",
     "%", "&", "|", "^", "!", "~", "?", ":", "=", "@",
 ];
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn keyword_table_is_sorted_for_binary_search() {
+        assert!(super::KEYWORDS.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+}

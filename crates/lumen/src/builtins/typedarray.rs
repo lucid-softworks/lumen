@@ -1585,6 +1585,16 @@ fn ta_set(i: &mut Interp, this: Value, args: &[Value]) -> Result<Value, Value> {
             ));
         }
         let offset = offset_n as usize;
+        // Same-kind copies preserve the source representation (including NaN payloads).
+        // Snapshot bytes before writing so overlapping views behave like memmove. All
+        // bounds/content checks above still apply, including to empty source views.
+        if src_info.kind == info.kind {
+            let bytes = i
+                .ta_read_bytes(&src_info, 0, src_len)
+                .ok_or_else(|| i.make_error("TypeError", "TypedArray source is out of bounds"))?;
+            i.ta_write_bytes(&info, offset, &bytes);
+            return Ok(Value::Undefined);
+        }
         // Snapshot the source first so an overlapping same-buffer copy reads pre-write values.
         let vals: Vec<Value> = (0..src_len).map(|k| i.ta_read(&src_info, k)).collect();
         for (k, v) in vals.iter().enumerate() {
