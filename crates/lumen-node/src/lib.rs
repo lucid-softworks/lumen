@@ -35,6 +35,7 @@ mod jsx;
 mod napi;
 mod net;
 mod password;
+mod path_posix;
 mod sqlite;
 mod tls;
 
@@ -66,6 +67,8 @@ pub fn extension() -> Extension {
                     "glibcVersionRuntime" (0) => op_glibc_version_runtime,
                     "enableCompileCache" (1) => op_enable_compile_cache,
                     "getCompileCacheDir" (0) => op_get_compile_cache_dir,
+                    "pathNormalizePosix" (1) => path_posix::op_normalize,
+                    "pathJoinPosix" (0) => path_posix::op_join,
                     "drainMicrotasks" (0) => op_drain_microtasks,
                     "transformJsx" (1) => op_transform_jsx,
                     "stat" (1) => op_stat,
