@@ -220,8 +220,9 @@ impl Interp {
             Some(s) => s,
             None => return Err(self.throw("TypeError", format!("module not found: {key}"))),
         };
-        let body =
-            crate::parser::parse_module(&src).map_err(|e| self.throw("SyntaxError", e.message))?;
+        let body = self
+            .parse_cached(&src, true)
+            .map_err(|e| self.throw("SyntaxError", e.message))?;
         let body = Rc::new(body);
 
         // Resolve every dependency specifier to a canonical key up front (fetching its source), so

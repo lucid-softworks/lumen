@@ -79,6 +79,11 @@ impl Runtime {
             ],
         );
         process::install_data_props(&mut engine);
+        if std::env::var_os("NODE_COMPILE_CACHE").is_some() {
+            engine
+                .eval("require('node:module').enableCompileCache()", false)
+                .expect("compile cache initialization parses");
+        }
         // queueMicrotask, via the promise queue the engine already has. Close enough to spec
         // for v0 (a thrown callback error becomes an unhandled rejection, not a reported
         // exception); a native microtask hook can replace it if that gap ever matters.

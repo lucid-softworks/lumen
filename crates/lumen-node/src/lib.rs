@@ -64,6 +64,8 @@ pub fn extension() -> Extension {
                     "collectGarbage" (0) => op_collect_garbage,
                     "heapObjectCount" (0) => op_heap_object_count,
                     "glibcVersionRuntime" (0) => op_glibc_version_runtime,
+                    "enableCompileCache" (1) => op_enable_compile_cache,
+                    "getCompileCacheDir" (0) => op_get_compile_cache_dir,
                     "drainMicrotasks" (0) => op_drain_microtasks,
                     "transformJsx" (1) => op_transform_jsx,
                     "stat" (1) => op_stat,
@@ -802,6 +804,48 @@ fn op_statfs(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value
         let _ = ctx.set_member(&err, "code", Value::str("ENOSYS"));
         Err(err)
     }
+}
+
+fn op_get_compile_cache_dir(ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Value> {
+    Ok(ctx
+        .compile_cache_directory()
+        .map(|p| Value::from_string(p.to_string_lossy().into_owned()))
+        .unwrap_or(Value::Undefined))
+}
+
+fn op_enable_compile_cache(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let root = match args.first() {
+        None | Some(Value::Undefined) => {
+            #[cfg(unix)]
+            let suffix = {
+                unsafe extern "C" {
+                    fn geteuid() -> u32;
+                }
+                unsafe { geteuid() }.to_string()
+            };
+            #[cfg(not(unix))]
+            let suffix = String::from("user");
+            std::env::temp_dir().join(format!("lumen-compile-cache-{suffix}"))
+        }
+        Some(_) => std::path::PathBuf::from(arg_path(ctx, args)?),
+    };
+    let result = ctx.new_object_with_proto(&Value::Null);
+    match ctx.enable_compile_cache(&root) {
+        Ok(directory) => {
+            let _ = ctx.set_member(&result, "status", Value::Num(1.0));
+            let root = directory.parent().unwrap_or(&directory);
+            let _ = ctx.set_member(
+                &result,
+                "directory",
+                Value::from_string(root.to_string_lossy().into_owned()),
+            );
+        }
+        Err(error) => {
+            let _ = ctx.set_member(&result, "status", Value::Num(0.0));
+            let _ = ctx.set_member(&result, "message", Value::from_string(error.to_string()));
+        }
+    }
+    Ok(result)
 }
 
 /// Report the loaded GNU libc version, not a guessed build/host version. In particular, musl

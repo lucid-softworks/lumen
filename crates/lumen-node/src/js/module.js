@@ -534,13 +534,28 @@ function findSourceMap() {
   return undefined;
 }
 
-// The compile cache is a V8 code-cache-on-disk optimization lumen does not implement. Report it as
-// permanently DISABLED (honest, non-throwing) rather than pretending to enable it.
-function enableCompileCache() {
-  return { status: constants.compileCacheStatus.DISABLED, message: "compile cache is not supported in lumen" };
+// Lumen caches validated parse trees. Entries are build-specific and written eagerly,
+// so flushCompileCache has no pending writes to drain.
+function enableCompileCache(options) {
+  const invalidDirectory = () => {
+    const error = new TypeError('cacheDir should be a string');
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    throw error;
+  };
+  if (options !== undefined && typeof options !== 'string' && (options === null || typeof options !== 'object')) invalidDirectory();
+  let directory = typeof options === 'string' ? options : options?.directory;
+  if (directory !== undefined && typeof directory !== 'string') invalidDirectory();
+  if (process.env.NODE_DISABLE_COMPILE_CACHE === '1') {
+    return { status: constants.compileCacheStatus.DISABLED, message: 'Disabled by NODE_DISABLE_COMPILE_CACHE' };
+  }
+  const current = getCompileCacheDir();
+  if (current !== undefined) return { status: constants.compileCacheStatus.ALREADY_ENABLED, directory: current };
+  if (directory === undefined) directory = process.env.NODE_COMPILE_CACHE;
+  if (directory !== undefined && typeof directory !== 'string') invalidDirectory();
+  return { ...__node.enableCompileCache(directory) };
 }
 function getCompileCacheDir() {
-  return undefined;
+  return __node.getCompileCacheDir();
 }
 function flushCompileCache() {}
 

@@ -2264,3 +2264,97 @@ fn bun_hash_matches_bun_through_the_glue() {
         ]
     );
 }
+
+#[test]
+fn node_compile_cache_statuses_and_source_changes() {
+    let root = std::env::temp_dir().join(format!("lumen-runtime-cache-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(root.clone());
+    let cache = root.join("cache");
+    let module = root.join("sample.cjs");
+    let esm = root.join("sample.mjs");
+    for (round, number) in [42, 42, 43].into_iter().enumerate() {
+        std::fs::write(&module, format!("module.exports={number}")).unwrap();
+        std::fs::write(
+            &esm,
+            format!("export const value={number}; console.log(value)"),
+        )
+        .unwrap();
+        let (mut rt, out, _) = test_runtime();
+        eval_ok(
+            &mut rt,
+            &format!(
+                r#"
+            const m=require('node:module');
+            delete process.env.NODE_DISABLE_COMPILE_CACHE;
+            delete process.env.NODE_COMPILE_CACHE;
+            console.log(m.getCompileCacheDir()===undefined);
+            const first=m.enableCompileCache({{directory:{cache:?},portable:true}});
+            console.log(first.status,Object.getPrototypeOf(first)===Object.prototype);
+            const dir=m.getCompileCacheDir();
+            console.log(typeof dir,dir.startsWith(first.directory));
+            console.log(m.enableCompileCache('ignored').status,m.getCompileCacheDir()===dir);
+            for (const input of [null,1,false,{{directory:1}}]) {{
+                try {{ m.enableCompileCache(input); throw 'accepted bad directory'; }}
+                catch(e) {{ if(e.code!=='ERR_INVALID_ARG_TYPE') throw e; }}
+            }}
+            console.log(m.flushCompileCache()===undefined);
+            console.log(require({module:?}),new Function('return 7')());
+        "#,
+                cache = cache.to_str().unwrap(),
+                module = module.to_str().unwrap()
+            ),
+        );
+        rt.run_module(esm.to_str().unwrap()).unwrap();
+        rt.run_to_completion();
+        assert_eq!(
+            out.lines(),
+            [
+                "true".to_string(),
+                "1 true".into(),
+                "string true".into(),
+                "2 true".into(),
+                "true".into(),
+                format!("{number} 7"),
+                number.to_string()
+            ]
+        );
+        drop(rt);
+        if round == 0 {
+            // The next runtime must recover from broken entries before executing either
+            // CommonJS or ESM; the third sees new source at the same filenames.
+            let version = std::fs::read_dir(&cache)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            for entry in std::fs::read_dir(version).unwrap() {
+                std::fs::write(entry.unwrap().path(), b"broken cache").unwrap();
+            }
+        }
+    }
+    let (mut rt, out, _) = test_runtime();
+    eval_ok(
+        &mut rt,
+        &format!(
+            r#"
+        const m=require('node:module');
+        process.env.NODE_DISABLE_COMPILE_CACHE='1';
+        console.log(m.enableCompileCache({cache:?}).status,m.getCompileCacheDir()===undefined);
+        delete process.env.NODE_DISABLE_COMPILE_CACHE;
+        console.log(m.enableCompileCache({module:?}).status,m.getCompileCacheDir()===undefined);
+    "#,
+            cache = cache.to_str().unwrap(),
+            module = module.to_str().unwrap()
+        ),
+    );
+    assert_eq!(out.lines(), ["3 true", "0 true"]);
+}

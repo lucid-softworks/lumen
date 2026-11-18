@@ -26,6 +26,7 @@ mod ast;
 mod bigint;
 mod builtins;
 pub mod bytecode;
+mod compile_cache;
 mod coroutine;
 mod eval;
 /// The engine's size-class caching allocator — allocation-bound workloads (one refcounted box
