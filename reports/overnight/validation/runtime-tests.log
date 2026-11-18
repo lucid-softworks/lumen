@@ -1,0 +1,639 @@
+warning: unused import: `proto_epoch_ptr`
+    --> crates/lumen/src/value.rs:1386:55
+     |
+1386 |     bump_proto_epoch, fn_key, index_key, proto_epoch, proto_epoch_ptr, MIRROR_ALL_I32,
+     |                                                       ^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u32>::fetch_update`: renamed to `try_update` for consistency
+  --> crates/lumen/src/value/props/shapes.rs:35:25
+   |
+35 |     let _ = PROTO_EPOCH.fetch_update(
+   |                         ^^^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+   |
+35 -     let _ = PROTO_EPOCH.fetch_update(
+35 +     let _ = PROTO_EPOCH.try_update(
+   |
+
+warning: multiple methods are never used
+    --> crates/lumen/src/bytecode.rs:5592:19
+     |
+5587 | impl Chunk {
+     | ---------- methods in this implementation
+...
+5592 |     pub(crate) fn jit_slot_names(&self) -> &[Rc<str>] {
+     |                   ^^^^^^^^^^^^^^
+...
+5608 |     pub(crate) fn jit_cache_ptr(&self, idx: u32) -> usize {
+     |                   ^^^^^^^^^^^^^
+...
+5629 |     pub(crate) fn jit_cache_for_shape(&self, idx: u32, recv_shape: u32) -> Option<IcState> {
+     |                   ^^^^^^^^^^^^^^^^^^^
+...
+5646 |     pub(crate) fn jit_call_cache_ptr(&self, idx: u32) -> usize {
+     |                   ^^^^^^^^^^^^^^^^^^
+...
+5653 |     pub(crate) fn jit_call_target(&self, idx: u32) -> Option<(CallIc, crate::value::Gc)> {
+     |                   ^^^^^^^^^^^^^^^
+...
+5674 |     pub(crate) fn jit_call_targets(&self, idx: u32) -> Vec<(CallIc, crate::value::Gc)> {
+     |                   ^^^^^^^^^^^^^^^^
+...
+5693 |     pub(crate) fn jit_name_cache_ptr(&self, idx: u32) -> usize {
+     |                   ^^^^^^^^^^^^^^^^^^
+...
+5698 |     pub(crate) fn jit_cap_cache_ptr(&self, idx: u32) -> usize {
+     |                   ^^^^^^^^^^^^^^^^^
+...
+5704 |     pub(crate) fn jit_name_number(&self, idx: u32) -> Option<u64> {
+     |                   ^^^^^^^^^^^^^^^
+...
+6267 |     pub(crate) fn jit_inline_attempted_off(&self) -> usize {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+6311 |     pub(crate) fn jit_const_ptr(&self, k: u32) -> *const Value {
+     |                   ^^^^^^^^^^^^^
+...
+6315 |     pub(crate) fn jit_const_is_str(&self, k: u32) -> bool {
+     |                   ^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `jit_mod_num` is never used
+    --> crates/lumen/src/bytecode.rs:9267:26
+     |
+9267 | pub(crate) extern "C" fn jit_mod_num(a: f64, b: f64) -> f64 {
+     |                          ^^^^^^^^^^^
+
+warning: method `jit_capture_offset` is never used
+   --> crates/lumen/src/bytecode/activation.rs:120:19
+    |
+113 | impl Chunk {
+    | ---------- method in this implementation
+...
+120 |     pub(crate) fn jit_capture_offset(&self, name: u32) -> Option<usize> {
+    |                   ^^^^^^^^^^^^^^^^^^
+
+warning: methods `inline_closure_target`, `has_inline_closures`, `dynamic_inline_location`, and `has_inline_frames` are never used
+   --> crates/lumen/src/bytecode/inline_frames.rs:77:19
+    |
+ 76 | impl Chunk {
+    | ---------- methods in this implementation
+ 77 |     pub(crate) fn inline_closure_target(&self, target: u32) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+ 88 |     pub(crate) fn has_inline_closures(&self) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^
+...
+ 93 |     pub(crate) fn dynamic_inline_location(&self, pc: usize) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+110 |     pub(crate) fn has_inline_frames(&self) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^
+
+warning: constant `GC_DIRECT_MAINT_MASK` is never used
+    --> crates/lumen/src/interpreter.rs:1222:18
+     |
+1222 | pub(crate) const GC_DIRECT_MAINT_MASK: u32 = 4095;
+     |                  ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `LEN_OFF` is never used
+  --> crates/lumen/src/lstr.rs:41:18
+   |
+41 | pub(crate) const LEN_OFF: usize = std::mem::offset_of!(Header, len);
+   |                  ^^^^^^^
+
+warning: constant `CAP_OFF` is never used
+  --> crates/lumen/src/lstr.rs:44:18
+   |
+44 | pub(crate) const CAP_OFF: usize = std::mem::offset_of!(Header, cap);
+   |                  ^^^^^^^
+
+warning: constant `DATA_OFF` is never used
+  --> crates/lumen/src/lstr.rs:46:18
+   |
+46 | pub(crate) const DATA_OFF: usize = HDR;
+   |                  ^^^^^^^^
+
+warning: multiple fields are never read
+   --> crates/lumen/src/value.rs:342:9
+    |
+337 | pub struct JitLayout {
+    |            --------- fields in this struct
+...
+342 |     pub gc_data_off: usize,
+    |         ^^^^^^^^^^^
+...
+348 |     pub obj_is_constructor: usize,
+    |         ^^^^^^^^^^^^^^^^^^
+349 |     pub obj_extensible: usize,
+    |         ^^^^^^^^^^^^^^
+350 |     pub props_shape: usize,
+351 |     pub props_proto_flag: usize,
+    |         ^^^^^^^^^^^^^^^^
+...
+359 |     pub vec_cap_off: usize,
+    |         ^^^^^^^^^^^
+...
+368 |     pub dense_packed: usize,
+    |         ^^^^^^^^^^^^
+369 |     /// Initialized inline element count and slot base within DenseBuffers.
+370 |     pub dense_inline_len: usize,
+    |         ^^^^^^^^^^^^^^^^
+371 |     pub dense_inline_slots: usize,
+    |         ^^^^^^^^^^^^^^^^^^
+...
+381 |     pub entry_writable: usize,
+    |         ^^^^^^^^^^^^^^
+382 |     /// Standalone `Property` layout used by keyless packed elements (not tuple-entry offsets).
+383 |     pub property_size: usize,
+    |         ^^^^^^^^^^^^^
+384 |     pub property_value: usize,
+    |         ^^^^^^^^^^^^^^
+385 |     pub property_meta: usize,
+    |         ^^^^^^^^^^^^^
+386 |     /// The `Option<Box<Vec<Property>>>` niche and Vec header words matched the live probes.
+387 |     pub packed_elems_valid: bool,
+    |         ^^^^^^^^^^^^^^^^^^
+...
+394 |     pub exotic_strwrap_tag: u8,
+    |         ^^^^^^^^^^^^^^^^^^
+...
+398 |     pub scope_gen: usize,
+    |         ^^^^^^^^^
+399 |     /// `value` within a `Binding` (the LoadName template's 16-byte copy source).
+400 |     pub binding_value: usize,
+    |         ^^^^^^^^^^^^^
+401 |     /// `mutable` within a `Binding` (free-name update/store guard).
+402 |     pub binding_mutable: usize,
+    |         ^^^^^^^^^^^^^^^
+403 |     /// `initialized` bool within a `Binding` (TDZ check).
+404 |     pub binding_init: usize,
+    |         ^^^^^^^^^^^^
+405 |     /// The `Rc<str>` key within an entry `(Rc<str>, Property)` (tuple field order is unstable).
+406 |     pub entry_key: usize,
+    |         ^^^^^^^^^
+407 |     /// The length word within an `Rc<str>` fat pointer (0 or 8 — layout is unstable).
+408 |     pub str_len_word: usize,
+    |         ^^^^^^^^^^^^
+409 |     /// The pointer word within an `Rc<str>` fat pointer (the other one).
+410 |     pub str_ptr_word: usize,
+    |         ^^^^^^^^^^^^
+411 |     /// Stored `Rc<str>` pointer word → the first byte of the string data (the RcBox header).
+412 |     pub str_data_off: usize,
+    |         ^^^^^^^^^^^^
+...
+415 |     pub key_probe_ok: bool,
+    |         ^^^^^^^^^^^^
+    |
+    = note: `JitLayout` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: methods `reserve_small_holes`, `jit_packed_numeric_slots`, and `get_index_mut` are never used
+   --> crates/lumen/src/value/props/elements.rs:33:19
+    |
+  6 | impl Props {
+    | ---------- methods in this implementation
+...
+ 33 |     pub(crate) fn reserve_small_holes(&mut self, len: usize) {
+    |                   ^^^^^^^^^^^^^^^^^^^
+...
+ 53 |     pub(crate) fn jit_packed_numeric_slots(&mut self, len: usize) -> Option<*mut Vec<Property>> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+106 |     pub(crate) fn get_index_mut(&mut self, n: u32) -> Option<&mut Property> {
+    |                   ^^^^^^^^^^^^^
+
+warning: function `proto_epoch_ptr` is never used
+  --> crates/lumen/src/value/props/shapes.rs:29:15
+   |
+29 | pub(crate) fn proto_epoch_ptr() -> *const u32 {
+   |               ^^^^^^^^^^^^^^^
+
+warning: `lumen` (lib) generated 13 warnings (run `cargo fix --lib -p lumen` to apply 2 suggestions)
+warning: `lumen` (lib) generated 13 warnings (13 duplicates)
+    Finished `test` profile [optimized] target(s) in 0.02s
+     Running unittests src/lib.rs (target/debug/deps/lumen_runtime-4376515fa04622ca)
+
+running 106 tests
+test esm::tests::exports_subpath_reads_condition_and_string_forms ... ok
+test esm::tests::js_string_escapes ... ok
+test esm::tests::builtin_source_preserves_export_filter_and_escapes_module_name ... ok
+test esm::tests::json_field_matches_key_not_value ... ok
+test esm::tests::package_dir_handles_plain_and_scoped_subpaths ... ok
+test esm::tests::package_subpath_splits_plain_and_scoped ... ok
+test esm::tests::normalize_dotdot ... ok
+test esm::tests::json_field_scan ... ok
+test esm::tests::pkg_entry_exports_string_then_module_then_main ... ok
+test esm::tests::pkg_entry_prefers_exports_import_condition ... ok
+test jsx::tests::attributes ... ok
+test jsx::tests::children_text_and_expr ... ok
+test jsx::tests::intrinsic_and_component ... ok
+test jsx::tests::jsx_in_map_callback ... ok
+test jsx::tests::less_than_is_not_jsx ... ok
+test jsx::tests::nested_and_fragment ... ok
+test jsx::tests::text_with_apostrophe ... ok
+test jsx::tests::whitespace_between_tags_dropped ... ok
+test tests::bun_mmap_tracks_file_reads_and_shared_writes ... ok
+test tests::console_streams_and_renders_common_values ... ok
+test crypto_asym_tests::node_crypto_prime_table_initializes_on_first_use_and_is_reused ... ok
+test tests::async_await_settles_before_loop_exit ... ok
+test tests::bun_jsc_uses_live_heap_gc_and_microtask_instrumentation ... ok
+test tests::acceptance_timers_microtasks_console ... ok
+test crypto_asym_tests::node_crypto_sha512_family ... ok
+test tests::bun_sqlite_file_control_reaches_native_sqlite ... ok
+test tests::clear_timeout_cancels ... ok
+test tests::bun_hash_matches_bun_through_the_glue ... ok
+test tests::error_reporting_globals ... ok
+test tests::bun_transpiler_transforms_typescript_jsx_and_scans_modules ... ok
+test tests::abort_signal_any_and_event_classes ... ok
+test tests::broadcast_channel_fanout ... ok
+test tests::esm_import_json_attribute ... ok
+test tests::esm_resolves_node_modules_packages ... ok
+test tests::esm_module_not_found_is_an_error ... ok
+test tests::eventsource_204_stops ... ok
+test tests::eventsource_parses_events ... ok
+test tests::esm_imports_node_builtins_named_and_default ... ok
+test tests::esm_top_level_await_on_timer_settles ... ok
+test tests::esm_import_text_attribute ... ok
+test tests::esm_import_bytes_attribute ... ok
+test tests::esm_named_default_json_and_dynamic_import ... ok
+test tests::esm_prefers_exports_import_over_cjs_main ... ok
+test tests::eventsource_field_parser_units ... ok
+test tests::eventsource_reconnects_with_last_event_id ... ok
+test tests::fs_exists_readdir_unlink_append ... ok
+test tests::eventsource_wrong_content_type_is_fatal ... ok
+test tests::fs_promise_rejection_is_catchable ... ok
+test tests::fs_handles_via_resource_table ... ok
+test tests::fs_sync_and_async_roundtrip ... ok
+test tests::message_channel_semantics ... ok
+test tests::message_port_close_and_guards ... ok
+test tests::fs_sync_error_throws_catchable_error ... ok
+test crypto_asym_tests::node_crypto_key_import_node_fixtures ... ok
+test tests::perf_boot_breakdown ... ignored
+test tests::interval_fires_until_cleared_and_loop_exits ... ok
+test tests::node_buffer ... ok
+test tests::next_tick_and_set_immediate_run_before_timers ... ok
+test tests::node_crypto_argon2_sync_and_async_match_rfc9106 ... ok
+test tests::node_require_missing_module_throws ... ok
+test tests::node_run_main_dirname_and_module ... ok
+test tests::node_fs_module_over_global_fs ... ok
+test tests::node_path_and_os_builtins ... ok
+test tests::process_basics ... ok
+test tests::posix_normalize_and_join_match_node_vectors ... ok
+test crypto_asym_tests::node_crypto_ed25519_known_vector ... ok
+test tests::node_util_types_detects_proxies_and_key_objects ... ok
+test tests::process_diagnostic_reports_and_finalization_are_functional ... ok
+test tests::process_execve_validates_and_reports_os_errors ... ok
+test tests::structured_clone_wire_round_trips ... ok
+test tests::timer_promises_ref_false_does_not_keep_the_loop_alive ... ok
+test tests::process_reports_native_cpu_and_memory_metrics ... ok
+test tests::web_crypto ... ok
+test tests::node_compile_cache_statuses_and_source_changes ... ok
+test tests::timer_args_pass_through_and_nested_timers_work ... ok
+test tests::uncaught_callback_error_reports_and_loop_survives ... ok
+test tests::web_encoding_and_base64 ... ok
+test tests::node_require_resolution ... ok
+test tests::spawn_blocking_completion_settles_on_the_loop ... ok
+test tests::web_events_and_abort ... ok
+test tests::timer_handles_support_numeric_cancellation_and_survive_clear ... ok
+test tests::timer_unref_allows_exit_but_ref_restores_liveness ... ok
+test tests::process_report_identifies_glibc_for_native_addon_selection ... ok
+test tests::web_response_status_defaults ... ok
+test tests::web_readable_stream_body ... ok
+test tests::web_url_and_search_params ... ok
+test tests::unref_timer_still_fires_while_other_work_keeps_the_loop_alive ... ok
+test tests::web_fetch_roundtrip_over_local_http ... ok
+test tests::websocket_server_initiated_close ... ok
+test tests::websocket_transparent_ping_pong ... ok
+test tests::wintertc_functional_smoke ... ok
+test tests::wintertc_minimum_common_api ... ok
+test tests::web_structured_clone ... ok
+test tests::websocket_handshake_rejection_is_error_then_close ... ok
+test tests::websocket_reassembles_fragments ... ok
+test tests::websocket_constructor_validation ... ok
+test tests::web_serve_roundtrip_over_loopback ... ok
+test tests::worker_bidirectional_conversation ... ok
+test tests::worker_message_round_trip_and_structured_clone ... ok
+test tests::worker_load_error_reports ... ok
+test tests::worker_error_propagates_to_onerror ... ok
+test tests::worker_datacloneerror_on_unserializable ... ok
+test tests::node_buffer_base64_matches_node ... ok
+test crypto_asym_tests::node_crypto_ed25519_roundtrip_and_async ... ok
+test tests::worker_terminate_stops_a_running_worker ... ok
+test tests::websocket_text_and_binary_round_trip ... ok
+
+test result: ok. 105 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.08s
+
+     Running tests/brotli.rs (target/debug/deps/brotli-16ef88be6afa6434)
+
+running 1 test
+test node_zlib_brotli_surfaces ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/bun_cookies.rs (target/debug/deps/bun_cookies-0c2f834aaae58557)
+
+running 1 test
+test bun_cookie_and_cookie_map_match_header_semantics ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/bun_csrf.rs (target/debug/deps/bun_csrf-7817792d060b2405)
+
+running 1 test
+test csrf_tokens_interoperate_with_bun_and_reject_tampering ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/bun_editor.rs (target/debug/deps/bun_editor-b0abc8b7a5b9a40a)
+
+running 1 test
+test open_in_editor_spawns_configured_editor ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/bun_ffi.rs (target/debug/deps/bun_ffi-08ed35027eb91664)
+
+running 4 tests
+test ffi_honest_throws ... ok
+test ffi_libc_calls_and_marshalling ... ok
+test ffi_cc_compiles_and_links_c_at_runtime ... ok
+test ffi_fixture_abi_shapes_and_callback ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/bun_mysql.rs (target/debug/deps/bun_mysql-eab2c3e1668a059a)
+
+running 1 test
+test mysql_adapter_authenticates_escapes_queries_and_decodes_rows ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running tests/bun_plugin.rs (target/debug/deps/bun_plugin-bfd0f613f80ed44c)
+
+running 1 test
+test plugin_transforms_commonjs_loads ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/bun_postgres.rs (target/debug/deps/bun_postgres-5fd48759b0b54851)
+
+running 2 tests
+test postgres_adapter_authenticates_with_scram_sha_256 ... ok
+test postgres_adapter_uses_extended_protocol_and_decodes_rows ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running tests/bun_redis.rs (target/debug/deps/bun_redis-1060ff96a6044d0e)
+
+running 4 tests
+test redis_client_connects_over_tls ... ok
+test redis_client_preserves_binary_bulk_strings_and_rejects_errors ... ok
+test redis_convenience_methods_encode_arguments_and_convert_results ... ok
+test redis_client_pipelines_and_decodes_resp_values ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/bun_router.rs (target/debug/deps/bun_router-e295b19d9a21169b)
+
+running 1 test
+test filesystem_router_matches_nextjs_pages_and_reloads ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/bun_s3.rs (target/debug/deps/bun_s3-3c46397daecf50ec)
+
+running 2 tests
+test s3_presign_matches_sigv4_vector_and_validates_credentials ... ok
+test s3_client_executes_signed_object_lifecycle ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/bun_secrets.rs (target/debug/deps/bun_secrets-777c9c058c7b82f1)
+
+running 1 test
+test secrets_validate_credential_identity_without_accessing_store ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/bun_sockets.rs (target/debug/deps/bun_sockets-acccd92a6bf81e55)
+
+running 2 tests
+test bun_tcp_listen_and_connect_echo ... ok
+test bun_udp_socket_sends_data_with_peer_metadata ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+     Running tests/bun_sql.rs (target/debug/deps/bun_sql-a0b2eec02b30f8c6)
+
+running 1 test
+test sql_sqlite_adapter_binds_templates_helpers_and_transactions ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/crypto_primes.rs (target/debug/deps/crypto_primes-f114cadbcd0f4c60)
+
+running 1 test
+test constrained_prime_generation_matches_node_options ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/crypto_rsa_padding.rs (target/debug/deps/crypto_rsa_padding-ba746c983222be90)
+
+running 1 test
+test rsa_no_padding_supports_public_and_private_transforms ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/crypto_spkac.rs (target/debug/deps/crypto_spkac-039d0fe8185166bf)
+
+running 1 test
+test certificate_parses_and_verifies_openssl_spkac ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/dgram_buffers.rs (target/debug/deps/dgram_buffers-f07f5092b6522505)
+
+running 1 test
+test udp_socket_buffer_sizes_are_native_and_validated ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+     Running tests/dh.rs (target/debug/deps/dh-36b4b70bcb484786)
+
+running 1 test
+test finite_field_dh_matches_node_vector_and_modp14 ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/ecdh.rs (target/debug/deps/ecdh-67282633364e6f6a)
+
+running 2 tests
+test p256_ecdh_matches_node_vector ... ok
+test generated_x25519_keys_exchange_secrets_and_export ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests/ecdsa.rs (target/debug/deps/ecdsa-74c0127667a54184)
+
+running 1 test
+test p256_ecdsa_matches_bun_and_supports_both_encodings ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+
+     Running tests/fs_ownership.rs (target/debug/deps/fs_ownership-a1ed0d50913560b7)
+
+running 1 test
+test ownership_calls_use_real_path_and_descriptor_syscalls ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/http2_client.rs (target/debug/deps/http2_client-e8effa952ae74387)
+
+running 1 test
+test client_multiplexes_requests_against_node_server ... FAILED
+
+failures:
+
+---- client_multiplexes_requests_against_node_server stdout ----
+
+thread 'client_multiplexes_requests_against_node_server' (1688324) panicked at crates/lumen-runtime/tests/http2_client.rs:95:5:
+["body ", "body "]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    client_multiplexes_requests_against_node_server
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+error: test failed, to rerun pass `-p lumen-runtime --test http2_client`
+     Running tests/http2_codec.rs (target/debug/deps/http2_codec-677d1099f347073d)
+
+running 1 test
+test frames_and_hpack_round_trip_and_reject_invalid_input ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/http2_secure_client.rs (target/debug/deps/http2_secure_client-0f97934ab5c945ad)
+
+running 1 test
+test secure_client_negotiates_h2_with_node_server ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/http2_server.rs (target/debug/deps/http2_server-04b6a35e29b22615)
+
+running 2 tests
+test secure_server_negotiates_h2_with_node_client ... ok
+error: test failed, to rerun pass `-p lumen-runtime --test http2_server`
+
+Caused by:
+  process didn't exit successfully: `/home/luna/.t3/worktrees/lumen/t3-8af223a6/target/debug/deps/http2_server-04b6a35e29b22615` (signal: 15, SIGTERM: termination signal)
+     Running tests/net_dgram.rs (target/debug/deps/net_dgram-67aa7ded1a09916e)
+
+running 16 tests
+test net_address_math_still_real ... ok
+test net_unref_does_not_hold_the_loop ... ok
+test net_end_reply_pattern_and_events_order ... ok
+test net_lumen_client_against_std_server ... ok
+test net_econnrefused_and_eaddrinuse ... ok
+test net_std_client_against_lumen_server ... ok
+test net_loopback_echo_and_half_close ... ok
+test net_unix_path_client_writes_to_std_peer ... ok
+test net_unix_path_accept_and_cleanup ... ok
+test net_allow_half_open_keeps_write_side ... ok
+test net_binary_integrity_64k ... ok
+test dgram_connected_mode_and_offsets ... ok
+test dgram_udp6_and_eaddrinuse ... ok
+test dgram_against_std_udp_socket ... ok
+test dgram_loopback_echo_with_rinfo ... ok
+test dgram_errors_and_option_paths ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+
+     Running tests/password.rs (target/debug/deps/password-e0da8505b2a0df4d)
+
+running 1 test
+test bun_password_sync_and_async ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/repl.rs (target/debug/deps/repl-22f778f097996574)
+
+running 1 test
+test repl_evaluates_streamed_commands_and_multiline_input ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/stream_semantics.rs (target/debug/deps/stream_semantics-f15d7dd8bd333600)
+
+running 1 test
+test streams_account_for_exact_reads_backpressure_and_corking ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/tls_server.rs (target/debug/deps/tls_server-93bc59d0b192349e)
+
+running 2 tests
+test tls_server_accepts_verified_client_and_exchanges_data ... ok
+test tls_client_upgrades_a_paused_tcp_socket ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/tty.rs (target/debug/deps/tty-59f1c689c206cee9)
+
+running 1 test
+test tty_streams_wrap_process_io_without_claiming_terminal_support ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/typescript_strip.rs (target/debug/deps/typescript_strip-1274bf32e43c6b8b)
+
+running 1 test
+test strips_erasable_types_into_runnable_javascript ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/wasi.rs (target/debug/deps/wasi-829bf4de2050cb33)
+
+running 2 tests
+test preview1_imports_read_and_write_guest_memory ... ok
+test preview1_preopens_confine_and_access_files ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/worker_threads.rs (target/debug/deps/worker_threads-34723b22a01796a0)
+
+running 1 test
+test worker_threads_exchange_structured_messages ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/x509.rs (target/debug/deps/x509-c115d821561ad777)
+
+running 1 test
+test x509_parses_and_verifies_openssl_certificate ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/zstd.rs (target/debug/deps/zstd-123f90f926ace427)
+
+running 1 test
+test node_and_bun_zstd_surfaces ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+   Doc-tests lumen_runtime
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: 2 targets failed:
+    `-p lumen-runtime --test http2_client`
+    `-p lumen-runtime --test http2_server`

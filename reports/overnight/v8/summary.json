@@ -1,0 +1,63 @@
+{
+  "results": [
+    {
+      "name": "richards",
+      "lumen": 633,
+      "v8": 56356,
+      "allPassed": true,
+      "ratio": 89.03001579778831
+    },
+    {
+      "name": "deltablue",
+      "lumen": 643,
+      "v8": 130021,
+      "allPassed": true,
+      "ratio": 202.2099533437014
+    },
+    {
+      "name": "crypto",
+      "lumen": 2144,
+      "v8": 55682,
+      "allPassed": true,
+      "ratio": 25.97108208955224
+    },
+    {
+      "name": "raytrace",
+      "lumen": 2312,
+      "v8": 91463,
+      "allPassed": true,
+      "ratio": 39.56012110726643
+    },
+    {
+      "name": "earley-boyer",
+      "lumen": 791,
+      "v8": 102410,
+      "allPassed": true,
+      "ratio": 129.46902654867256
+    },
+    {
+      "name": "regexp",
+      "lumen": 282,
+      "v8": 12625,
+      "allPassed": true,
+      "ratio": 44.769503546099294
+    },
+    {
+      "name": "splay",
+      "lumen": 2361,
+      "v8": 38553,
+      "allPassed": true,
+      "ratio": 16.32909783989835
+    },
+    {
+      "name": "navier-stokes",
+      "lumen": 2964,
+      "v8": 57225,
+      "allPassed": true,
+      "ratio": 19.30668016194332
+    }
+  ],
+  "geometricGap": 49.10357066870462,
+  "passed": true,
+  "within2x": false
+}
