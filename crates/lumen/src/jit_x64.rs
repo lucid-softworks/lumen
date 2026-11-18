@@ -5,11 +5,10 @@
 //! can then be ported without duplicating runtime semantics or compromising deoptimization.
 
 use super::{
-    sys, JitCode, COND_PEEK_NOT_NULLISH, COND_PEEK_TRUTHY, COND_POP_TRUTHY, H_CALL, H_COND, H_EXEC,
-    H_GET_PROP, H_INLINE_CLOSURE, H_NEW, H_POP_HANDLER, H_PUSH_HANDLER, H_RETURN, H_SET_PROP,
-    H_UNWIND,
+    sys, JitCode, COND_PEEK_TRUTHY, COND_POP_TRUTHY, H_CALL, H_COND, H_EXEC, H_GET_PROP,
+    H_INLINE_CLOSURE, H_NEW, H_POP_HANDLER, H_PUSH_HANDLER, H_RETURN, H_SET_PROP, H_UNWIND,
 };
-use crate::bytecode::{Chunk, Op};
+use crate::bytecode::{Chunk, Op, UpdKind};
 
 #[derive(Clone, Copy)]
 enum PropRecv {
@@ -204,6 +203,56 @@ impl Asm {
         self.bytes(&[0xf2, 0x41, 0x0f, 0x11, 0x85]);
         self.bytes(&(-24i32).to_le_bytes());
         self.add_sp(-16);
+    }
+    /// Leave a truthiness flag in rdx; numeric/boolean/nullish operands need no helper.
+    /// Refcounted values retain the helper's destructor and [[IsHTMLDDA]] handling.
+    fn truthy(&mut self, pop: bool) {
+        let boolean = self.label();
+        let number = self.label();
+        let falsy = self.label();
+        let commit = self.label();
+        let slow = self.label();
+        let done = self.label();
+        self.load_byte_r13(-16);
+        self.bytes(&[0x83, 0xf8, 3]);
+        self.jcc(0x84, boolean);
+        self.bytes(&[0x83, 0xf8, 4]);
+        self.jcc(0x84, number);
+        self.bytes(&[0x83, 0xf8, 2]);
+        self.jcc(0x86, falsy);
+        self.jmp(slow);
+        self.bind(boolean);
+        self.load_byte_r13(-15); // Bool payload is the byte following its tag.
+        self.bytes(&[0x89, 0xc2]); // edx=eax
+        self.jmp(commit);
+        self.bind(number);
+        self.bytes(&[0xf2, 0x41, 0x0f, 0x10, 0x85]);
+        self.bytes(&(-8i32).to_le_bytes()); // xmm0=number
+        self.bytes(&[
+            0x66, 0x0f, 0xef, 0xc9, // pxor xmm1,xmm1
+            0x66, 0x0f, 0x2e, 0xc1, // ucomisd xmm0,xmm1
+            0x0f, 0x95, 0xc2, // setne dl (both zero and NaN have ZF=1)
+            0x0f, 0xb6, 0xd2, // movzx edx,dl
+        ]);
+        self.jmp(commit);
+        self.bind(falsy);
+        self.bytes(&[0x31, 0xd2]);
+        self.bind(commit);
+        if pop {
+            self.add_sp(-16);
+        }
+        self.jmp(done);
+        self.bind(slow);
+        self.call_helper_pair(
+            H_COND,
+            if pop {
+                COND_POP_TRUTHY
+            } else {
+                COND_PEEK_TRUTHY
+            },
+        );
+        self.bytes(&[0x49, 0x89, 0xc5]); // r13=returned sp
+        self.bind(done);
     }
     fn helper_spflag(&mut self, helper: usize, imm: u32, unwind: usize) {
         self.call_helper_pair(helper, imm);
@@ -518,6 +567,83 @@ pub(super) fn compile(
                 a.helper_spflag(H_EXEC, pc as u32, unwind);
                 a.bind(exit);
             }
+            Op::Add | Op::Sub | Op::Mul | Op::Div => {
+                let slow = a.label();
+                let done = a.label();
+                a.cmp_byte_r13(-32, 4);
+                a.jcc(0x85, slow);
+                a.cmp_byte_r13(-16, 4);
+                a.jcc(0x85, slow);
+                a.bytes(&[0xf2, 0x41, 0x0f, 0x10, 0x85]);
+                a.bytes(&(-24i32).to_le_bytes()); // xmm0=lhs
+                let opcode = match op {
+                    Op::Add => 0x58,
+                    Op::Sub => 0x5c,
+                    Op::Mul => 0x59,
+                    _ => 0x5e,
+                };
+                a.bytes(&[0xf2, 0x41, 0x0f, opcode, 0x85]);
+                a.bytes(&(-8i32).to_le_bytes()); // xmm0 op=rhs
+                a.bytes(&[0xf2, 0x41, 0x0f, 0x11, 0x85]);
+                a.bytes(&(-24i32).to_le_bytes()); // keep lhs Number tag
+                a.add_sp(-16);
+                a.jmp(done);
+                a.bind(slow);
+                a.helper_spflag(H_EXEC, pc as u32, unwind);
+                a.bind(done);
+            }
+            Op::Neg | Op::Plus => {
+                let slow = a.label();
+                let done = a.label();
+                a.cmp_byte_r13(-16, 4);
+                a.jcc(0x85, slow);
+                if matches!(op, Op::Neg) {
+                    a.bytes(&[0x48, 0xb8]);
+                    a.bytes(&(1u64 << 63).to_le_bytes());
+                    a.bytes(&[0x49, 0x31, 0x85]); // xor payload sign bit
+                    a.bytes(&(-8i32).to_le_bytes());
+                }
+                a.jmp(done);
+                a.bind(slow);
+                a.helper_spflag(H_EXEC, pc as u32, unwind);
+                a.bind(done);
+            }
+            Op::UpdateLocal(slot, kind) => {
+                let slow = a.label();
+                let done = a.label();
+                let off = i32::from(*slot) * 16;
+                a.load_byte_r15(off);
+                a.bytes(&[0x83, 0xf8, 4]);
+                a.jcc(0x85, slow); // TDZ, BigInt and coercion stay checked.
+                if matches!(kind, UpdKind::PostInc | UpdKind::PostDec) {
+                    a.load_pair_r15(off);
+                    a.store_pair_r13(0);
+                    a.add_sp(16);
+                }
+                a.bytes(&[0xf2, 0x41, 0x0f, 0x10, 0x87]);
+                a.bytes(&(off + 8).to_le_bytes()); // xmm0=old
+                a.bytes(&[0xb8, 1, 0, 0, 0, 0xf2, 0x0f, 0x2a, 0xc8]); // xmm1=1
+                a.bytes(&[
+                    0xf2,
+                    0x0f,
+                    match kind {
+                        UpdKind::PreInc | UpdKind::PostInc | UpdKind::IncDiscard => 0x58,
+                        _ => 0x5c,
+                    },
+                    0xc1,
+                ]); // addsd/subsd xmm0,xmm1
+                a.bytes(&[0xf2, 0x41, 0x0f, 0x11, 0x87]);
+                a.bytes(&(off + 8).to_le_bytes());
+                if matches!(kind, UpdKind::PreInc | UpdKind::PreDec) {
+                    a.load_pair_r15(off);
+                    a.store_pair_r13(0);
+                    a.add_sp(16);
+                }
+                a.jmp(done);
+                a.bind(slow);
+                a.helper_spflag(H_EXEC, pc as u32, unwind);
+                a.bind(done);
+            }
             Op::EqEq | Op::StrictEq | Op::NotEq | Op::StrictNotEq => {
                 let slow = a.label();
                 let done = a.label();
@@ -579,13 +705,13 @@ pub(super) fn compile(
             }
             Op::Jump(target) => a.jmp(pcs[*target as usize]),
             Op::JumpIfFalse(target) => {
-                a.call_helper_pair(H_COND, COND_POP_TRUTHY);
-                a.bytes(&[0x49, 0x89, 0xc5, 0x48, 0x85, 0xd2]);
+                a.truthy(true);
+                a.bytes(&[0x48, 0x85, 0xd2]);
                 a.jcc(0x84, pcs[*target as usize]);
             }
             Op::JumpIfFalsePeek(target) | Op::JumpIfTruePeek(target) => {
-                a.call_helper_pair(H_COND, COND_PEEK_TRUTHY);
-                a.bytes(&[0x49, 0x89, 0xc5, 0x48, 0x85, 0xd2]);
+                a.truthy(false);
+                a.bytes(&[0x48, 0x85, 0xd2]);
                 a.jcc(
                     if matches!(op, Op::JumpIfFalsePeek(_)) {
                         0x84
@@ -596,9 +722,12 @@ pub(super) fn compile(
                 );
             }
             Op::JumpIfNotNullishPeek(target) => {
-                a.call_helper_pair(H_COND, COND_PEEK_NOT_NULLISH);
-                a.bytes(&[0x49, 0x89, 0xc5, 0x48, 0x85, 0xd2]);
+                let nullish = a.label();
+                a.cmp_byte_r13(-16, 0); // Undefined
+                a.jcc(0x84, nullish);
+                a.cmp_byte_r13(-16, 2); // Null
                 a.jcc(0x85, pcs[*target as usize]);
+                a.bind(nullish);
             }
             Op::InlineGuard(_t, target) => {
                 // The x64 backend keeps the wide Value ABI and uses the checked helper for
