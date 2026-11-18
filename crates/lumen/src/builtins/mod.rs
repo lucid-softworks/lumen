@@ -4711,6 +4711,7 @@ pub(crate) fn nf_array_push(i: &mut Interp, this: Value, args: &[Value]) -> Resu
     // whose tail is exactly the dense frontier appends in place — no key strings, no
     // existence scans, no observable coercions (a whole-number own `length` needs none).
     if matches!(o.borrow().exotic, Exotic::Array)
+        && o.borrow().extensible
         && i.ordinary_get_ptr(Rc::as_ptr(&o) as usize)
         && i.array_append_unshadowed(&o)
     {
