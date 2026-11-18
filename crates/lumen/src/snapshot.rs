@@ -178,12 +178,14 @@ impl<'a> Reader<'a> {
 
 /// Re-intern an operator string to the `&'static str` the parser would have used.
 fn intern_op(s: &str) -> R<&'static str> {
-    KEYWORDS
-        .iter()
-        .chain(PUNCTUATORS.iter())
-        .find(|k| **k == s)
-        .copied()
-        .ok_or_else(|| format!("snapshot: unknown operator {s:?}"))
+    let found = if s.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) {
+        KEYWORDS.binary_search(&s).ok().map(|index| KEYWORDS[index])
+    } else {
+        // Almost every decoded operator is punctuation. Avoid scanning all keywords
+        // before looking at the short punctuation table on every AST expression.
+        PUNCTUATORS.iter().find(|&&op| op == s).copied()
+    };
+    found.ok_or_else(|| format!("snapshot: unknown operator {s:?}"))
 }
 
 // ---- public API -------------------------------------------------------------------------------
@@ -1439,6 +1441,16 @@ fn dec_declkind(r: &mut Reader) -> R<DeclKind> {
 #[cfg(test)]
 mod tests {
     use super::{decode, encode, Stmt, Writer, MAGIC, VERSION};
+
+    #[test]
+    fn every_lexer_operator_can_be_reinterned() {
+        for &op in super::KEYWORDS.iter().chain(super::PUNCTUATORS) {
+            assert_eq!(super::intern_op(op).unwrap(), op);
+        }
+        for invalid in ["", "unknownKeyword", "@@@@"] {
+            assert!(super::intern_op(invalid).is_err());
+        }
+    }
 
     /// `encode` and `decode` must be exact inverses: re-encoding a decoded tree reproduces the
     /// bytes. This catches every tag/field-order asymmetry (a *dropped* field is caught instead
