@@ -2080,15 +2080,20 @@ fn esm_imports_node_builtins_named_and_default() {
         import { readFileSync, writeFileSync } from "node:fs";
         import path, { join } from "node:path";
         import os from "os";
+        import processDefault, { env, argv, platform } from "node:process";
         console.log(typeof readFileSync, typeof writeFileSync);
         console.log(path.basename("/a/b.js"), join("x", "y"));
         console.log(typeof os.platform());
+        console.log(env === processDefault.env, argv === processDefault.argv, platform === processDefault.platform);
         "#,
     )
     .unwrap();
     let (mut rt, out, _err) = test_runtime();
     rt.run_module(&entry.to_string_lossy()).expect("runs");
-    assert_eq!(out.lines(), ["function function", "b.js x/y", "string"]);
+    assert_eq!(
+        out.lines(),
+        ["function function", "b.js x/y", "string", "true true true"]
+    );
 }
 
 #[test]

@@ -652,8 +652,8 @@ __builtins.set("node:module", Module);
 globalThis.__runMain = runMain;
 
 // --- ESM interop: synthetic re-export modules for the builtins ---
-// The runtime's module loader (Rust) can't enumerate a builtin's keys, so we precompute one
-// ESM source per builtin here — where Object.keys works — and the loader ferries the strings.
+// Capture enumerable export names while the builtins are assembled. The runtime loader
+// generates synthetic module source without executing a JS loop for every exported key.
 globalThis.__esmBuiltin = (name) => __builtins.get(name);
 
 // `process` is populated (env/argv/…) by the runtime *after* this glue runs, so enumerating its
@@ -666,18 +666,6 @@ const PROCESS_EXPORTS = [
   "memoryUsage", "uptime", "features", "release", "config", "kill", "umask",
   "allowedNodeEnvironmentFlags", "setSourceMapsEnabled",
 ];
-
-function makeBuiltinEsmSource(name) {
-  const m = __builtins.get(name);
-  let src = `const __m = globalThis.__esmBuiltin(${JSON.stringify(name)});\nexport default __m;\n`;
-  const keys = name === "process" ? PROCESS_EXPORTS : m && (typeof m === "object" || typeof m === "function") ? Object.keys(m) : [];
-  for (const k of keys) {
-    if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(k) && k !== "default") {
-      src += `export const ${k} = __m[${JSON.stringify(k)}];\n`;
-    }
-  }
-  return src;
-}
 
 // The clean builtin base names (skip the "node:module" alias key). Order is cosmetic here.
 const __BUILTIN_NAMES = [
@@ -693,10 +681,10 @@ const __BUILTIN_NAMES = [
   "diagnostics_channel", "domain", "trace_events",
   "vm", "repl", "cluster", "dgram", "wasi",
 ];
-const __esmBuiltinSources = {};
+const __esmBuiltinExports = {};
 for (const name of __BUILTIN_NAMES) {
-  const source = makeBuiltinEsmSource(name);
-  __esmBuiltinSources["node:" + name] = source;
+  const m = __builtins.get(name);
+  __esmBuiltinExports["node:" + name] = name === "process" ? PROCESS_EXPORTS : m && (typeof m === "object" || typeof m === "function") ? Object.keys(m) : [];
 }
-globalThis.__esmBuiltinSources = __esmBuiltinSources;
+globalThis.__esmBuiltinExports = __esmBuiltinExports;
 globalThis.__builtinNames = __BUILTIN_NAMES.join(",");
