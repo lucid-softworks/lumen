@@ -1909,7 +1909,8 @@ fn compile_inner(
     // Body facts the scanner already knows: `new.target` is an observation channel into the
     // activation that slots do not provide; `arguments` in an arrow is a free variable
     // we do not model. Parameterless synchronous ordinary functions can materialize an unmapped
-    // arguments object into a dedicated slot (the common variadic-helper shape).
+    // arguments object into a dedicated slot when it is not captured (the common
+    // variadic-helper shape).
     let scan = func.scan_flags();
     if scan & SCAN_NEW_TARGET != 0 {
         log_bail("fn", "new.target");
@@ -1952,6 +1953,14 @@ fn compile_inner(
         );
         return None;
     };
+
+    // The dedicated arguments slot is invisible to closures resolving through the scope
+    // chain. Keep captured arguments in the interpreter until we can home the binding in
+    // the activation, including shared writes and hoisting interactions.
+    if uses_arguments && captured.contains("arguments") {
+        log_bail("fn", "captured arguments");
+        return None;
+    }
 
     let mut c = Compiler {
         // Arrows forward the enclosing binding through their scope chain. They must not
