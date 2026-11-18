@@ -4,6 +4,7 @@ name: Release
 # lumen in release mode for each supported platform and publishes a GitHub release with the binaries
 # attached, named by target triple: lumen-<target-triple> (the bare engine shell) and
 # lumen-cli-<target-triple> (the Node/Deno-style runtime users run programs with).
+# Windows ships only the engine; lumen-cli depends on the Unix-only TLS backend.
 #
 # Also dispatchable at a tag ref: tags created with the default GITHUB_TOKEN (release-plz's) do not
 # fire `push` events, so release-plz.yml dispatches this workflow explicitly after tagging.
@@ -51,15 +52,18 @@ jobs:
           max-size: '2GiB'
           pr-comment: false
       - run: cargo build --release -p lumen --bin lumen
-      - run: cargo build --release -p lumen-cli --bin lumen-cli
+      - if: runner.os != 'Windows'
+        run: cargo build --release -p lumen-cli --bin lumen-cli
       - run: cp target/release/lumen${{ matrix.ext }} lumen-${{ matrix.target }}${{ matrix.ext }}
-      - run: cp target/release/lumen-cli${{ matrix.ext }} lumen-cli-${{ matrix.target }}${{ matrix.ext }}
+      - if: runner.os != 'Windows'
+        run: cp target/release/lumen-cli${{ matrix.ext }} lumen-cli-${{ matrix.target }}${{ matrix.ext }}
       - uses: actions/upload-artifact@v4
         with:
           name: lumen-${{ matrix.target }}
           path: lumen-${{ matrix.target }}${{ matrix.ext }}
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
+        if: runner.os != 'Windows'
         with:
           name: lumen-cli-${{ matrix.target }}
           path: lumen-cli-${{ matrix.target }}${{ matrix.ext }}
