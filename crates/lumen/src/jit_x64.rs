@@ -463,6 +463,83 @@ fn emit_prop_value(
     true
 }
 
+/// Read a known numeric dense mirror without boxing the receiver or calling a helper.
+/// Holes, non-numeric elements, accessors and exotic receivers keep the checked path.
+fn emit_elem_local_number(
+    a: &mut Asm,
+    layout: &crate::value::JitLayout,
+    slot: u16,
+    slow: usize,
+) -> bool {
+    let offsets = [
+        layout.obj_from_rc,
+        layout.obj_exotic,
+        layout.obj_ic_plain,
+        layout.obj_props + layout.props_mirror_flags,
+        layout.obj_props + layout.props_elems,
+        layout.dense_mirror + layout.vec_ptr_off,
+        layout.dense_mirror + layout.vec_len_off,
+    ];
+    if !layout.valid || offsets.iter().any(|&off| off > i32::MAX as usize) {
+        return false;
+    }
+    let [rcv, exotic, plain, flags, elems, mirror_ptr, mirror_len] = offsets.map(|v| v as i32);
+    a.cmp_byte_r13(-16, 4);
+    a.jcc(0x85, slow);
+    let off = i32::from(slot) * 16;
+    a.load_byte_r15(off);
+    a.bytes(&[0x83, 0xf8, 8]);
+    a.jcc(0x85, slow);
+    // Convert exactly to a canonical uint32 array index (0..2^32-2). Negative zero is 0.
+    a.bytes(&[0xf2, 0x49, 0x0f, 0x2c, 0x85]);
+    a.bytes(&(-8i32).to_le_bytes());
+    a.bytes(&[0xb9]);
+    a.bytes(&(u32::MAX - 1).to_le_bytes());
+    a.bytes(&[0x48, 0x39, 0xc8]);
+    a.jcc(0x87, slow);
+    a.bytes(&[0xf2, 0x48, 0x0f, 0x2a, 0xc0]); // cvtsi2sd xmm0,rax
+    a.bytes(&[0x66, 0x41, 0x0f, 0x2e, 0x85]);
+    a.bytes(&(-8i32).to_le_bytes());
+    a.jcc(0x85, slow);
+    a.jcc(0x8a, slow);
+    a.bytes(&[0x4d, 0x8b, 0x97]);
+    a.bytes(&(off + 8).to_le_bytes()); // receiver in r10
+    a.bytes(&[0x4d, 0x89, 0xd3, 0x49, 0x81, 0xc3]);
+    a.bytes(&rcv.to_le_bytes()); // object in r11
+    a.bytes(&[0x41, 0x0f, 0xb6, 0x8b]);
+    a.bytes(&exotic.to_le_bytes());
+    let plain_exotic = a.label();
+    a.bytes(&[0x83, 0xf9, layout.exotic_none_tag]);
+    a.jcc(0x84, plain_exotic);
+    a.bytes(&[0x83, 0xf9, layout.exotic_array_tag]);
+    a.jcc(0x85, slow);
+    a.bind(plain_exotic);
+    a.bytes(&[0x41, 0x80, 0xbb]);
+    a.bytes(&plain.to_le_bytes());
+    a.bytes(&[0]);
+    a.jcc(0x84, slow);
+    let mask = crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES;
+    a.bytes(&[0x41, 0x0f, 0xb6, 0x8b]);
+    a.bytes(&flags.to_le_bytes());
+    a.bytes(&[0x83, 0xe1, mask, 0x83, 0xf9, mask]);
+    a.jcc(0x85, slow);
+    a.bytes(&[0x49, 0x8b, 0x93]);
+    a.bytes(&elems.to_le_bytes());
+    a.bytes(&[0x48, 0x85, 0xd2]);
+    a.jcc(0x84, slow);
+    a.bytes(&[0x48, 0x3b, 0x82]);
+    a.bytes(&mirror_len.to_le_bytes());
+    a.jcc(0x83, slow);
+    a.bytes(&[0x48, 0x8b, 0x92]);
+    a.bytes(&mirror_ptr.to_le_bytes());
+    a.bytes(&[0xf2, 0x0f, 0x10, 0x04, 0xc2]); // xmm0=mirror[index]
+    a.bytes(&[0xb8, 4, 0, 0, 0, 0x31, 0xd2]);
+    a.store_pair_r13(-16);
+    a.bytes(&[0xf2, 0x41, 0x0f, 0x11, 0x85]);
+    a.bytes(&(-8i32).to_le_bytes());
+    true
+}
+
 pub(super) fn compile(
     chunk: &Chunk,
     layout: &crate::value::JitLayout,
@@ -836,6 +913,18 @@ pub(super) fn compile(
             }
             Op::New(argc, _) => {
                 a.helper_spflag(H_NEW, pc as u32 | ((*argc as u32) << 16), unwind);
+            }
+            Op::GetElemLocal(slot) => {
+                let slow = a.label();
+                let done = a.label();
+                if emit_elem_local_number(&mut a, layout, *slot, slow) {
+                    a.jmp(done);
+                    a.bind(slow);
+                    a.helper_spflag(H_EXEC, pc as u32, unwind);
+                    a.bind(done);
+                } else {
+                    a.helper_spflag(H_EXEC, pc as u32, unwind);
+                }
             }
             Op::GetPropThis(_, cache) => {
                 let slow = a.label();
