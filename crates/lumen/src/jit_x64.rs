@@ -178,29 +178,37 @@ impl Asm {
         self.store_pair_r13(-32);
         self.add_sp(-16);
     }
-    fn numeric_bitop(&mut self, opcode: u8, slow: usize) {
-        // Accept only exactly representable i32 operands. Fractional/out-of-range/NaN values
-        // retain full ToInt32 semantics through the checked helper.
-        self.bytes(&[0xf2, 0x41, 0x0f, 0x10, 0x85]);
-        self.bytes(&(-24i32).to_le_bytes()); // xmm0=lhs
-        self.bytes(&[0xf2, 0x41, 0x0f, 0x10, 0x8d]);
-        self.bytes(&(-8i32).to_le_bytes()); // xmm1=rhs
-        self.bytes(&[
-            0xf2, 0x0f, 0x2c, 0xc0, // cvttsd2si eax,xmm0
-            0xf2, 0x0f, 0x2a, 0xd0, // cvtsi2sd xmm2,eax
-            0x66, 0x0f, 0x2e, 0xc2, // ucomisd xmm0,xmm2
-        ]);
-        a_jne_or_unordered(self, slow);
-        self.bytes(&[
-            0xf2, 0x0f, 0x2c, 0xc9, // cvttsd2si ecx,xmm1
-            0xf2, 0x0f, 0x2a, 0xd1, // cvtsi2sd xmm2,ecx
-            0x66, 0x0f, 0x2e, 0xca, // ucomisd xmm1,xmm2
-        ]);
-        a_jne_or_unordered(self, slow);
-        self.bytes(&[opcode, 0xc8]); // eax op= ecx
-        self.bytes(&[0xf2, 0x0f, 0x2a, 0xc0]); // cvtsi2sd xmm0,eax
+    /// Truncate a finite Number to i64, then use its low 32 bits for ToInt32/ToUint32.
+    /// cvttsd2si returns i64::MIN on overflow/NaN; that sentinel takes the checked path.
+    /// This also conservatively sends the exactly representable -2^63 to the helper.
+    fn to_int32(&mut self, disp: i32, rhs: bool, slow: usize) {
+        self.bytes(&[0xf2, 0x49, 0x0f, 0x2c, if rhs { 0x8d } else { 0x85 }]); // cvttsd2si rax/rcx,[r13+disp]
+        self.bytes(&disp.to_le_bytes());
+        self.bytes(&[0x49, 0xba]);
+        self.bytes(&(i64::MIN as u64).to_le_bytes()); // r10=invalid conversion sentinel
+        self.bytes(&[0x4c, 0x39, if rhs { 0xd1 } else { 0xd0 }]);
+        self.jcc(0x84, slow);
+    }
+    fn numeric_bitop(&mut self, op: &Op, slow: usize) {
+        self.to_int32(-24, false, slow);
+        self.to_int32(-8, true, slow);
+        match op {
+            Op::BitAnd => self.bytes(&[0x21, 0xc8]),
+            Op::BitOr => self.bytes(&[0x09, 0xc8]),
+            Op::BitXor => self.bytes(&[0x31, 0xc8]),
+            Op::Shl => self.bytes(&[0xd3, 0xe0]),
+            Op::Shr => self.bytes(&[0xd3, 0xf8]),
+            Op::UShr => self.bytes(&[0xd3, 0xe8]),
+            _ => unreachable!(),
+        }
+        if matches!(op, Op::UShr) {
+            // The 32-bit shift zero-extends eax, so the 64-bit signed conversion is uint32.
+            self.bytes(&[0xf2, 0x48, 0x0f, 0x2a, 0xc0]);
+        } else {
+            self.bytes(&[0xf2, 0x0f, 0x2a, 0xc0]);
+        }
         self.bytes(&[0xb8, 4, 0, 0, 0, 0x31, 0xd2]);
-        self.store_pair_r13(-32); // tag plus cleared stale payload
+        self.store_pair_r13(-32);
         self.bytes(&[0xf2, 0x41, 0x0f, 0x11, 0x85]);
         self.bytes(&(-24i32).to_le_bytes());
         self.add_sp(-16);
@@ -270,11 +278,6 @@ impl Asm {
         }
         self.code
     }
-}
-
-fn a_jne_or_unordered(a: &mut Asm, slow: usize) {
-    a.jcc(0x85, slow);
-    a.jcc(0x8a, slow);
 }
 
 /// Compact monomorphic property load. Every cached structural fact is rechecked against
@@ -742,7 +745,7 @@ pub(super) fn compile(
                 a.helper_spflag(H_EXEC, pc as u32, unwind);
                 a.bind(done);
             }
-            Op::BitAnd | Op::BitOr | Op::BitXor => {
+            Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr | Op::UShr => {
                 let slow = a.label();
                 let done = a.label();
                 a.load_byte_r13(-32);
@@ -751,14 +754,21 @@ pub(super) fn compile(
                 a.load_byte_r13(-16);
                 a.bytes(&[0x83, 0xf8, 0x04]);
                 a.jcc(0x85, slow);
-                a.numeric_bitop(
-                    match op {
-                        Op::BitAnd => 0x21,
-                        Op::BitOr => 0x09,
-                        _ => 0x31,
-                    },
-                    slow,
-                );
+                a.numeric_bitop(op, slow);
+                a.jmp(done);
+                a.bind(slow);
+                a.helper_spflag(H_EXEC, pc as u32, unwind);
+                a.bind(done);
+            }
+            Op::BitNot => {
+                let slow = a.label();
+                let done = a.label();
+                a.cmp_byte_r13(-16, 4);
+                a.jcc(0x85, slow);
+                a.to_int32(-8, false, slow);
+                a.bytes(&[0xf7, 0xd0, 0xf2, 0x0f, 0x2a, 0xc0]); // not eax; cvtsi2sd xmm0,eax
+                a.bytes(&[0xf2, 0x41, 0x0f, 0x11, 0x85]);
+                a.bytes(&(-8i32).to_le_bytes());
                 a.jmp(done);
                 a.bind(slow);
                 a.helper_spflag(H_EXEC, pc as u32, unwind);
