@@ -2,7 +2,7 @@
 //! streaming buys nothing) and resolves the classic `/`-is-it-a-regex-or-division ambiguity by
 //! tracking whether the previously emitted token can end an expression.
 
-use crate::token::{Tok, Token, TplPart, KEYWORDS, PUNCTUATORS};
+use crate::token::{punctuator, Tok, Token, TplPart, KEYWORDS};
 
 pub struct LexError {
     pub message: String,
@@ -1093,17 +1093,10 @@ impl<'a> Lexer<'a> {
             self.push(Tok::Punct("?"));
             return Ok(());
         }
-        for p in PUNCTUATORS {
-            // Punctuators are ASCII and cannot contain a newline. Compare the existing char
-            // window directly instead of allocating a short String for every punctuation token.
-            if p.bytes()
-                .enumerate()
-                .all(|(n, b)| self.peek_at(n) == Some(b as char))
-            {
-                self.pos += p.len();
-                self.push(Tok::Punct(p));
-                return Ok(());
-            }
+        if let Some(p) = punctuator(&self.chars[self.pos..]) {
+            self.pos += p.len();
+            self.push(Tok::Punct(p));
+            return Ok(());
         }
         let _ = self.src; // keep field used; byte view reserved for future fast paths
         Err(self.err(format!(
