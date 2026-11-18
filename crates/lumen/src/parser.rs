@@ -3878,7 +3878,11 @@ impl Parser {
                 source: self.src_slice(start, self.prev_end()),
             }
         } else {
-            let expr = self.parse_assign()?;
+            // Concise bodies leave the enclosing formal-parameter context too.
+            let saved_in_params = std::mem::replace(&mut self.in_params, false);
+            let expr = self.parse_assign();
+            self.in_params = saved_in_params;
+            let expr = expr?;
             Function {
                 scan: std::cell::Cell::new(0),
                 hoist: std::cell::OnceCell::new(),

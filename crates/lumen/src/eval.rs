@@ -2811,8 +2811,8 @@ impl Interp {
     fn eval_return_expr(&mut self, e: &Expr, env: &Env) -> Result<TailEval, Abrupt> {
         match e {
             Expr::Call { .. } => {
-                if let Some((f, t, a)) = self.eval_tail_call(e, env)? {
-                    return Ok(TailEval::Tail(f, t, a));
+                if let Some(result) = self.eval_tail_call(e, env)? {
+                    return Ok(result);
                 }
                 Ok(TailEval::Val(self.eval(e, env)?))
             }
@@ -2856,11 +2856,9 @@ impl Interp {
 
     /// If `e` is a plain call usable as a proper tail call, evaluate its callee, `this` and
     /// arguments and return them for the trampoline; `None` falls back to a normal evaluation.
-    fn eval_tail_call(
-        &mut self,
-        e: &Expr,
-        env: &Env,
-    ) -> Result<Option<(Value, Value, Vec<Value>)>, Abrupt> {
+    /// Once a receiver/callee is evaluated, errors and short circuits must complete here so
+    /// falling back cannot repeat observable side effects.
+    fn eval_tail_call(&mut self, e: &Expr, env: &Env) -> Result<Option<TailEval>, Abrupt> {
         let Expr::Call {
             callee,
             args,
@@ -2886,12 +2884,18 @@ impl Interp {
                 }
                 (f, recv.unwrap_or(Value::Undefined))
             }
-            Expr::Member { obj, prop, .. }
-                if !matches!(**obj, Expr::Super) && !prop.starts_with('#') =>
-            {
+            Expr::Member {
+                obj,
+                prop,
+                optional,
+            } if !matches!(**obj, Expr::Super) && !prop.starts_with('#') => {
                 let base = self.eval(obj, env)?;
-                if matches!(base, Value::Undefined | Value::Null) {
-                    return Ok(None);
+                if self.short_circuit {
+                    return Ok(Some(TailEval::Val(Value::Undefined)));
+                }
+                if *optional && matches!(base, Value::Undefined | Value::Null) {
+                    self.short_circuit = true;
+                    return Ok(Some(TailEval::Val(Value::Undefined)));
                 }
                 let f = self.get_member(&base, prop)?;
                 (f, base)
@@ -2900,17 +2904,18 @@ impl Interp {
             c @ Expr::Call { .. } => {
                 let f = self.eval(c, env)?;
                 if self.short_circuit {
-                    return Ok(None);
+                    return Ok(Some(TailEval::Val(Value::Undefined)));
                 }
                 (f, Value::Undefined)
             }
             _ => return Ok(None),
         };
-        if !func.is_callable() {
-            return Ok(None);
-        }
         let argv = self.eval_args(args, env)?;
-        Ok(Some((func, this, argv)))
+        if !func.is_callable() {
+            let desc = describe_callee(callee);
+            return Err(self.throw("TypeError", format!("{desc} is not a function")));
+        }
+        Ok(Some(TailEval::Tail(func, this, argv)))
     }
 
     /// A tagged template in tail position: evaluate the tag and assemble the argument list for
@@ -2927,21 +2932,18 @@ impl Interp {
             Expr::Ident(_) | Expr::Call { .. } => (self.eval(tag, env)?, Value::Undefined),
             Expr::Member { obj, prop, .. } if !matches!(**obj, Expr::Super) => {
                 let base = self.eval(obj, env)?;
-                if matches!(base, Value::Undefined | Value::Null) {
-                    return Ok(None);
-                }
                 let f = self.get_member(&base, prop)?;
                 (f, base)
             }
             _ => return Ok(None),
         };
-        if !func.is_callable() {
-            return Ok(None);
-        }
         let strings = self.template_object(quasis)?;
         let mut argv = vec![strings];
         for s in subs {
             argv.push(self.eval(s, env)?);
+        }
+        if !func.is_callable() {
+            return Err(self.throw("TypeError", "tag is not a function"));
         }
         Ok(Some((func, this, argv)))
     }
