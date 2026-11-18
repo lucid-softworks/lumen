@@ -192,6 +192,12 @@ function makePath(sep, isWin) {
 }
 
 const posix = makePath("/", false);
+// These lexical operations need no JS callbacks. Keep their public wrappers and names
+// while avoiding arrays of path segments and intermediate JS strings on each call.
+Object.assign(posix, {
+  normalize(p) { return __node.pathNormalizePosix(p); },
+  join(...paths) { return __node.pathJoinPosix(...paths); },
+});
 const win32 = makePath("\\", true);
 posix.posix = posix;
 posix.win32 = win32;

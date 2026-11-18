@@ -108,6 +108,69 @@ fn clear_timeout_cancels() {
 }
 
 #[test]
+fn timer_unref_allows_exit_but_ref_restores_liveness() {
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        const timer = setTimeout(() => console.log("fired"), 0);
+        console.log(timer.hasRef(), timer.unref() === timer, timer.hasRef());
+        console.log(require("node:timers").setTimeout === setTimeout);
+    "#,
+    );
+    assert_eq!(out.lines(), ["true true false", "true"]);
+    eval_ok(
+        &mut rt,
+        "console.log(timer.ref() === timer, timer.hasRef());",
+    );
+    assert_eq!(
+        out.lines(),
+        ["true true false", "true", "true true", "fired"]
+    );
+}
+
+#[test]
+fn unref_timer_still_fires_while_other_work_keeps_the_loop_alive() {
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        setTimeout(() => console.log("unref"), 0).unref();
+        setTimeout(() => console.log("ref"), 0);
+    "#,
+    );
+    assert_eq!(out.lines(), ["unref", "ref"]);
+}
+
+#[test]
+fn timer_handles_support_numeric_cancellation_and_survive_clear() {
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        const timer = setInterval(() => console.log("unexpected"), 10);
+        clearTimeout(+timer);
+        console.log(timer.hasRef(), timer.unref().hasRef(), timer.ref().hasRef());
+        const other = require("node:timers").setTimeout(() => console.log("unexpected"), 0);
+        clearInterval(other);
+    "#,
+    );
+    assert_eq!(out.lines(), ["true false true"]);
+}
+
+#[test]
+fn timer_promises_ref_false_does_not_keep_the_loop_alive() {
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        require("node:timers/promises").setTimeout(0, "unexpected", {ref: false}).then(console.log);
+    "#,
+    );
+    assert!(out.lines().is_empty());
+}
+
+#[test]
 fn next_tick_and_set_immediate_run_before_timers() {
     let (mut rt, out, _err) = test_runtime();
     eval_ok(
@@ -1769,6 +1832,30 @@ fn node_buffer() {
 }
 
 #[test]
+fn node_buffer_base64_matches_node() {
+    let (mut rt, out, _err) = test_runtime();
+    // Generated with Node 24.22.2: short tails, padding, junk, URL-safe alphabet,
+    // non-ASCII UTF-16 units and deterministic randomized malformed strings.
+    let source = format!(r#"
+        const cases = {};
+        for (const [input, expected] of cases) {{
+            for (const encoding of ['base64', 'base64url']) {{
+                const b = Buffer.from(input, encoding);
+                if (!Buffer.isBuffer(b) || b.toString('hex') !== expected)
+                    throw new Error(JSON.stringify([input, encoding, expected, b.toString('hex')]));
+            }}
+        }}
+        const source = Buffer.alloc(65539);
+        for (let i=0;i<source.length;i++) source[i]=(i*37)&255;
+        const copy=Buffer.from(source.toString('base64'), 'base64');
+        if (!copy.equals(source)) throw new Error('large base64 round trip');
+        console.log('passed');
+    "#, include_str!("fixtures/buffer-base64.json"));
+    eval_ok(&mut rt, &source);
+    assert_eq!(out.lines(), ["passed"]);
+}
+
+#[test]
 fn node_require_resolution() {
     use std::fs;
     let dir = TempDir::new("require");
@@ -2017,15 +2104,20 @@ fn esm_imports_node_builtins_named_and_default() {
         import { readFileSync, writeFileSync } from "node:fs";
         import path, { join } from "node:path";
         import os from "os";
+        import processDefault, { env, argv, platform } from "node:process";
         console.log(typeof readFileSync, typeof writeFileSync);
         console.log(path.basename("/a/b.js"), join("x", "y"));
         console.log(typeof os.platform());
+        console.log(env === processDefault.env, argv === processDefault.argv, platform === processDefault.platform);
         "#,
     )
     .unwrap();
     let (mut rt, out, _err) = test_runtime();
     rt.run_module(&entry.to_string_lossy()).expect("runs");
-    assert_eq!(out.lines(), ["function function", "b.js x/y", "string"]);
+    assert_eq!(
+        out.lines(),
+        ["function function", "b.js x/y", "string", "true true true"]
+    );
 }
 
 #[test]
@@ -2200,4 +2292,127 @@ fn bun_hash_matches_bun_through_the_glue() {
             "true",
         ]
     );
+}
+
+#[test]
+fn node_compile_cache_statuses_and_source_changes() {
+    let root = std::env::temp_dir().join(format!("lumen-runtime-cache-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(root.clone());
+    let cache = root.join("cache");
+    let module = root.join("sample.cjs");
+    let esm = root.join("sample.mjs");
+    for (round, number) in [42, 42, 43].into_iter().enumerate() {
+        std::fs::write(&module, format!("module.exports={number}")).unwrap();
+        std::fs::write(
+            &esm,
+            format!("export const value={number}; console.log(value)"),
+        )
+        .unwrap();
+        let (mut rt, out, _) = test_runtime();
+        eval_ok(
+            &mut rt,
+            &format!(
+                r#"
+            const m=require('node:module');
+            delete process.env.NODE_DISABLE_COMPILE_CACHE;
+            delete process.env.NODE_COMPILE_CACHE;
+            console.log(m.getCompileCacheDir()===undefined);
+            const first=m.enableCompileCache({{directory:{cache:?},portable:true}});
+            console.log(first.status,Object.getPrototypeOf(first)===Object.prototype);
+            const dir=m.getCompileCacheDir();
+            console.log(typeof dir,dir.startsWith(first.directory));
+            console.log(m.enableCompileCache('ignored').status,m.getCompileCacheDir()===dir);
+            for (const input of [null,1,false,{{directory:1}}]) {{
+                try {{ m.enableCompileCache(input); throw 'accepted bad directory'; }}
+                catch(e) {{ if(e.code!=='ERR_INVALID_ARG_TYPE') throw e; }}
+            }}
+            console.log(m.flushCompileCache()===undefined);
+            console.log(require({module:?}),new Function('return 7')());
+        "#,
+                cache = cache.to_str().unwrap(),
+                module = module.to_str().unwrap()
+            ),
+        );
+        rt.run_module(esm.to_str().unwrap()).unwrap();
+        rt.run_to_completion();
+        assert_eq!(
+            out.lines(),
+            [
+                "true".to_string(),
+                "1 true".into(),
+                "string true".into(),
+                "2 true".into(),
+                "true".into(),
+                format!("{number} 7"),
+                number.to_string()
+            ]
+        );
+        drop(rt);
+        if round == 0 {
+            // The next runtime must recover from broken entries before executing either
+            // CommonJS or ESM; the third sees new source at the same filenames.
+            let version = std::fs::read_dir(&cache)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            for entry in std::fs::read_dir(version).unwrap() {
+                std::fs::write(entry.unwrap().path(), b"broken cache").unwrap();
+            }
+        }
+    }
+    let (mut rt, out, _) = test_runtime();
+    eval_ok(
+        &mut rt,
+        &format!(
+            r#"
+        const m=require('node:module');
+        process.env.NODE_DISABLE_COMPILE_CACHE='1';
+        console.log(m.enableCompileCache({cache:?}).status,m.getCompileCacheDir()===undefined);
+        delete process.env.NODE_DISABLE_COMPILE_CACHE;
+        console.log(m.enableCompileCache({module:?}).status,m.getCompileCacheDir()===undefined);
+    "#,
+            cache = cache.to_str().unwrap(),
+            module = module.to_str().unwrap()
+        ),
+    );
+    assert_eq!(out.lines(), ["3 true", "0 true"]);
+}
+
+#[test]
+fn posix_normalize_and_join_match_node_vectors() {
+    let (mut rt, out, _) = test_runtime();
+    // Expected values generated by Node v24.22.2, including empty/root paths, above-root
+    // traversal, trailing separators, literal backslashes, Unicode and a lone surrogate.
+    eval_ok(
+        &mut rt,
+        concat!(
+            "const pathCases=",
+            include_str!("fixtures/path-posix.json"),
+            r#";
+        const p=require('node:path').posix;
+        const assert=require('node:assert').strict;
+        for(const [input,expected] of pathCases.normalize) assert.equal(p.normalize(input),expected,JSON.stringify(input));
+        for(const [inputs,expected] of pathCases.join) assert.equal(p.join(...inputs),expected,JSON.stringify(inputs));
+        assert.equal(p.join(),'.');
+        assert.equal(p.normalize.name,'normalize');
+        assert.equal(p.join.name,'join');
+        for(const value of [undefined,null,false,1,{},[],Symbol('x')]) {
+            assert.throws(()=>p.normalize(value),{name:'TypeError',code:'ERR_INVALID_ARG_TYPE'});
+            assert.throws(()=>p.join('a',value),{name:'TypeError',code:'ERR_INVALID_ARG_TYPE'});
+        }
+        console.log('ok');
+    "#
+        ),
+    );
+    assert_eq!(out.lines(), ["ok"]);
 }

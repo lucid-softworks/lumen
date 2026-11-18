@@ -37,7 +37,7 @@ pub fn parse_script_eval(
     let mut p = Parser {
         toks: tokens,
         pos: 0,
-        src_chars: Rc::new(src.chars().collect()),
+        source: SourceText::new(src),
         strict,
         depth: 0,
         in_generator: false,
@@ -107,7 +107,7 @@ pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
     let mut p = Parser {
         toks: tokens,
         pos: 0,
-        src_chars: Rc::new(src.chars().collect()),
+        source: SourceText::new(src),
         strict: true,
         depth: 0,
         in_generator: false,
@@ -308,11 +308,40 @@ fn collect_top_decl(stmt: &Stmt, lexical: &mut Vec<String>, vars: &mut Vec<Strin
 /// overflow the native stack on pathologically nested input (test262 has deeply-nested fixtures).
 const MAX_PARSE_DEPTH: u32 = 1200;
 
-struct Parser {
+/// Token offsets count Unicode scalar values. Preserve the original UTF-8 bytes so
+/// function source extraction can copy a slice instead of re-encoding every character.
+/// ASCII needs no offset table at all.
+struct SourceText<'a> {
+    text: &'a str,
+    char_offsets: Option<Vec<usize>>,
+}
+
+impl<'a> SourceText<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            char_offsets: (!text.is_ascii()).then(|| {
+                text.char_indices()
+                    .map(|(offset, _)| offset)
+                    .chain(std::iter::once(text.len()))
+                    .collect()
+            }),
+        }
+    }
+
+    fn slice(&self, start: usize, end: usize) -> Option<&str> {
+        let (start, end) = match &self.char_offsets {
+            Some(offsets) => (*offsets.get(start)?, *offsets.get(end)?),
+            None => (start, end),
+        };
+        self.text.get(start..end)
+    }
+}
+
+struct Parser<'a> {
     toks: Vec<Token>,
     pos: usize,
-    /// The source as chars, for slicing function source text by token offsets.
-    src_chars: Rc<Vec<char>>,
+    source: SourceText<'a>,
     strict: bool,
     depth: u32,
     /// Whether the body currently being parsed is a generator / async function — controls whether
@@ -394,7 +423,7 @@ struct DeclScope {
     fn_boundary: bool,
 }
 
-impl Parser {
+impl Parser<'_> {
     fn cur_start(&self) -> u32 {
         self.toks.get(self.pos).map(|t| t.start).unwrap_or(0)
     }
@@ -407,12 +436,9 @@ impl Parser {
     }
     /// The source text between two char offsets (a function's `toString` view).
     fn src_slice(&self, start: u32, end: u32) -> Option<Rc<str>> {
-        let (s, e) = (start as usize, end as usize);
-        if s <= e && e <= self.src_chars.len() {
-            Some(Rc::from(self.src_chars[s..e].iter().collect::<String>()))
-        } else {
-            None
-        }
+        self.source
+            .slice(start as usize, end as usize)
+            .map(Rc::from)
     }
 
     fn cur(&self) -> &Tok {
@@ -432,7 +458,10 @@ impl Parser {
         matches!(self.cur(), Tok::Eof)
     }
     fn advance(&mut self) -> Tok {
-        let t = self.toks[self.pos].kind.clone();
+        // Parsing only moves forward; lookahead inspects unconsumed tokens. Move owned
+        // identifier/string/template data into the AST instead of cloning it here.
+        // Keep token offsets and flags intact for previous-token source bookkeeping.
+        let t = std::mem::replace(&mut self.toks[self.pos].kind, Tok::Eof);
         if self.pos + 1 < self.toks.len() {
             self.pos += 1;
         }
@@ -2827,7 +2856,7 @@ impl Parser {
                     let mut sub = Parser {
                         toks: tokens,
                         pos: 0,
-                        src_chars: Rc::new(src.chars().collect()),
+                        source: SourceText::new(&src),
                         strict: self.strict,
                         depth: self.depth,
                         in_generator: self.in_generator,
@@ -2898,7 +2927,7 @@ impl Parser {
                     let mut sub = Parser {
                         toks: tokens,
                         pos: 0,
-                        src_chars: Rc::new(src.chars().collect()),
+                        source: SourceText::new(&src),
                         strict: self.strict,
                         depth: self.depth,
                         in_generator: self.in_generator,

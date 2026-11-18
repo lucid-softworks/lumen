@@ -5,11 +5,11 @@
 //! can then be ported without duplicating runtime semantics or compromising deoptimization.
 
 use super::{
-    sys, JitCode, COND_PEEK_NOT_NULLISH, COND_PEEK_TRUTHY, COND_POP_TRUTHY, H_CALL, H_COND, H_EXEC,
+    sys, JitCode, COND_PEEK_TRUTHY, COND_POP_TRUTHY, H_ADD_STRINGS, H_CALL, H_COND, H_EXEC,
     H_GET_PROP, H_INLINE_CLOSURE, H_NEW, H_POP_HANDLER, H_PUSH_HANDLER, H_RETURN, H_SET_PROP,
     H_UNWIND,
 };
-use crate::bytecode::{Chunk, Op};
+use crate::bytecode::{Chunk, Op, UpdKind};
 
 #[derive(Clone, Copy)]
 enum PropRecv {
@@ -178,32 +178,90 @@ impl Asm {
         self.store_pair_r13(-32);
         self.add_sp(-16);
     }
-    fn numeric_bitop(&mut self, opcode: u8, slow: usize) {
-        // Accept only exactly representable i32 operands. Fractional/out-of-range/NaN values
-        // retain full ToInt32 semantics through the checked helper.
-        self.bytes(&[0xf2, 0x41, 0x0f, 0x10, 0x85]);
-        self.bytes(&(-24i32).to_le_bytes()); // xmm0=lhs
-        self.bytes(&[0xf2, 0x41, 0x0f, 0x10, 0x8d]);
-        self.bytes(&(-8i32).to_le_bytes()); // xmm1=rhs
-        self.bytes(&[
-            0xf2, 0x0f, 0x2c, 0xc0, // cvttsd2si eax,xmm0
-            0xf2, 0x0f, 0x2a, 0xd0, // cvtsi2sd xmm2,eax
-            0x66, 0x0f, 0x2e, 0xc2, // ucomisd xmm0,xmm2
-        ]);
-        a_jne_or_unordered(self, slow);
-        self.bytes(&[
-            0xf2, 0x0f, 0x2c, 0xc9, // cvttsd2si ecx,xmm1
-            0xf2, 0x0f, 0x2a, 0xd1, // cvtsi2sd xmm2,ecx
-            0x66, 0x0f, 0x2e, 0xca, // ucomisd xmm1,xmm2
-        ]);
-        a_jne_or_unordered(self, slow);
-        self.bytes(&[opcode, 0xc8]); // eax op= ecx
-        self.bytes(&[0xf2, 0x0f, 0x2a, 0xc0]); // cvtsi2sd xmm0,eax
+    /// Truncate a finite Number to i64, then use its low 32 bits for ToInt32/ToUint32.
+    /// cvttsd2si returns i64::MIN on overflow/NaN; that sentinel takes the checked path.
+    /// This also conservatively sends the exactly representable -2^63 to the helper.
+    fn to_int32(&mut self, disp: i32, rhs: bool, slow: usize) {
+        self.bytes(&[0xf2, 0x49, 0x0f, 0x2c, if rhs { 0x8d } else { 0x85 }]); // cvttsd2si rax/rcx,[r13+disp]
+        self.bytes(&disp.to_le_bytes());
+        self.bytes(&[0x49, 0xba]);
+        self.bytes(&(i64::MIN as u64).to_le_bytes()); // r10=invalid conversion sentinel
+        self.bytes(&[0x4c, 0x39, if rhs { 0xd1 } else { 0xd0 }]);
+        self.jcc(0x84, slow);
+    }
+    fn numeric_bitop(&mut self, op: &Op, slow: usize) {
+        self.to_int32(-24, false, slow);
+        self.to_int32(-8, true, slow);
+        match op {
+            Op::BitAnd => self.bytes(&[0x21, 0xc8]),
+            Op::BitOr => self.bytes(&[0x09, 0xc8]),
+            Op::BitXor => self.bytes(&[0x31, 0xc8]),
+            Op::Shl => self.bytes(&[0xd3, 0xe0]),
+            Op::Shr => self.bytes(&[0xd3, 0xf8]),
+            Op::UShr => self.bytes(&[0xd3, 0xe8]),
+            _ => unreachable!(),
+        }
+        if matches!(op, Op::UShr) {
+            // The 32-bit shift zero-extends eax, so the 64-bit signed conversion is uint32.
+            self.bytes(&[0xf2, 0x48, 0x0f, 0x2a, 0xc0]);
+        } else {
+            self.bytes(&[0xf2, 0x0f, 0x2a, 0xc0]);
+        }
         self.bytes(&[0xb8, 4, 0, 0, 0, 0x31, 0xd2]);
-        self.store_pair_r13(-32); // tag plus cleared stale payload
+        self.store_pair_r13(-32);
         self.bytes(&[0xf2, 0x41, 0x0f, 0x11, 0x85]);
         self.bytes(&(-24i32).to_le_bytes());
         self.add_sp(-16);
+    }
+    /// Leave a truthiness flag in rdx; numeric/boolean/nullish operands need no helper.
+    /// Refcounted values retain the helper's destructor and [[IsHTMLDDA]] handling.
+    fn truthy(&mut self, pop: bool) {
+        let boolean = self.label();
+        let number = self.label();
+        let falsy = self.label();
+        let commit = self.label();
+        let slow = self.label();
+        let done = self.label();
+        self.load_byte_r13(-16);
+        self.bytes(&[0x83, 0xf8, 3]);
+        self.jcc(0x84, boolean);
+        self.bytes(&[0x83, 0xf8, 4]);
+        self.jcc(0x84, number);
+        self.bytes(&[0x83, 0xf8, 2]);
+        self.jcc(0x86, falsy);
+        self.jmp(slow);
+        self.bind(boolean);
+        self.load_byte_r13(-15); // Bool payload is the byte following its tag.
+        self.bytes(&[0x89, 0xc2]); // edx=eax
+        self.jmp(commit);
+        self.bind(number);
+        self.bytes(&[0xf2, 0x41, 0x0f, 0x10, 0x85]);
+        self.bytes(&(-8i32).to_le_bytes()); // xmm0=number
+        self.bytes(&[
+            0x66, 0x0f, 0xef, 0xc9, // pxor xmm1,xmm1
+            0x66, 0x0f, 0x2e, 0xc1, // ucomisd xmm0,xmm1
+            0x0f, 0x95, 0xc2, // setne dl (both zero and NaN have ZF=1)
+            0x0f, 0xb6, 0xd2, // movzx edx,dl
+        ]);
+        self.jmp(commit);
+        self.bind(falsy);
+        self.bytes(&[0x31, 0xd2]);
+        self.bind(commit);
+        if pop {
+            self.add_sp(-16);
+        }
+        self.jmp(done);
+        self.bind(slow);
+        self.call_helper_pair(
+            H_COND,
+            if pop {
+                COND_POP_TRUTHY
+            } else {
+                COND_PEEK_TRUTHY
+            },
+        );
+        self.bytes(&[0x49, 0x89, 0xc5]); // r13=returned sp
+        self.bind(done);
     }
     fn helper_spflag(&mut self, helper: usize, imm: u32, unwind: usize) {
         self.call_helper_pair(helper, imm);
@@ -222,14 +280,9 @@ impl Asm {
     }
 }
 
-fn a_jne_or_unordered(a: &mut Asm, slow: usize) {
-    a.jcc(0x85, slow);
-    a.jcc(0x8a, slow);
-}
-
-/// Compact monomorphic property-number load. Every cached structural fact is rechecked against
+/// Compact monomorphic property load. Every cached structural fact is rechecked against
 /// the live object graph; a miss reaches H_GET_PROP before stack or refcount state changes.
-fn emit_prop_num(
+fn emit_prop_value(
     a: &mut Asm,
     layout: &crate::value::JitLayout,
     st: crate::bytecode::IcState,
@@ -260,6 +313,14 @@ fn emit_prop_num(
     };
     let Ok(entries) = i32::try_from(layout.obj_props + layout.props_entries + layout.vec_ptr_off)
     else {
+        return false;
+    };
+    let Ok(entries_len) =
+        i32::try_from(layout.obj_props + layout.props_entries + layout.vec_len_off)
+    else {
+        return false;
+    };
+    let Ok(strong) = i32::try_from(layout.rc_strong_off) else {
         return false;
     };
     let Some(entry_base) = layout.entry_size.checked_mul(st.slot as usize) else {
@@ -331,7 +392,12 @@ fn emit_prop_num(
         guard_object(a, st.holder_shape, slow);
     }
 
-    // rax=entries data; reject a live accessor descriptor, then decode only packed Numbers.
+    // Recheck the live length before dereferencing a cached entry, even after shape guards.
+    a.bytes(&[0x49, 0x81, 0xbb]); // cmp qword [r11+entries_len],slot
+    a.bytes(&entries_len.to_le_bytes());
+    a.bytes(&st.slot.to_le_bytes());
+    a.jcc(0x86, slow);
+    // rax=entries data; reject a live accessor descriptor, then clone its packed value.
     a.bytes(&[0x49, 0x8b, 0x83]);
     a.bytes(&entries.to_le_bytes());
     a.bytes(&[0xf6, 0x80]);
@@ -342,19 +408,219 @@ fn emit_prop_num(
     a.bytes(&value_off.to_le_bytes());
     a.bytes(&[0x48, 0x89, 0xd0, 0x48, 0xc1, 0xe8, 0x30]); // eax=upper 16 bits
     let number = a.label();
+    let object = a.label();
+    let string = a.label();
+    let symbol = a.label();
+    let boolean = a.label();
+    let scalar = a.label();
+    let decoded = a.label();
+    let clone_rc = a.label();
+    a.bytes(&[0x3d]);
+    a.bytes(&0xfff9u32.to_le_bytes());
+    a.jcc(0x84, object);
     a.bytes(&[0x3d]);
     a.bytes(&0x7ff9u32.to_le_bytes());
     a.jcc(0x82, number);
     a.bytes(&[0x3d]);
     a.bytes(&0x7fffu32.to_le_bytes());
-    a.jcc(0x86, slow); // boxed positive tag
-    a.bytes(&[0x3d]);
-    a.bytes(&0xfff9u32.to_le_bytes());
-    a.jcc(0x83, slow); // PACK_OBJ or a non-canonical negative NaN
+    a.jcc(0x87, number);
+    for (tag, label) in [
+        (0x7ffc_u32, boolean),
+        (0x7ffe, string),
+        (0x7fff, symbol),
+        (0x7ffd, slow),
+    ] {
+        a.bytes(&[0x3d]);
+        a.bytes(&tag.to_le_bytes());
+        a.jcc(0x84, label);
+    }
+    a.jmp(scalar);
     a.bind(number);
     a.bytes(&[0xb8, 4, 0, 0, 0]); // Value::Num word 0
+    a.jmp(decoded);
+    a.bind(scalar); // Undefined, Empty and Null map to wide tags 0, 1 and 2.
+    a.bytes(&[0x2d]);
+    a.bytes(&0x7ff9u32.to_le_bytes());
+    a.bytes(&[0x31, 0xd2]);
+    a.jmp(decoded);
+    a.bind(boolean);
+    a.bytes(&[
+        0x89, 0xd0, 0x83, 0xe0, 1, 0xc1, 0xe0, 8, 0x83, 0xc8, 3, 0x31, 0xd2,
+    ]);
+    a.jmp(decoded);
+    for (label, tag) in [(string, 6u32), (symbol, 7), (object, 8)] {
+        a.bind(label);
+        a.bytes(&[0xb8]);
+        a.bytes(&tag.to_le_bytes());
+        a.jmp(clone_rc);
+    }
+    a.bind(clone_rc);
+    a.bytes(&[0x48, 0xc1, 0xe2, 16, 0x48, 0xc1, 0xea, 16]); // remove packed tag
+    a.inc_strong_rdx(strong);
+    a.bind(decoded);
     a.store_pair_r13(0);
     a.add_sp(16);
+    true
+}
+
+/// Read a known numeric dense mirror without boxing the receiver or calling a helper.
+/// Holes, non-numeric elements, accessors and exotic receivers keep the checked path.
+// On success: rax=index, rdx=dense sidecar, r11=object. All checks precede mutation.
+fn emit_elem_local_guard(
+    a: &mut Asm,
+    layout: &crate::value::JitLayout,
+    slot: u16,
+    key_offset: i32,
+    slow: usize,
+) -> bool {
+    let offsets = [
+        layout.obj_from_rc,
+        layout.obj_exotic,
+        layout.obj_ic_plain,
+        layout.obj_props + layout.props_mirror_flags,
+        layout.obj_props + layout.props_elems,
+        layout.dense_mirror + layout.vec_ptr_off,
+        layout.dense_mirror + layout.vec_len_off,
+    ];
+    if !layout.valid || offsets.iter().any(|&off| off > i32::MAX as usize) {
+        return false;
+    }
+    let [rcv, exotic, plain, flags, elems, _mirror_ptr, mirror_len] = offsets.map(|v| v as i32);
+    a.cmp_byte_r13(key_offset, 4);
+    a.jcc(0x85, slow);
+    let off = i32::from(slot) * 16;
+    a.load_byte_r15(off);
+    a.bytes(&[0x83, 0xf8, 8]);
+    a.jcc(0x85, slow);
+    // Convert exactly to a canonical uint32 array index (0..2^32-2). Negative zero is 0.
+    a.bytes(&[0xf2, 0x49, 0x0f, 0x2c, 0x85]);
+    a.bytes(&(key_offset + 8).to_le_bytes());
+    a.bytes(&[0xb9]);
+    a.bytes(&(u32::MAX - 1).to_le_bytes());
+    a.bytes(&[0x48, 0x39, 0xc8]);
+    a.jcc(0x87, slow);
+    a.bytes(&[0xf2, 0x48, 0x0f, 0x2a, 0xc0]); // cvtsi2sd xmm0,rax
+    a.bytes(&[0x66, 0x41, 0x0f, 0x2e, 0x85]);
+    a.bytes(&(key_offset + 8).to_le_bytes());
+    a.jcc(0x85, slow);
+    a.jcc(0x8a, slow);
+    a.bytes(&[0x4d, 0x8b, 0x97]);
+    a.bytes(&(off + 8).to_le_bytes()); // receiver in r10
+    a.bytes(&[0x4d, 0x89, 0xd3, 0x49, 0x81, 0xc3]);
+    a.bytes(&rcv.to_le_bytes()); // object in r11
+    a.bytes(&[0x41, 0x0f, 0xb6, 0x8b]);
+    a.bytes(&exotic.to_le_bytes());
+    let plain_exotic = a.label();
+    a.bytes(&[0x83, 0xf9, layout.exotic_none_tag]);
+    a.jcc(0x84, plain_exotic);
+    a.bytes(&[0x83, 0xf9, layout.exotic_array_tag]);
+    a.jcc(0x85, slow);
+    a.bind(plain_exotic);
+    a.bytes(&[0x41, 0x80, 0xbb]);
+    a.bytes(&plain.to_le_bytes());
+    a.bytes(&[0]);
+    a.jcc(0x84, slow);
+    let mask = crate::value::MIRROR_OK | crate::value::MIRROR_NO_HOLES;
+    a.bytes(&[0x41, 0x0f, 0xb6, 0x8b]);
+    a.bytes(&flags.to_le_bytes());
+    a.bytes(&[0x83, 0xe1, mask, 0x83, 0xf9, mask]);
+    a.jcc(0x85, slow);
+    a.bytes(&[0x49, 0x8b, 0x93]);
+    a.bytes(&elems.to_le_bytes());
+    a.bytes(&[0x48, 0x85, 0xd2]);
+    a.jcc(0x84, slow);
+    a.bytes(&[0x48, 0x3b, 0x82]);
+    a.bytes(&mirror_len.to_le_bytes());
+    a.jcc(0x83, slow);
+    true
+}
+
+fn emit_elem_local_number(
+    a: &mut Asm,
+    layout: &crate::value::JitLayout,
+    slot: u16,
+    slow: usize,
+) -> bool {
+    if !emit_elem_local_guard(a, layout, slot, -16, slow) {
+        return false;
+    }
+    let mirror_ptr = (layout.dense_mirror + layout.vec_ptr_off) as i32;
+    a.bytes(&[0x48, 0x8b, 0x92]);
+    a.bytes(&mirror_ptr.to_le_bytes());
+    a.bytes(&[0xf2, 0x0f, 0x10, 0x04, 0xc2]); // xmm0=mirror[index]
+    a.bytes(&[0xb8, 4, 0, 0, 0, 0x31, 0xd2]);
+    a.store_pair_r13(-16);
+    a.bytes(&[0xf2, 0x41, 0x0f, 0x11, 0x85]);
+    a.bytes(&(-8i32).to_le_bytes());
+    true
+}
+
+fn emit_set_elem_local_number(
+    a: &mut Asm,
+    layout: &crate::value::JitLayout,
+    slot: u16,
+    keep: bool,
+    slow: usize,
+) -> bool {
+    let offsets = [
+        layout.dense_elems + layout.vec_ptr_off,
+        layout.dense_elems + layout.vec_len_off,
+        layout.obj_props + layout.props_entries + layout.vec_ptr_off,
+        layout.obj_props + layout.props_entries + layout.vec_len_off,
+        layout.entry_size,
+        layout.entry_value,
+        layout.obj_props + layout.props_mirror_flags,
+        layout.dense_mirror + layout.vec_ptr_off,
+    ];
+    // The current packed Property stores numeric f64 bits directly. Other layouts
+    // continue through the checked helper rather than depending on a tag guess.
+    if layout.entry_accessor != layout.entry_value + 8
+        || offsets.iter().any(|&off| off > i32::MAX as usize)
+    {
+        return false;
+    }
+    let [elements, elements_len, entries, entries_len, stride, value, flags, mirror] =
+        offsets.map(|v| v as i32);
+    if !emit_elem_local_guard(a, layout, slot, -32, slow) {
+        return false;
+    }
+    a.cmp_byte_r13(-16, 4);
+    a.jcc(0x85, slow);
+    a.bytes(&[0xf2, 0x41, 0x0f, 0x10, 0x4d, 0xf8]); // xmm1=value
+    a.bytes(&[0x66, 0x0f, 0x2e, 0xc9]); // ucomisd xmm1,xmm1
+    a.jcc(0x8a, slow); // NaNs need canonical packing / mirror-hole handling.
+    a.bytes(&[0x48, 0x3b, 0x82]); // index < elements.len
+    a.bytes(&elements_len.to_le_bytes());
+    a.jcc(0x83, slow);
+    a.bytes(&[0x4c, 0x8b, 0x82]); // r8=elements.data
+    a.bytes(&elements.to_le_bytes());
+    a.bytes(&[0x45, 0x8b, 0x04, 0x80]); // r8d=elements[index]
+    a.bytes(&[0x4d, 0x3b, 0x83]); // entry slot < entries.len (rejects NO_SLOT)
+    a.bytes(&entries_len.to_le_bytes());
+    a.jcc(0x83, slow);
+    a.bytes(&[0x4d, 0x69, 0xc0]); // r8 *= entry stride
+    a.bytes(&stride.to_le_bytes());
+    a.bytes(&[0x4d, 0x8b, 0x93]); // r10=entries.data
+    a.bytes(&entries.to_le_bytes());
+    a.bytes(&[0x4d, 0x01, 0xc2]); // r10=entry
+    // MIRROR_OK|NO_HOLES proves every covered property is writable numeric data.
+    // No allocation, JS call or fallible guard occurs between this point and commit.
+    a.bytes(&[0xf2, 0x41, 0x0f, 0x11, 0x8a]);
+    a.bytes(&value.to_le_bytes());
+    a.bytes(&[0x48, 0x8b, 0x92]); // rdx=mirror.data
+    a.bytes(&mirror.to_le_bytes());
+    a.bytes(&[0xf2, 0x0f, 0x11, 0x0c, 0xc2]); // mirror[index]=value
+    a.bytes(&[0x41, 0x80, 0xa3]);
+    a.bytes(&flags.to_le_bytes());
+    a.bytes(&[!crate::value::MIRROR_ALL_I32]);
+    if keep {
+        a.bytes(&[0xb8, 4, 0, 0, 0, 0x31, 0xd2]);
+        a.store_pair_r13(-32);
+        a.bytes(&[0xf2, 0x41, 0x0f, 0x11, 0x4d, 0xe8]); // result payload at -24
+        a.bytes(&[0x49, 0x83, 0xed, 0x10]);
+    } else {
+        a.bytes(&[0x49, 0x83, 0xed, 0x20]);
+    }
     true
 }
 
@@ -518,6 +784,91 @@ pub(super) fn compile(
                 a.helper_spflag(H_EXEC, pc as u32, unwind);
                 a.bind(exit);
             }
+            Op::Add | Op::Sub | Op::Mul | Op::Div => {
+                let slow = a.label();
+                let done = a.label();
+                a.cmp_byte_r13(-32, 4);
+                a.jcc(0x85, slow);
+                a.cmp_byte_r13(-16, 4);
+                a.jcc(0x85, slow);
+                a.bytes(&[0xf2, 0x41, 0x0f, 0x10, 0x85]);
+                a.bytes(&(-24i32).to_le_bytes()); // xmm0=lhs
+                let opcode = match op {
+                    Op::Add => 0x58,
+                    Op::Sub => 0x5c,
+                    Op::Mul => 0x59,
+                    _ => 0x5e,
+                };
+                a.bytes(&[0xf2, 0x41, 0x0f, opcode, 0x85]);
+                a.bytes(&(-8i32).to_le_bytes()); // xmm0 op=rhs
+                a.bytes(&[0xf2, 0x41, 0x0f, 0x11, 0x85]);
+                a.bytes(&(-24i32).to_le_bytes()); // keep lhs Number tag
+                a.add_sp(-16);
+                a.jmp(done);
+                a.bind(slow);
+                a.helper_spflag(
+                    if matches!(op, Op::Add) {
+                        H_ADD_STRINGS
+                    } else {
+                        H_EXEC
+                    },
+                    pc as u32,
+                    unwind,
+                );
+                a.bind(done);
+            }
+            Op::Neg | Op::Plus => {
+                let slow = a.label();
+                let done = a.label();
+                a.cmp_byte_r13(-16, 4);
+                a.jcc(0x85, slow);
+                if matches!(op, Op::Neg) {
+                    a.bytes(&[0x48, 0xb8]);
+                    a.bytes(&(1u64 << 63).to_le_bytes());
+                    a.bytes(&[0x49, 0x31, 0x85]); // xor payload sign bit
+                    a.bytes(&(-8i32).to_le_bytes());
+                }
+                a.jmp(done);
+                a.bind(slow);
+                a.helper_spflag(H_EXEC, pc as u32, unwind);
+                a.bind(done);
+            }
+            Op::UpdateLocal(slot, kind) => {
+                let slow = a.label();
+                let done = a.label();
+                let off = i32::from(*slot) * 16;
+                a.load_byte_r15(off);
+                a.bytes(&[0x83, 0xf8, 4]);
+                a.jcc(0x85, slow); // TDZ, BigInt and coercion stay checked.
+                if matches!(kind, UpdKind::PostInc | UpdKind::PostDec) {
+                    a.load_pair_r15(off);
+                    a.store_pair_r13(0);
+                    a.add_sp(16);
+                }
+                a.bytes(&[0xf2, 0x41, 0x0f, 0x10, 0x87]);
+                a.bytes(&(off + 8).to_le_bytes()); // xmm0=old
+                a.bytes(&[0xb8, 1, 0, 0, 0, 0xf2, 0x0f, 0x2a, 0xc8]); // xmm1=1
+                a.bytes(&[
+                    0xf2,
+                    0x0f,
+                    match kind {
+                        UpdKind::PreInc | UpdKind::PostInc | UpdKind::IncDiscard => 0x58,
+                        _ => 0x5c,
+                    },
+                    0xc1,
+                ]); // addsd/subsd xmm0,xmm1
+                a.bytes(&[0xf2, 0x41, 0x0f, 0x11, 0x87]);
+                a.bytes(&(off + 8).to_le_bytes());
+                if matches!(kind, UpdKind::PreInc | UpdKind::PreDec) {
+                    a.load_pair_r15(off);
+                    a.store_pair_r13(0);
+                    a.add_sp(16);
+                }
+                a.jmp(done);
+                a.bind(slow);
+                a.helper_spflag(H_EXEC, pc as u32, unwind);
+                a.bind(done);
+            }
             Op::EqEq | Op::StrictEq | Op::NotEq | Op::StrictNotEq => {
                 let slow = a.label();
                 let done = a.label();
@@ -555,7 +906,7 @@ pub(super) fn compile(
                 a.helper_spflag(H_EXEC, pc as u32, unwind);
                 a.bind(done);
             }
-            Op::BitAnd | Op::BitOr | Op::BitXor => {
+            Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr | Op::UShr => {
                 let slow = a.label();
                 let done = a.label();
                 a.load_byte_r13(-32);
@@ -564,14 +915,21 @@ pub(super) fn compile(
                 a.load_byte_r13(-16);
                 a.bytes(&[0x83, 0xf8, 0x04]);
                 a.jcc(0x85, slow);
-                a.numeric_bitop(
-                    match op {
-                        Op::BitAnd => 0x21,
-                        Op::BitOr => 0x09,
-                        _ => 0x31,
-                    },
-                    slow,
-                );
+                a.numeric_bitop(op, slow);
+                a.jmp(done);
+                a.bind(slow);
+                a.helper_spflag(H_EXEC, pc as u32, unwind);
+                a.bind(done);
+            }
+            Op::BitNot => {
+                let slow = a.label();
+                let done = a.label();
+                a.cmp_byte_r13(-16, 4);
+                a.jcc(0x85, slow);
+                a.to_int32(-8, false, slow);
+                a.bytes(&[0xf7, 0xd0, 0xf2, 0x0f, 0x2a, 0xc0]); // not eax; cvtsi2sd xmm0,eax
+                a.bytes(&[0xf2, 0x41, 0x0f, 0x11, 0x85]);
+                a.bytes(&(-8i32).to_le_bytes());
                 a.jmp(done);
                 a.bind(slow);
                 a.helper_spflag(H_EXEC, pc as u32, unwind);
@@ -579,13 +937,13 @@ pub(super) fn compile(
             }
             Op::Jump(target) => a.jmp(pcs[*target as usize]),
             Op::JumpIfFalse(target) => {
-                a.call_helper_pair(H_COND, COND_POP_TRUTHY);
-                a.bytes(&[0x49, 0x89, 0xc5, 0x48, 0x85, 0xd2]);
+                a.truthy(true);
+                a.bytes(&[0x48, 0x85, 0xd2]);
                 a.jcc(0x84, pcs[*target as usize]);
             }
             Op::JumpIfFalsePeek(target) | Op::JumpIfTruePeek(target) => {
-                a.call_helper_pair(H_COND, COND_PEEK_TRUTHY);
-                a.bytes(&[0x49, 0x89, 0xc5, 0x48, 0x85, 0xd2]);
+                a.truthy(false);
+                a.bytes(&[0x48, 0x85, 0xd2]);
                 a.jcc(
                     if matches!(op, Op::JumpIfFalsePeek(_)) {
                         0x84
@@ -596,9 +954,12 @@ pub(super) fn compile(
                 );
             }
             Op::JumpIfNotNullishPeek(target) => {
-                a.call_helper_pair(H_COND, COND_PEEK_NOT_NULLISH);
-                a.bytes(&[0x49, 0x89, 0xc5, 0x48, 0x85, 0xd2]);
+                let nullish = a.label();
+                a.cmp_byte_r13(-16, 0); // Undefined
+                a.jcc(0x84, nullish);
+                a.cmp_byte_r13(-16, 2); // Null
                 a.jcc(0x85, pcs[*target as usize]);
+                a.bind(nullish);
             }
             Op::InlineGuard(_t, target) => {
                 // The x64 backend keeps the wide Value ABI and uses the checked helper for
@@ -637,12 +998,37 @@ pub(super) fn compile(
             Op::New(argc, _) => {
                 a.helper_spflag(H_NEW, pc as u32 | ((*argc as u32) << 16), unwind);
             }
+            Op::GetElemLocal(slot) => {
+                let slow = a.label();
+                let done = a.label();
+                if emit_elem_local_number(&mut a, layout, *slot, slow) {
+                    a.jmp(done);
+                    a.bind(slow);
+                    a.helper_spflag(H_EXEC, pc as u32, unwind);
+                    a.bind(done);
+                } else {
+                    a.helper_spflag(H_EXEC, pc as u32, unwind);
+                }
+            }
+            Op::SetElemLocal(slot) | Op::SetElemLocalDrop(slot) => {
+                let slow = a.label();
+                let done = a.label();
+                let keep = matches!(op, Op::SetElemLocal(_));
+                if emit_set_elem_local_number(&mut a, layout, *slot, keep, slow) {
+                    a.jmp(done);
+                    a.bind(slow);
+                    a.helper_spflag(H_EXEC, pc as u32, unwind);
+                    a.bind(done);
+                } else {
+                    a.helper_spflag(H_EXEC, pc as u32, unwind);
+                }
+            }
             Op::GetPropThis(_, cache) => {
                 let slow = a.label();
                 let done = a.label();
                 let emitted = chunk
                     .jit_cache_preferred(*cache)
-                    .is_some_and(|st| emit_prop_num(&mut a, layout, st, PropRecv::This, slow));
+                    .is_some_and(|st| emit_prop_value(&mut a, layout, st, PropRecv::This, slow));
                 if emitted {
                     a.jmp(done);
                     a.bind(slow);
@@ -656,7 +1042,7 @@ pub(super) fn compile(
                 let slow = a.label();
                 let done = a.label();
                 let emitted = chunk.jit_cache_preferred(*cache).is_some_and(|st| {
-                    emit_prop_num(&mut a, layout, st, PropRecv::Slot(*slot), slow)
+                    emit_prop_value(&mut a, layout, st, PropRecv::Slot(*slot), slow)
                 });
                 if emitted {
                     a.jmp(done);

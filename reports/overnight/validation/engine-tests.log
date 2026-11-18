@@ -1,0 +1,1162 @@
+warning: unused import: `proto_epoch_ptr`
+    --> crates/lumen/src/value.rs:1386:55
+     |
+1386 |     bump_proto_epoch, fn_key, index_key, proto_epoch, proto_epoch_ptr, MIRROR_ALL_I32,
+     |                                                       ^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u32>::fetch_update`: renamed to `try_update` for consistency
+  --> crates/lumen/src/value/props/shapes.rs:35:25
+   |
+35 |     let _ = PROTO_EPOCH.fetch_update(
+   |                         ^^^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+   |
+35 -     let _ = PROTO_EPOCH.fetch_update(
+35 +     let _ = PROTO_EPOCH.try_update(
+   |
+
+warning: multiple methods are never used
+    --> crates/lumen/src/bytecode.rs:5592:19
+     |
+5587 | impl Chunk {
+     | ---------- methods in this implementation
+...
+5592 |     pub(crate) fn jit_slot_names(&self) -> &[Rc<str>] {
+     |                   ^^^^^^^^^^^^^^
+...
+5608 |     pub(crate) fn jit_cache_ptr(&self, idx: u32) -> usize {
+     |                   ^^^^^^^^^^^^^
+...
+5629 |     pub(crate) fn jit_cache_for_shape(&self, idx: u32, recv_shape: u32) -> Option<IcState> {
+     |                   ^^^^^^^^^^^^^^^^^^^
+...
+5646 |     pub(crate) fn jit_call_cache_ptr(&self, idx: u32) -> usize {
+     |                   ^^^^^^^^^^^^^^^^^^
+...
+5653 |     pub(crate) fn jit_call_target(&self, idx: u32) -> Option<(CallIc, crate::value::Gc)> {
+     |                   ^^^^^^^^^^^^^^^
+...
+5674 |     pub(crate) fn jit_call_targets(&self, idx: u32) -> Vec<(CallIc, crate::value::Gc)> {
+     |                   ^^^^^^^^^^^^^^^^
+...
+5693 |     pub(crate) fn jit_name_cache_ptr(&self, idx: u32) -> usize {
+     |                   ^^^^^^^^^^^^^^^^^^
+...
+5698 |     pub(crate) fn jit_cap_cache_ptr(&self, idx: u32) -> usize {
+     |                   ^^^^^^^^^^^^^^^^^
+...
+5704 |     pub(crate) fn jit_name_number(&self, idx: u32) -> Option<u64> {
+     |                   ^^^^^^^^^^^^^^^
+...
+6267 |     pub(crate) fn jit_inline_attempted_off(&self) -> usize {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+6311 |     pub(crate) fn jit_const_ptr(&self, k: u32) -> *const Value {
+     |                   ^^^^^^^^^^^^^
+...
+6315 |     pub(crate) fn jit_const_is_str(&self, k: u32) -> bool {
+     |                   ^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `jit_mod_num` is never used
+    --> crates/lumen/src/bytecode.rs:9267:26
+     |
+9267 | pub(crate) extern "C" fn jit_mod_num(a: f64, b: f64) -> f64 {
+     |                          ^^^^^^^^^^^
+
+warning: method `jit_capture_offset` is never used
+   --> crates/lumen/src/bytecode/activation.rs:120:19
+    |
+113 | impl Chunk {
+    | ---------- method in this implementation
+...
+120 |     pub(crate) fn jit_capture_offset(&self, name: u32) -> Option<usize> {
+    |                   ^^^^^^^^^^^^^^^^^^
+
+warning: methods `inline_closure_target`, `has_inline_closures`, `dynamic_inline_location`, and `has_inline_frames` are never used
+   --> crates/lumen/src/bytecode/inline_frames.rs:77:19
+    |
+ 76 | impl Chunk {
+    | ---------- methods in this implementation
+ 77 |     pub(crate) fn inline_closure_target(&self, target: u32) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+ 88 |     pub(crate) fn has_inline_closures(&self) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^
+...
+ 93 |     pub(crate) fn dynamic_inline_location(&self, pc: usize) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+110 |     pub(crate) fn has_inline_frames(&self) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^
+
+warning: constant `GC_DIRECT_MAINT_MASK` is never used
+    --> crates/lumen/src/interpreter.rs:1222:18
+     |
+1222 | pub(crate) const GC_DIRECT_MAINT_MASK: u32 = 4095;
+     |                  ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `LEN_OFF` is never used
+  --> crates/lumen/src/lstr.rs:41:18
+   |
+41 | pub(crate) const LEN_OFF: usize = std::mem::offset_of!(Header, len);
+   |                  ^^^^^^^
+
+warning: constant `CAP_OFF` is never used
+  --> crates/lumen/src/lstr.rs:44:18
+   |
+44 | pub(crate) const CAP_OFF: usize = std::mem::offset_of!(Header, cap);
+   |                  ^^^^^^^
+
+warning: constant `DATA_OFF` is never used
+  --> crates/lumen/src/lstr.rs:46:18
+   |
+46 | pub(crate) const DATA_OFF: usize = HDR;
+   |                  ^^^^^^^^
+
+warning: multiple fields are never read
+   --> crates/lumen/src/value.rs:342:9
+    |
+337 | pub struct JitLayout {
+    |            --------- fields in this struct
+...
+342 |     pub gc_data_off: usize,
+    |         ^^^^^^^^^^^
+...
+348 |     pub obj_is_constructor: usize,
+    |         ^^^^^^^^^^^^^^^^^^
+349 |     pub obj_extensible: usize,
+    |         ^^^^^^^^^^^^^^
+350 |     pub props_shape: usize,
+351 |     pub props_proto_flag: usize,
+    |         ^^^^^^^^^^^^^^^^
+...
+359 |     pub vec_cap_off: usize,
+    |         ^^^^^^^^^^^
+...
+368 |     pub dense_packed: usize,
+    |         ^^^^^^^^^^^^
+369 |     /// Initialized inline element count and slot base within DenseBuffers.
+370 |     pub dense_inline_len: usize,
+    |         ^^^^^^^^^^^^^^^^
+371 |     pub dense_inline_slots: usize,
+    |         ^^^^^^^^^^^^^^^^^^
+...
+381 |     pub entry_writable: usize,
+    |         ^^^^^^^^^^^^^^
+382 |     /// Standalone `Property` layout used by keyless packed elements (not tuple-entry offsets).
+383 |     pub property_size: usize,
+    |         ^^^^^^^^^^^^^
+384 |     pub property_value: usize,
+    |         ^^^^^^^^^^^^^^
+385 |     pub property_meta: usize,
+    |         ^^^^^^^^^^^^^
+386 |     /// The `Option<Box<Vec<Property>>>` niche and Vec header words matched the live probes.
+387 |     pub packed_elems_valid: bool,
+    |         ^^^^^^^^^^^^^^^^^^
+...
+394 |     pub exotic_strwrap_tag: u8,
+    |         ^^^^^^^^^^^^^^^^^^
+...
+398 |     pub scope_gen: usize,
+    |         ^^^^^^^^^
+399 |     /// `value` within a `Binding` (the LoadName template's 16-byte copy source).
+400 |     pub binding_value: usize,
+    |         ^^^^^^^^^^^^^
+401 |     /// `mutable` within a `Binding` (free-name update/store guard).
+402 |     pub binding_mutable: usize,
+    |         ^^^^^^^^^^^^^^^
+403 |     /// `initialized` bool within a `Binding` (TDZ check).
+404 |     pub binding_init: usize,
+    |         ^^^^^^^^^^^^
+405 |     /// The `Rc<str>` key within an entry `(Rc<str>, Property)` (tuple field order is unstable).
+406 |     pub entry_key: usize,
+    |         ^^^^^^^^^
+407 |     /// The length word within an `Rc<str>` fat pointer (0 or 8 — layout is unstable).
+408 |     pub str_len_word: usize,
+    |         ^^^^^^^^^^^^
+409 |     /// The pointer word within an `Rc<str>` fat pointer (the other one).
+410 |     pub str_ptr_word: usize,
+    |         ^^^^^^^^^^^^
+411 |     /// Stored `Rc<str>` pointer word → the first byte of the string data (the RcBox header).
+412 |     pub str_data_off: usize,
+    |         ^^^^^^^^^^^^
+...
+415 |     pub key_probe_ok: bool,
+    |         ^^^^^^^^^^^^
+    |
+    = note: `JitLayout` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: methods `reserve_small_holes`, `jit_packed_numeric_slots`, and `get_index_mut` are never used
+   --> crates/lumen/src/value/props/elements.rs:33:19
+    |
+  6 | impl Props {
+    | ---------- methods in this implementation
+...
+ 33 |     pub(crate) fn reserve_small_holes(&mut self, len: usize) {
+    |                   ^^^^^^^^^^^^^^^^^^^
+...
+ 53 |     pub(crate) fn jit_packed_numeric_slots(&mut self, len: usize) -> Option<*mut Vec<Property>> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+106 |     pub(crate) fn get_index_mut(&mut self, n: u32) -> Option<&mut Property> {
+    |                   ^^^^^^^^^^^^^
+
+warning: function `proto_epoch_ptr` is never used
+  --> crates/lumen/src/value/props/shapes.rs:29:15
+   |
+29 | pub(crate) fn proto_epoch_ptr() -> *const u32 {
+   |               ^^^^^^^^^^^^^^^
+
+warning: `lumen` (lib) generated 13 warnings (run `cargo fix --lib -p lumen` to apply 2 suggestions)
+   Compiling lumen v0.1.4 (/home/luna/.t3/worktrees/lumen/t3-8af223a6/crates/lumen)
+warning: function `test_with_enabled` is never used
+   --> crates/lumen/src/bytecode/inline_closure.rs:132:15
+    |
+132 | pub(crate) fn test_with_enabled(run: impl FnOnce()) {
+    |               ^^^^^^^^^^^^^^^^^
+
+warning: methods `inline_closure_target` and `dynamic_inline_location` are never used
+  --> crates/lumen/src/bytecode/inline_frames.rs:77:19
+   |
+76 | impl Chunk {
+   | ---------- methods in this implementation
+77 |     pub(crate) fn inline_closure_target(&self, target: u32) -> bool {
+   |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+93 |     pub(crate) fn dynamic_inline_location(&self, pc: usize) -> bool {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `lumen` (lib test) generated 14 warnings (12 duplicates)
+    Finished `test` profile [optimized] target(s) in 35.48s
+     Running unittests src/lib.rs (target/debug/deps/lumen-543e84d486d87150)
+
+running 719 tests
+test bigint::tests::arithmetic_signs_and_carries ... ok
+test bigint::tests::division_truncates_toward_zero ... ok
+test bigint::tests::exact_f64_comparison_at_extremes ... ok
+test bigint::tests::f64_conversions ... ok
+test bigint::tests::i128_round_trips_and_wrapping ... ok
+test bigint::tests::parse_and_display_round_trip ... ok
+test bigint::tests::pow_and_negative_exponent ... ok
+test bigint::tests::shifts_floor_toward_negative_infinity ... ok
+test bigint::tests::twos_complement_bitwise ... ok
+test builtins::collection_data::dense::tests::clear_and_compaction_rebuild_integer_slots_without_stale_references ... ok
+test builtins::collection_data::dense::tests::mixed_keys_keep_same_value_zero_and_insertion_order ... ok
+test builtins::collection_data::dense::tests::sparse_hash_entries_are_found_after_the_dense_frontier_passes_them ... ok
+test builtins::collection_data::tests::colliding_keys_remain_distinct_through_updates_and_deletes ... ok
+test builtins::collection_data::tests::weak_deletion_churn_does_not_accumulate_vacant_slots ... ok
+test builtins::collection_data::tests::nan_payloads_and_signed_zero_share_entries ... ok
+test builtins::collection_data::tests::delete_releases_references_and_reinsertion_appends ... ok
+test builtins::collection_data::tests::clear_releases_entries_without_invalidating_cursors ... ok
+test builtins::collection_data::dense::tests::sparse_and_large_keys_do_not_allocate_unbounded_direct_storage ... ok
+test builtins::array_iterator::tests::typed_array_detach_and_fixed_view_shrink_recheck_length ... ok
+test builtins::array_iterator::tests::proxy_receiver_retains_existing_own_brand_rejection ... ok
+test builtins::array_iterator::tests::ordinary_values_exhaustion_and_proxy_target_keep_fetch_order ... ok
+test builtins::array_iterator::tests::reentrant_length_getter_preserves_both_saved_indices ... ok
+test builtins::array_iterator::tests::length_mutations_revalidate_only_the_pending_index_write ... ok
+test builtins::collections::brand::tests::properties_cannot_supply_or_change_collection_slots ... ok
+test builtins::array_iterator::tests::accessor_and_coercion_fallback_preserves_order_and_early_done ... ok
+test builtins::array_iterator::tests::late_readonly_and_deleted_index_keep_strictness_and_inherited_setter ... ok
+test builtins::string_substring::tests::utf16_surrogate_halves_and_lone_surrogates_remain_exact ... ok
+test builtins::collections::brand::tests::subclass_and_new_target_prototypes_do_not_define_the_brand ... ok
+test builtins::collections::lookup::tests::ordinary_properties_do_not_change_the_brand_after_warmup ... ok
+test builtins::collections::brand::tests::collection_factories_create_the_correct_internal_slot ... ok
+test builtins::string_substring::tests::ascii_ranges_clamp_swap_and_truncate ... ok
+test builtins::string_substring::tests::coercions_keep_receiver_then_start_then_end_and_short_circuit_errors ... ok
+test builtins::collections::brand::tests::weak_brands_survive_compaction_and_cross_realm_calls ... ok
+test bytecode::activation::tests::captured_access_survives_structural_change_during_a_native_callback ... ok
+test bytecode::array_destructure::tests::explicit_undefined_and_skipped_elements_stay_distinct_from_holes ... ok
+test bytecode::array_destructure::tests::custom_next_iterator_and_return_keep_protocol_observations ... ok
+test builtins::string_code_point::tests::ascii_reads_reach_the_native_byte_load ... ok
+test bytecode::array_iterator_step::tests::body_installed_element_getter_falls_back_once_then_resumes_fast_steps ... ok
+test builtins::string_code_point::tests::warmed_calls_preserve_unicode_indices_and_distinct_out_of_bounds_results ... ok
+test builtins::collections::lookup::tests::foreign_methods_keep_their_error_realm_after_warmup ... ok
+test bytecode::call_site::tests::replacing_a_refresh_erases_old_identity_before_releasing_its_pin ... ok
+test bytecode::call_site::tests::refresh_pin_is_bounded_after_ordinary_cache_eviction ... ok
+test bytecode::array_iterator_step::tests::close_and_abort_observe_real_iterator_and_new_return_method ... ok
+test bytecode::call_spread::tests::dense_values_retain_logical_call_boundaries ... ok
+test builtins::collections::lookup::tests::warmed_calls_observe_method_replacement_and_receiver_brands ... ok
+test bytecode::array_iterator_step::tests::dense_values_keep_captured_next_after_prototype_replacement ... ok
+test bytecode::array_destructure::tests::element_getters_can_change_later_values_and_close_during_gc ... ok
+test bytecode::array_iterator_step::tests::configurable_index_setter_runs_once_then_data_state_resumes_fast ... ok
+test bytecode::for_in::tests::lexical_enumeration_compiles_without_iterator_protocol ... ok
+test bytecode::array_iterator_step::tests::body_growth_shrink_holes_and_proxy_use_each_steps_live_state ... ok
+test bytecode::array_destructure::tests::foreign_intrinsics_and_invalid_close_keep_original_identity ... ok
+test bytecode::array_destructure::tests::getters_holes_and_empty_close_are_never_suppressed ... ok
+test bytecode::array_iterator_step::tests::readonly_state_and_length_getter_fallback_do_not_replay_steps ... ok
+test bytecode::array_iterator_step::tests::foreign_intrinsic_captured_next_uses_the_checked_path ... ok
+test bytecode::inline_closure::tests::fresh_method_receiver_and_missing_arguments_match_the_generic_binding ... ok
+test builtins::collections::lookup::tests::warmed_reads_preserve_keys_aliasing_and_live_mutations ... ok
+test bytecode::array_iterator_step::tests::undefined_yields_and_aliased_objects_survive_gc_before_exhaustion ... ok
+test bytecode::inline_plan::diagnostics::tests::source_and_binding_names_are_unambiguous_json_strings ... ok
+test bytecode::inline_frames::tests::warmed_inlines_preserve_caller_identity_and_native_code_is_exercised ... ok
+test bytecode::inline_closure::tests::fresh_nested_inlines_preserve_getters_exceptions_and_gc_lifetime ... ok
+test bytecode::inline_frames::tests::nested_inlines_unwind_before_catches_and_preserve_error_stacks ... ok
+[iterator-entry-feedback] 1 foreign-realm
+test bytecode::iterator_entry::classification::tests::observations_refresh_code_versions_and_recheck_active_realm ... ok
+test bytecode::array_destructure::tests::zero_short_exact_and_long_patterns_copy_owned_outputs ... ok
+test bytecode::inline_closure::tests::changed_function_environment_and_callable_kind_use_the_original_call ... ok
+test bytecode::iterator_entry::tests::thrown_and_nonobject_results_do_not_create_observations ... ok
+[iterator-entry-feedback] 1 accepted:ops=5:return=3:store=none:branches=0
+test bytecode::inline_frames::tests::virtual_callee_survives_gc_while_active_and_is_collectable_after_return ... ok
+test bytecode::iterator_entry::tests::feedback_weak_pin_does_not_keep_closure_environment_alive ... ok
+test bytecode::inline_frames::tests::strict_callers_remain_censored_and_callee_lifetime_survives_replacement ... ok
+[iterator-entry-feedback] 1 non-user
+test bytecode::call_spread::tests::dense_spread_preserves_target_and_argument_semantics ... ok
+test bytecode::iterator_entry::tests::both_dispatches_observe_captured_next_and_skip_array_yields ... ok
+[iterator-entry-feedback] 4 accepted:ops=5:return=3:store=none:branches=0
+[iterator-entry-feedback] 2 cold-uncompiled
+test bytecode::jit_modulo_tests::numeric_modulo_fast_path_preserves_ieee_edges_and_bailouts ... ok
+test bytecode::iterator_entry::tests::fallback_observes_original_callee_and_separate_closure_instances_without_roots ... ok
+test bytecode::object_literal::tests::computed_constant_keys_use_the_object_template_path ... ok
+test builtins::string_code_point::tests::coercion_overrides_and_foreign_builtins_keep_their_semantics ... ok
+test bytecode::parameters::tests::captured_literal_default_initializes_its_binding ... ok
+test bytecode::inline_closure::tests::fresh_shared_closures_preserve_capture_and_reflected_identity ... ok
+test bytecode::parameters::tests::defaults_with_effects_or_hoist_conflicts_stay_in_the_oracle ... ok
+test bytecode::this_binding::tests::arrow_this_reads_compile_without_dynamic_receiver_fusions ... ok
+test bytecode::switch::tests::case_lexicals_compile_and_initialize_before_case_tests ... ok
+test bytecode::name_path::tests::exact_paths_read_live_bindings_and_reject_chain_changes ... ok
+test bytecode::jit_string_add_tests::string_add_does_not_bypass_getters_or_proxy_traps ... ok
+test bytecode::name_path::tests::paths_follow_live_values_and_reject_shadowing_and_different_ancestors ... ok
+test bytecode::call_spread::tests::observable_iterators_elements_proxies_and_realms_fall_back ... ok
+test compile_cache::tests::cache_rejects_shared_directory_and_shared_entries ... ok
+test bytecode::jit_string_add_tests::string_add_keeps_observable_coercion_and_exceptions ... ok
+test bytecode::name_path::tests::global_paths_reject_accessors_deletion_and_other_realms ... ok
+test interpreter::bindings::layout::tests::generation_wrap_does_not_revive_a_pristine_layout ... ok
+test interpreter::bindings::layout::tests::shared_layout_keeps_activation_values_independent ... ok
+test interpreter::bindings::layout::tests::structural_changes_promote_without_losing_binding_metadata ... ok
+test compile_cache::tests::cached_programs_preserve_execution_and_function_source ... ok
+test bytecode::name_path::tests::layout_holders_read_the_current_activation_and_tdz_flag ... ok
+test interpreter::call_entry::tests::ordinary_error_restores_depth_and_pending_tail_supersedes_yield ... ok
+test interpreter::call_entry::tests::normal_miss_and_hit_share_one_depth_and_poll_boundary ... ok
+test bytecode::name_path::jit::tests::exact_scope_cache_keeps_owned_values_alive_across_collection ... ok
+test fastalloc::tests::allocations_during_thread_teardown_fall_back_to_system ... ok
+test compile_cache::tests::corrupt_missing_or_unwritable_entries_fall_back_to_source ... ok
+test bytecode::write_strictness::tests::read_only_array_elements_and_length_keep_strict_write_errors ... ok
+test interpreter::call_entry::tests::overflow_skips_attempt_and_poll_and_restores_depth ... ok
+test interpreter::element_access::tests::numeric_keys_match_typed_array_index_boundaries ... ok
+test interpreter::constructor_body::tests::base_fields_defaults_and_captured_this_precede_the_compiled_body ... ok
+test bytecode::name_path::jit::tests::native_cache_probe_handles_owned_values_calls_and_getter_invalidation ... ok
+test interpreter::constructor_body::tests::a_hot_compiled_class_still_requires_new ... ok
+test bytecode::collection_insert::tests::warmed_insertions_keep_overrides_brand_errors_and_missing_arguments ... ok
+test jit::local_slot::tests::packed_local_owner_is_scoped_across_unwinding ... ok
+test jit::local_slot::tests::wide_local_is_borrowed_without_an_owner_round_trip ... ok
+test interpreter::gc_tests::repeated_collection_reuses_scratch_without_changing_lifetimes ... ok
+test jit_ir::iterator_entry::plan::tests::differently_named_post_store_reads_still_require_runtime_alias_checks ... ok
+test jit_ir::iterator_entry::plan::tests::rejects_effects_bad_control_stack_and_record_contracts ... ok
+test jit_ir::iterator_entry::tests::renamed_compiled_iterator_entry_retains_runtime_proof_requirements ... ok
+test jit_ir::liveness::tests::backedge_keeps_loop_carried_value_alive ... ok
+test jit_ir::liveness::tests::implicit_slot_reads_and_unknown_ops_are_barriers ... ok
+test jit_ir::liveness::tests::only_final_read_moves ... ok
+test jit_ir::liveness::tests::overwrite_ends_previous_value_lifetime ... ok
+test jit_ir::liveness::tests::successor_use_keeps_value_alive_on_both_paths ... ok
+test jit_ir::tests::cfg_catch_is_an_independent_root_with_exception_depth ... ok
+test bytecode::collection_insert::tests::foreign_insertions_keep_error_realms ... ok
+test jit_ir::tests::cfg_diamond_has_precise_edges_and_dominance ... ok
+test jit_ir::tests::cfg_finds_each_nested_loop_header ... ok
+test jit_ir::tests::cfg_inline_guard_retains_the_operand_window ... ok
+test jit_ir::tests::cfg_internal_diamond_is_a_region_not_a_linear_loop ... ok
+test jit_ir::tests::cfg_loop_finds_backedge_and_natural_loop ... ok
+test jit_ir::iterator_entry::plan::tests::actual_dump_preserves_peek_stack_order_and_pending_alias_obligations ... ok
+test bytecode::write_strictness::tests::unresolved_name_writes_keep_strictness_and_restore_it_after_errors ... ok
+test jit_ir::tests::cfg_peek_branch_preserves_condition_on_both_edges ... ok
+test jit_ir::tests::cfg_rejects_invalid_target_underflow_and_mismatched_join ... ok
+test jit_ir::tests::cfg_straight_line_and_capacity_headroom ... ok
+test jit_ir::tests::cfg_unreachable_underflow_does_not_poison_graph ... ok
+test jit_ir::tests::ssa_diamond_keeps_a_real_local_phi ... ok
+test jit_ir::tests::ssa_dup_aliases_but_records_ownership_operation ... ok
+test jit_ir::tests::ssa_loop_has_header_inputs_and_backedge_values ... ok
+test jit_ir::tests::ssa_loop_ignores_unreachable_predecessor_into_join ... ok
+test jit_ir::tests::ssa_reset_slots_redefines_only_requested_range ... ok
+test regex::internal_engine_diagnostics::capture_free_ascii_lookahead_matches ... ok
+test regex::internal_engine_diagnostics::escaped_open_bracket_patterns_compile ... ok
+test regex::internal_engine_diagnostics::guaranteed_ascii_backreference_matches ... ok
+test regex::internal_engine_diagnostics::internal_literal_plan_honors_start_and_sticky ... ok
+test bytecode::collection_insert::tests::moved_arguments_preserve_aliases_keys_and_insertion_order ... ok
+test regex::internal_engine_diagnostics::legacy_identity_escaped_punctuation_compiles ... ok
+test regex::internal_engine_diagnostics::legacy_pattern_uses_utf16_element_offsets ... ok
+test interpreter::constructor_body::tests::base_return_overrides_and_derived_super_keep_their_construction_rules ... ok
+test snapshot::tests::malformed_snapshots_are_bounded_and_rejected ... ok
+test snapshot::tests::roundtrip_diverse_constructs ... ok
+test interpreter::constructor_body::tests::hot_construction_does_not_bypass_field_initializers_or_their_errors ... ok
+test interpreter::arrays::tests::builtin_array_boundaries_preserve_reflection_growth_and_gc_edges ... ok
+test interpreter::element_access::tests::typed_reads_recheck_detachment_and_resizing ... ok
+test interpreter::constructor_body::tests::private_members_and_escaped_callbacks_keep_their_instance ... ok
+test tests::array_buffer_slice_and_transfer_detach ... ok
+test snapshot::tests::roundtrip_real_web_glue ... ok
+test tests::annexb_block_func_conflict ... ok
+test tests::annexb_html_comments ... ok
+test tests::arithmetic ... ok
+test tests::annexb_web_compat_batch ... ok
+test tests::abstract_subclass ... ok
+test tests::array_buffer_species_and_transfer_resizable ... ok
+test tests::array_copy_within_holes ... ok
+test interpreter::frames::tests::fresh_activation_closure_reflects_the_actual_cached_call_target ... ok
+test tests::array_element_set_preserves_attributes ... ok
+test tests::array_bycopy_groupby ... ok
+test tests::array_destructuring_assignment_iterator_close ... ok
+test tests::accessor_arity ... ok
+test tests::array_concat_slice_holes ... ok
+test tests::array_buffer_slice_species_and_isview ... ok
+test tests::array_flat_flatmap_species_and_throw ... ok
+test tests::array_concat_spreadable_and_proxy ... ok
+test tests::array_iteration_uses_toobject_receiver ... ok
+test tests::array_flat_flatmap_holes ... ok
+test tests::array_iterator_exhaustion_and_ta_bounds ... ok
+test tests::annexb_function_in_block_hoisting ... ok
+test tests::array_from_async_getmethod_and_arraylike ... ok
+test tests::array_iteration_proxy_receiver ... ok
+test tests::array_isarray_proxy ... ok
+test tests::array_literal_elements_are_own_props ... ok
+test tests::array_length_set_coercion_order ... ok
+test tests::array_exotic_defineprop ... ok
+test tests::array_like_near_integer_limit ... ok
+test tests::array_length_shrink_stops_at_non_configurable ... ok
+test interpreter::constructor_body::tests::empty_base_class_cached_construction_preserves_context_and_failures ... ok
+test tests::array_reverse_holes ... ok
+test tests::array_from_fixes ... ok
+test tests::array_length_index ... ok
+test tests::array_of_constructor ... ok
+test tests::array_mutators_on_primitive_this_are_generic ... ok
+test tests::array_splice_holes_and_shift ... ok
+test tests::array_methods_coerce_primitive ... ok
+test tests::array_species_create_constructor_validation ... ok
+test interpreter::arrays::tests::regexp_capture_arrays_keep_descriptors_indices_and_unicode_values ... ok
+test tests::array_from_async ... ok
+test tests::array_species_result_uses_create_data_prop_or_throw ... ok
+test tests::array_species ... ok
+test tests::arrow_inherits_lexical_new_target ... ok
+test tests::array_reduce_right_holes_and_callable ... ok
+test tests::array_sort_holes_and_delete ... ok
+test tests::array_to_locale_string ... ok
+test tests::assign_destructure_close ... ok
+test tests::arraylike_string_length ... ok
+test tests::array_methods ... ok
+test tests::array_spec_semantics_batch ... ok
+test tests::assignment_to_tdz_binding_throws ... ok
+test tests::async_generator_return_awaits_value ... ok
+test tests::arraybuffer_accessor_getters ... ok
+test tests::async_generator_yield_awaits_operand ... ok
+test tests::arraybuffer_length_validation ... ok
+test tests::async_from_sync_close_on_rejection ... ok
+test tests::async_tail_return_survives_leaked_tco ... ok
+test tests::async_functions ... ok
+test tests::async_dispose_settles_via_return_result ... ok
+test tests::async_generator_coroutine ... ok
+test tests::async_generator_yield_star_delegation ... ok
+test tests::async_disposable_stack ... ok
+test tests::atomics_rmw_is_atomic_across_threads ... ok
+test tests::arraylike_huge_length ... ok
+test tests::atomics_wait_notify_validation_order ... ok
+test tests::atomics_index_and_ops ... ok
+test tests::atomics_wait_async ... ok
+test tests::async_generators ... ok
+test tests::atomics_waitasync_sees_same_job_notify ... ok
+test tests::bigint_asintn_uintn_coercion ... ok
+test tests::async_label_dup_param ... ok
+test tests::async_coroutine ... ok
+test tests::atomics_methods_and_validation ... ok
+test jit::local_slot::tests::local_property_get_preserves_reentrant_gc_and_thrown_values ... ok
+test tests::block_async_fn_redecl ... ok
+test tests::bytecode_compiles_labelled_loops ... ok
+test tests::bigint_prop_names ... ok
+test tests::bytecode_async_vm ... ok
+test tests::bytecode_property_inline_cache ... ok
+test tests::bytecode_try_catch ... ok
+test tests::bigint_relational_compare_is_exact ... ok
+test tests::boxed_bigint_wrapper ... ok
+test tests::atomics_basic ... ok
+test tests::bigint_typed_arrays ... ok
+test tests::class_methods_non_enumerable ... ok
+test tests::classes_inheritance ... ok
+test tests::boxed_symbol_wrapper ... ok
+test tests::catch_dup_binding ... ok
+test tests::bigint_constructor_string_radix ... ok
+test tests::closures ... ok
+test tests::class_validation ... ok
+test tests::bound_function_length_name ... ok
+test tests::class_constructor_call_and_return_semantics ... ok
+test tests::block_scope_redeclaration_early_errors ... ok
+test tests::collator_three_level_compare ... ok
+test tests::classes_basic ... ok
+test tests::compiled_regexp_literal_is_fresh ... ok
+test tests::compiled_update_free_name ... ok
+test tests::bytecode_labelled_loops_match_interp ... ok
+test tests::collection_brand_check ... ok
+test tests::bigint ... ok
+test tests::break_carries_completion_value ... ok
+test tests::coll_brand_checks ... ok
+test tests::compiled_typeof_unresolved_name ... ok
+test tests::control_flow ... ok
+test tests::compiled_parameterless_arguments_object ... ok
+test tests::catch_param_lexical_redecl ... ok
+test tests::compound_assignment_resolves_reference_once ... ok
+test tests::dataview_float16 ... ok
+test tests::collection_brand_checks ... ok
+test tests::cldr_unit_patterns_correct_ids ... ok
+test tests::date_called_as_function_returns_string ... ok
+test tests::date_setter_order_and_invalid ... ok
+test tests::cross_realm_calls_and_constructs ... ok
+test tests::cross_realm_construct_semantics ... ok
+test tests::debug_type_sizes ... ok
+test tests::dataview_index_validation ... ok
+test tests::date_get_set_year ... ok
+test tests::date_to_json_generic ... ok
+test tests::date_parse_rfc ... ok
+test tests::dataview_length_tracking_and_toprimitive ... ok
+test tests::date_toprimitive ... ok
+test tests::date_to_temporal_instant ... ok
+test tests::deferred_ns_in_tla_cycle_hydrates_after_evaluation ... ok
+test tests::date_format_methods ... ok
+test tests::destructuring_assignment_target_reference_order ... ok
+test tests::delete_private_member ... ok
+test tests::decorators_runtime ... ok
+test tests::dtf_chinese_calendar_year_parts ... ok
+test tests::disposable_stack_semantics ... ok
+test tests::dates ... ok
+test tests::dynamic_function_coerces_params_before_body ... ok
+test tests::dbg_slice_to_immutable ... ok
+test tests::dataview_offset_validation ... ok
+test tests::directive_prologue_scans_all_directives ... ok
+test tests::dynamic_import_does_not_preempt_dfs_order ... ok
+test tests::detached_typedarray ... ok
+test tests::destructuring_assignment ... ok
+test tests::dynamic_import_of_deferred_module_evaluates_it ... ok
+test tests::ctor_requires_new ... ok
+test tests::error_is_error_and_stack ... ok
+test tests::eval_created_local_bindings_are_deletable ... ok
+test tests::destructuring_and_for_head_early_errors ... ok
+test tests::dstr_target_validation ... ok
+test tests::define_property_semantics ... ok
+test tests::dynamic_import_top_level_await ... ok
+test tests::eval_global_function_non_definable_is_type_error ... ok
+test tests::escaped_reserved_words ... ok
+test tests::error_cause ... ok
+test tests::errors_have_names ... ok
+test tests::field_initializer_new_target ... ok
+test tests::eval_var_over_lexical_is_syntax_error ... ok
+test tests::eval_direct_and_indirect ... ok
+test tests::eval_lexical_declarations_do_not_leak ... ok
+test tests::eval_var_arguments_in_parameter_default_throws ... ok
+test tests::eval_new_target_and_super_property ... ok
+test tests::equality_and_coercion ... ok
+test tests::disposable_stack ... ok
+test tests::float16_rounds_once ... ok
+test tests::finalization_registry_validation ... ok
+test tests::fn_name_symbol_keys ... ok
+test tests::destructuring ... ok
+test tests::from_char_code_combines_surrogate_pairs ... ok
+test tests::for_head_no_in ... ok
+test tests::function_apply_dense_and_observable_fallbacks ... ok
+test tests::dup_lexical ... ok
+test tests::for_of_member_target ... ok
+test tests::function_expression_name_is_non_strict_immutable ... ok
+test tests::frozen_array_throws ... ok
+test tests::forof_lazy_close ... ok
+test tests::function_constructor ... ok
+test tests::for_await_of ... ok
+test tests::function_to_string_source_text ... ok
+test tests::function_bind_length_and_tostring ... ok
+test tests::generator_prototype_constructor_links ... ok
+test tests::fn_decl_stmt_position ... ok
+test tests::gc_registry_reuses_dead_object_slots ... ok
+test tests::generator_function_intrinsics ... ok
+test tests::get_iterator_reads_next_lazily ... ok
+test tests::generator_prototype_chain ... ok
+test tests::import_bytes_modules ... ok
+test tests::global_declaration_instantiation ... ok
+test tests::immutable_array_buffer ... ok
+test tests::import_json_modules ... ok
+test tests::import_json_attr_distinct_from_plain_import ... ok
+test tests::import_text_attribute_reaches_loader ... ok
+test tests::host_262 ... ok
+test tests::generator_coroutine ... ok
+test tests::inline_deopt_on_method_reassignment ... ok
+test tests::import_text_modules ... ok
+test tests::global_object_sync ... ok
+test tests::get_prototype_of_and_error_subclassing ... ok
+test tests::inline_sloppy_this_primitive_receiver_deopts ... ok
+test tests::inline_throw_from_spliced_body ... ok
+test tests::global_value_property_descriptors ... ok
+test tests::inline_argc_adjustment_and_returns ... ok
+test tests::inline_vars_reset_per_invocation ... ok
+test tests::inline_recompile_preserves_monomorphic_and_polymorphic_property_sites ... ok
+test tests::inline_recompile_preserves_four_way_call_sites_across_epoch_refill ... ok
+test tests::interp_layout_probes ... ok
+test tests::inline_four_way_nested_dispatch_and_deopt ... ok
+test tests::generators ... ok
+test tests::iterator_helper_return_propagates ... ok
+test tests::iterator_eager_close_on_found_propagates ... ok
+test tests::iterator_concat_return_closes_inner ... ok
+test tests::iterator_flatmap ... ok
+test tests::iterator_close_destructure ... ok
+test tests::instanceof_default_intrinsic_and_override ... ok
+test tests::inline_seeded_call_cache_pins_dead_callee_addresses ... ok
+test tests::iterator_helpers_require_object_this ... ok
+test tests::iterator_next_brand_checks ... ok
+test tests::iterator_helpers_close_and_from ... ok
+test tests::iterator_take_closes_on_bad_limit ... ok
+test tests::iterator_prototypes_own_next ... ok
+test tests::iterator_protocol ... ok
+test tests::iterator_take_exhaustion_closes ... ok
+test tests::iterator_zip_modes ... ok
+test tests::early_errors ... ok
+test tests::iterator_helpers ... ok
+test tests::iterator_zip_basics ... ok
+test tests::iterator_take_drop ... ok
+test tests::jit_compact_warmed_property_probes_deopt_cleanly ... ok
+test tests::jit_array_push_pop_intrinsics_preserve_live_guards_and_ownership ... ok
+test tests::jit_bitnot_numeric_fast_path_and_coercion_bails ... ok
+test tests::float16_array ... ok
+test tests::jit_function_apply_forwards_dense_arguments ... ok
+test tests::jit_inlined_equality_return_threads_into_caller_condition ... ok
+test tests::jit_linked_scan_preserves_loose_htmldda_null_semantics ... ok
+test tests::jit_direct_calls_support_wide_argument_lists ... ok
+test tests::jit_local_equality_branch_preserves_coercion_and_htmldda ... ok
+test tests::jit_math_sqrt_intrinsic_preserves_fallbacks_and_identity_guards ... ok
+test tests::jit_numeric_diamond_fills_small_holey_arrays_and_deopts_for_setters ... ok
+test tests::jit_construct_arguments_apply_forwarder_preserves_live_guards ... ok
+test tests::jit_cached_name_updates_and_stores_preserve_live_guards ... ok
+test tests::jit_reads_packed_dense_values_without_losing_identity ... ok
+test tests::jit_peek_truthiness_covers_all_value_kinds ... ok
+test tests::jit_numeric_property_chains_guard_live_values_and_shapes ... ok
+test tests::jit_plain_object_templates_move_values_without_aliasing ... ok
+test tests::jit_function_call_intrinsic_preserves_target_and_receiver_guards ... ok
+test tests::jit_moved_frames_preserve_activations_and_arguments ... ok
+test tests::jit_constructor_creation_cache_deopts_on_prototype_changes ... ok
+test bytecode::write_strictness::tests::property_and_element_writes_use_the_callee_mode_after_fast_calls ... ok
+test tests::gc_keeps_reachable_cycles ... ok
+test tests::jit_scheduler_active_inline_null_materialization_preserves_stale_owner_aliases ... ok
+test tests::jit_scheduler_active_handler_incoming_work_delivery_replays_late_guards_and_aliases ... ok
+test tests::jit_scheduler_active_handler_incoming_suspend_parity_case ... ok
+test tests::jit_scheduler_active_prefix_materializes_and_deopts_transactionally ... ok
+test tests::jit_scheduler_active_handler_null_full_replays_live_globals_accessors_and_methods ... ok
+test tests::jit_scheduler_active_idle_stitches_releases_and_replays_late_method_guard ... ok
+test tests::jit_scheduler_active_handler_null_full_transfers_delivery_and_completion_owners ... ok
+test tests::jit_scheduler_active_idle_replays_changed_callees_and_alias_edges_once ... ok
+test tests::jit_scheduler_active_handler_incoming_replays_changed_methods_once ... ok
+test tests::gc_side_table_pinning ... ok
+test tests::gc_reclaims_cycles ... ok
+test tests::jit_scheduler_active_null_dispatch_replays_run_changes_and_task_accessor_once ... ok
+test tests::jit_scheduler_active_handler_incoming_work_delivery_moves_source_and_v2_owners ... ok
+test bytecode::inline_frames::tests::specialized_loop_side_exit_reconstructs_the_inlined_getters_caller ... ok
+test tests::jit_scheduler_active_handler_incoming_suspend_replays_bounds_and_guards ... ok
+test tests::jit_scheduler_active_handler_incoming_work_delivery_parity_case ... ok
+test tests::jit_scheduler_active_handler_incoming_suspend_enabled_disabled_parity ... ok
+test tests::jit_scheduler_active_handler_incoming_suspend_moves_bounded_packet_pools ... ok
+test tests::jit_scheduler_active_worker_null_stitches_suspend_and_replays_method_guards ... ok
+test tests::jit_scheduler_active_null_dispatches_all_richards_roles_and_owners ... ok
+test tests::jit_scheduler_device_queue_guards_ownership_descriptors_and_overflow ... ok
+test tests::jit_scheduler_fast_loop_rechecks_after_generic_calls_and_budget ... ok
+test tests::jit_scheduler_active_worker_packet_preempts_and_preserves_owners ... ok
+test tests::jit_scheduler_device_suspend_guards_methods_globals_and_descriptors ... ok
+test tests::jit_scheduler_generic_exit_invalidates_tcb_role_and_shell_global_epoch ... ok
+test tests::jit_scheduler_device_hold_guards_methods_ownership_and_numeric_updates ... ok
+test tests::jit_scheduler_active_worker_packet_preserves_source_order_on_throws ... ok
+test tests::jit_scheduler_foreign_blocks_target_replays_queue_methods_once ... ok
+test tests::jit_scheduler_graph_active_device_packet_fallback_parity_case ... ok
+test tests::jit_scheduler_active_worker_packet_replays_changed_methods_once ... ok
+test tests::jit_scheduler_graph_active_device_packet_fallback_preserves_graph_and_last_owners ... ok
+test tests::jit_scheduler_graph_active_packet_role_router_exact_roles ... ok
+test tests::jit_scheduler_epoch_rechecks_role_identity_and_task_shape_after_long_direct_chain ... ok
+test tests::jit_scheduler_graph_core_suspend_parity_case ... ok
+test tests::jit_scheduler_graph_core_epoch_soft_rejects_foreign_task_scheduler_once ... ok
+test tests::jit_scheduler_graph_core_incoming_soft_rejects_foreign_handler_scheduler_once ... ok
+test tests::jit_scheduler_graph_core_incoming_suspend_parity_case ... ok
+test tests::jit_scheduler_graph_active_device_packet_fallback_replays_live_guards_once ... ok
+test tests::jit_scheduler_graph_core_epoch_rebuilds_task_identities_across_calls ... ok
+test tests::jit_scheduler_graph_epoch_rejects_observable_and_foreign_scheduler_graphs ... ok
+test tests::jit_scheduler_shell_guards_methods_globals_and_value_types ... ok
+test tests::jit_seeded_numeric_name_cache_reads_live_mutations ... ok
+test tests::jit_slice_and_hasown_intrinsics_preserve_slow_paths ... ok
+test tests::jit_writes_packed_dense_values_without_losing_ownership ... ok
+test tests::json_and_reflect ... ok
+test tests::json_parse_reviver ... ok
+test tests::json_parse_reviver_context_source ... ok
+test tests::json_stringify_proxy_and_wrappers ... ok
+test tests::json_stringify_replacer ... ok
+test tests::json_stringify_space_and_replacer_tostring ... ok
+test tests::label_validation ... ok
+test tests::labelled_continue_while ... ok
+test tests::lexical_substatement ... ok
+test tests::listformat_to_parts_and_temporal_removed_methods ... ok
+test tests::literal_early_errors ... ok
+test tests::locale_canonicalization_and_likely_subtags ... ok
+test tests::lookbehind_backwards_matching ... ok
+test tests::loop_chain_counter_edges ... ok
+test tests::loop_chain_elem_dedup_and_aliasing ... ok
+test tests::loop_chain_float_loops_stay_float ... ok
+test tests::loop_chain_int_kernel ... ok
+test tests::loop_chain_name_probe_does_not_clobber_sixth_integer_home ... ok
+test tests::loop_chain_zero_trip_and_bails ... ok
+test tests::jit_scheduler_graph_epoch_rebuilds_same_layout_blocks_identity_after_delayed_exit ... ok
+test tests::loop_completion_values ... ok
+test tests::map_and_set ... ok
+test tests::map_set_iterators ... ok
+test tests::map_getorinsert ... ok
+test tests::mapped_arguments_define_semantics ... ok
+test tests::mapped_arguments_object ... ok
+test tests::math_constants_and_hypot ... ok
+test tests::math_sum_precise ... ok
+test tests::misc_globals ... ok
+test tests::missing_methods_batch2 ... ok
+test tests::jit_scheduler_handler_incoming_delivery_fuses_preempt_and_replays_late_guards ... ok
+test tests::module_circular_imports ... ok
+test tests::module_default_expression_self_import ... ok
+test tests::jit_scheduler_handler_incoming_device_bridge_preserves_owners_and_replays_guards ... ok
+test tests::module_live_bindings ... ok
+test tests::module_missing_export_is_syntax_error ... ok
+test tests::module_named_and_default_exports ... ok
+test tests::module_namespace_object ... ok
+test tests::module_bindings_and_source_phase ... ok
+test tests::module_star_reexport ... ok
+test tests::module_namespace_is_frozen ... ok
+test tests::module_tdz_across_import ... ok
+test tests::modules_basic ... ok
+test tests::modules_live_bindings ... ok
+test tests::named_backreferences ... ok
+test tests::named_evaluation ... ok
+test tests::named_eval_defaults ... ok
+test tests::new_import_error ... ok
+test tests::new_target_context ... ok
+test tests::new_import_nested ... ok
+test tests::new_target_basics ... ok
+test tests::new_target_not_leaked_into_nested_native_call ... ok
+test tests::nonsimple_params_use_strict ... ok
+test tests::number_constants_and_tofixed ... ok
+test tests::not_a_constructor ... ok
+test tests::numberformat_exact_decimal_inputs ... ok
+test tests::memory_caps_convert_blowups_to_rangeerror ... ok
+test tests::object_assign_semantics ... ok
+test tests::object_assign_throws_creating_on_sealed_target ... ok
+test tests::numeric_separators ... ok
+test tests::object_define_properties_spec ... ok
+test tests::object_descriptors_coercion ... ok
+test tests::object_freeze_seal_integrity ... ok
+test tests::object_from_entries ... ok
+test tests::object_literal_methods ... ok
+test tests::object_literal_proto_setter ... ok
+test tests::object_proto_accessor ... ok
+test tests::jit_scheduler_handler_v2_delivery_preserves_aliases_and_owner_moves ... ok
+test tests::object_methods_coerce ... ok
+test tests::number_tostring_spec ... ok
+test tests::object_to_locale_string ... ok
+test tests::objects_and_prototypes ... ok
+test tests::packed_elements_do_not_duplicate_far_index_entries ... ok
+test tests::packed_dense_numeric_array_semantics ... ok
+test tests::object_rest_destructuring_assignment ... ok
+test tests::parse_int_radix_to_uint32 ... ok
+test tests::parse_float_infinity_and_prefix ... ok
+test tests::optional_chaining ... ok
+test tests::parser_early_errors_yield_await_identifiers ... ok
+test tests::parser_early_errors_operators ... ok
+test tests::parser_early_errors_coalesce_mixing ... ok
+test tests::private_elements_on_non_extensible_receivers ... ok
+test tests::poison_pill ... ok
+test tests::number_methods_fixed ... ok
+test tests::private_in ... ok
+test tests::private_member_brand_check ... ok
+test tests::private_name_no_escape ... ok
+test tests::primitive_wrappers ... ok
+test tests::promise_all_race_use_constructor_capability ... ok
+test tests::private_names_are_per_class_evaluation ... ok
+test tests::promise_already_resolved_is_per_resolver_pair ... ok
+test tests::private_set_method_and_getter_only ... ok
+test tests::promise_combinator_reject_noniterable ... ok
+test tests::promise_all_user_then ... ok
+test tests::private_names_not_observable ... ok
+test tests::probe21_tmp ... ok
+test tests::promise_combinators_async ... ok
+test tests::promise_internal_function_shapes ... ok
+test tests::promise_resolving_function_shape ... ok
+test tests::promise_combinators ... ok
+test tests::promise_keyed ... ok
+test tests::promise_subclass_resolver_settles_subclass_instance ... ok
+test tests::promise_resolve_reject_this ... ok
+test tests::promise_combinator_this_check ... ok
+test tests::promises ... ok
+test tests::promise_try_regexp_escape ... ok
+test tests::proxy_define_property_invariants ... ok
+test tests::proto_dup_literal_vs_pattern ... ok
+test tests::property_order ... ok
+test tests::proto_wrapper_exotics ... ok
+test tests::proxy ... ok
+test tests::proxy_for_in_and_has_own ... ok
+test tests::proxy_forwarding_and_newtarget ... ok
+test tests::proxy_get_invariant ... ok
+test tests::proxy_defineprop_trap ... ok
+test tests::proxy_delete_trap ... ok
+test tests::proxy_has_string_wrapper_and_symbol_key ... ok
+test tests::proxy_gopd_trap ... ok
+test tests::proxy_get_receiver ... ok
+test tests::proxy_keys ... ok
+test tests::proxy_get_set_symbol_trap_key ... ok
+test tests::proxy_set_invariant ... ok
+test tests::proxy_misc_traps ... ok
+test tests::proxy_set_receiver_and_strict_delete ... ok
+test tests::proxy_more_invariants ... ok
+test tests::proxy_traps ... ok
+test tests::reflect_construct_newtarget ... ok
+test tests::reflect_set_receiver ... ok
+test tests::reduce_indexof_holes ... ok
+test tests::reflect_completeness ... ok
+test tests::regex_group_name_validation ... ok
+test tests::regex_no_line_terminator ... ok
+test tests::regex_prop_invalid_special ... ok
+test tests::regex_literal_parse_validation ... ok
+test tests::regex_prop_syntax ... ok
+test tests::regex_inline_modifiers ... ok
+test tests::regex ... ok
+test tests::regex_smuggle_range_and_vflag ... ok
+test tests::regex_validation ... ok
+test tests::regexp_d_flag_indices ... ok
+test tests::regexp_duplicate_named_groups_matching ... ok
+test tests::regexp_flags_getter_generic ... ok
+test tests::regexp_class_and_property_escapes ... ok
+test tests::regexp_group_name_surrogate_escapes ... ok
+test tests::regexp_match_and_matchall ... ok
+test tests::regex_property_escapes ... ok
+test tests::regexp_replace_dollar_substitutions ... ok
+test tests::jit_scheduler_handler_v2_empty_preempt_preserves_effects_and_owners ... ok
+test tests::regexp_symbol_methods_are_generic ... ok
+test tests::regexp_split_uses_species_and_captures ... ok
+test tests::regexp_proto_getters ... ok
+test tests::jit_scheduler_handler_queue_transfers_owners_and_replays_before_effects ... ok
+test tests::regexp_u_surrogates_and_case_mapping ... ok
+test tests::scratch_eval_file ... ok
+test tests::resizable_typed_array_integrity ... ok
+test tests::restricted_caller_arguments_shared_accessor ... ok
+test tests::resizable_arraybuffer ... ok
+test tests::regexp_symbol_methods ... ok
+test tests::set_map_brand_checks ... ok
+test tests::set_returns_boolean ... ok
+test tests::regexp_u_mode_early_errors ... ok
+test tests::set_methods ... ok
+test tests::shadow_realm_eval_scoping ... ok
+test tests::set_operations_spec ... ok
+test tests::shared_array_buffer_aliasing ... ok
+test tests::shadow_realm_wrapped_function_copies_name_length ... ok
+test tests::regexp_v_flag_class_sets ... ok
+test tests::shared_array_buffer_getters ... ok
+test tests::shadow_realm_wrapped_fn ... ok
+test tests::shadow_realm_cross_calls ... ok
+test tests::simple_assignment_reference_before_rhs ... ok
+test tests::slice_nan_end_is_zero ... ok
+test tests::shared_array_buffer_slice_species ... ok
+test tests::sloppy_this_boxing ... ok
+test tests::shorthand_reserved_word ... ok
+test tests::small_holey_arrays_keep_absence_and_prototype_setter_semantics ... ok
+test tests::sort_comparator_validation ... ok
+test tests::sparse_array_holes ... ok
+test tests::species_getters ... ok
+test tests::strict_mode_assignment ... ok
+test tests::static_block_forbids_arguments ... ok
+test tests::shadow_realm_basic ... ok
+test tests::strict_var_hoisting_in_functions ... ok
+test tests::string_iterator_is_lazy_by_code_point ... ok
+test tests::string_iterator ... ok
+test tests::string_from_char_code_touint16 ... ok
+test tests::split_limit_and_radix ... ok
+test tests::string_match_search_delegate ... ok
+test tests::string_replace_all_regex ... ok
+test tests::string_replace_named_group_callback ... ok
+test tests::statement_completion_values ... ok
+test tests::string_normalize_forms ... ok
+test tests::string_matchall_replaceall_regexp_rules ... ok
+test tests::small_area_conformance_fixes ... ok
+test tests::string_replace_all_spec_order ... ok
+test tests::string_replace_substitution ... ok
+test tests::string_split_delegate ... ok
+test tests::string_trim_feff ... ok
+test tests::super_assignment_null_base_throws ... ok
+test tests::string_lastindexof ... ok
+test tests::string_search_position_and_regexp ... ok
+test tests::subclass_state ... ok
+test tests::symbol_proto_to_primitive_and_tag ... ok
+test tests::syntax_error_is_parse_phase ... ok
+test tests::super_property_context ... ok
+test tests::super_set_and_constructor_return_override ... ok
+test tests::super_call_in_ordinary_function_is_early_error ... ok
+test tests::super_call_early_errors ... ok
+test tests::ta_prototype_accessors ... ok
+test tests::sub_ten_area_fixes ... ok
+test tests::ta_returns_ta ... ok
+test tests::tagged_templates ... ok
+test tests::ta_meta_not_own ... ok
+test tests::template_with_comments_in_substitution ... ok
+test tests::ta_index_properties ... ok
+test tests::temporal_duration_round_relative ... ok
+test tests::symbols ... ok
+test tests::template_literals ... ok
+test tests::temporal_named_timezones ... ok
+test tests::temporal_basics ... ok
+test tests::template_octal_escape ... ok
+test tests::tdz_fn_toplevel ... ok
+test tests::temporal_round_string ... ok
+test tests::temporal_until_since ... ok
+test tests::temporal_tostring_options ... ok
+test tests::temporal_zoned ... ok
+test tests::throw_type_error_single_per_realm ... ok
+test tests::temporal_duration_arithmetic_and_parsing ... ok
+test tests::throw_type_error_intrinsic ... ok
+test tests::tla_fulfillment_resolves_leaf_before_ancestors ... ok
+test tests::to_property_key_symbol_result ... ok
+test tests::top_level_for_await_runs_outside_a_coroutine ... ok
+test tests::typed_and_deferred_modules ... ok
+test tests::to_primitive_symbol ... ok
+test tests::typed_array_bytes_per_element_descriptor ... ok
+test tests::typedarray_exotic_internals ... ok
+test tests::to_string_tag ... ok
+test tests::typed_array_intrinsic ... ok
+test tests::typedarray_from_of_validation ... ok
+test tests::typedarray_iteration_semantics ... ok
+test tests::typedarray_identity_and_names ... ok
+test tests::typedarray_sort_semantics ... ok
+test tests::typedarray_slice_and_subclass_buffer ... ok
+test tests::typedarray_set_semantics ... ok
+test tests::typedarray_subarray_semantics ... ok
+test tests::uint8_setfrom ... ok
+test tests::typeof_tdz ... ok
+test tests::typed_arrays ... ok
+test tests::unicode_ident_escapes ... ok
+test tests::unicode_identifiers ... ok
+test tests::update_target_errors ... ok
+test tests::uint8_base64_hex ... ok
+test tests::uint8array_base64_hex_spec ... ok
+test tests::variables_and_scope ... ok
+test tests::var_nested_block_redecl ... ok
+test tests::undeclared_private_name ... ok
+test token::tests::keyword_table_is_sorted_for_binary_search ... ok
+test token::tests::punctuation_dispatch_preserves_longest_match ... ok
+test tests::weak_collections_symbol_keys ... ok
+test tests::weakmap_get_or_insert ... ok
+test value::gc_edges::tests::counts_accessor_storage_even_without_accessor_flag ... ok
+test value::gc_edges::tests::preserves_duplicate_edges_and_releases_source_borrow ... ok
+test tests::weakref_brand_and_tag ... ok
+test value::gc_edges::tests::scalar_payloads_have_no_edges_and_only_empty_is_a_hole ... ok
+test value::packed_value_tests::packed_value_moves_reference_ownership_without_a_bump ... ok
+test value::props::array_builder::tests::boundaries_preserve_inline_heap_shape_and_length_descriptors ... ok
+test value::packed_value_tests::packed_frame_conversion_is_overlap_safe_and_ownership_neutral ... ok
+test value::packed_value_tests::packed_value_is_one_word_and_round_trips_scalars ... ok
+test value::props::array_builder::tests::holes_undefined_and_rejected_oversize_keep_ownership ... ok
+test tests::with_statement ... ok
+test value::props::array_builder::tests::iterator_panic_releases_initialized_inline_and_heap_owners ... ok
+test value::props::array_builder::tests::owned_and_raw_builders_transfer_duplicate_owners_once ... ok
+test value::ta_kind_tests::bigint_fixed_width_writes_match_allocating_encoder ... ok
+test value::ta_kind_tests::fixed_width_writes_match_allocating_encoders ... ok
+test tests::utf16_semantics ... ok
+test tests::uri_decode_spec ... ok
+test tests::jit_scheduler_handler_v2_delivery_guards_effect_order_and_live_values ... ok
+test tests::jit_scheduler_handler_v2_empty_preempt_replays_observable_guards_once ... ok
+test tests::jit_scheduler_pc59_cold_epoch_orders_same_shape_device_and_handler_roles ... ok
+test tests::jit_scheduler_idle_release_replays_observable_guards_and_partial_effects_once ... ok
+test tests::jit_scheduler_idle_release_flattens_both_branches_and_preserves_return_owners ... ok
+test tests::jit_scheduler_handler_wait_suspend_guards_live_values_and_descriptors ... ok
+test tests::jit_scheduler_trusted_session_rechecks_globals_and_state_after_user_code ... ok
+test tests::jit_scheduler_pc59_device_hold_replays_late_link_throw_and_preserves_owner ... ok
+test tests::jit_scheduler_refilled_epoch_rechecks_nested_suspend_methods_after_generic_exit ... ok
+
+test result: ok. 719 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.97s
+
+     Running unittests src/bin/lumen.rs (target/debug/deps/lumen-c5bf8dd3b2899e6f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/activation_layouts.rs (target/debug/deps/activation_layouts-937dbcba848b133b)
+
+running 2 tests
+test large_activations_are_independent_and_updates_are_live ... ok
+test hoisted_collisions_tdz_const_and_owned_values ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/async_iterator_close.rs (target/debug/deps/async_iterator_close-412f3ae3d419118d)
+
+running 2 tests
+test close_does_not_drain_unrelated_microtasks ... ok
+test close_waits_for_later_settlement_and_preserves_completion ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/captured_arguments.rs (target/debug/deps/captured_arguments-010f5fdb931ee7e7)
+
+running 3 tests
+test arrow_reads_arguments_after_loop ... ok
+test arrow_reads_arguments_after_call_count_transition ... ok
+test escaping_arrows_share_live_binding_per_call ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/captured_defaults.rs (target/debug/deps/captured_defaults-d7eee048950fb3ab)
+
+running 3 tests
+test hoist_conflicts_and_effectful_defaults_preserve_order ... ok
+test later_defaults_and_body_initializers_observe_initialized_capture ... ok
+test fresh_defaults_and_explicit_arguments_keep_identity ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/collection_index.rs (target/debug/deps/collection_index-8062b29ebde232ef)
+
+running 6 tests
+test computed_insertion_rechecks_callback_mutations ... ok
+test foreach_observes_mutation_without_revisiting_updates ... ok
+test same_value_zero_and_identity_keys ... ok
+test live_iterators_survive_delete_clear_and_reinsert ... ok
+test weak_collections_preserve_key_validation_and_identity ... ok
+test growth_deletion_and_bulk_construction_keep_indexes_consistent ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/dense_property_lookup.rs (target/debug/deps/dense_property_lookup-83b89f4678721a47)
+
+running 1 test
+test indexed_descriptors_remain_correct_across_holes_sparse_keys_and_slot_shifts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/for_in.rs (target/debug/deps/for_in-d2f70207a84e4445)
+
+running 4 tests
+test no_array_iterator_protocol_and_exceptions_propagate ... ok
+test deletion_and_proxy_callbacks_match_snapshot_semantics ... ok
+test own_order_prototypes_shadowing_and_primitives ... ok
+test lexical_head_tdz_capture_and_loop_control ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/forwarded_calls.rs (target/debug/deps/forwarded_calls-e4cead1769690ac9)
+
+running 6 tests
+test builtin_override_proxy_and_strict_receiver ... ok
+test forwarded_calls_preserve_observable_caller_frames_after_warmup ... ok
+test guard_misses_preserve_lexical_new_target_and_foreign_realms ... ok
+test optimized_constructor_keeps_prototype_return_and_target_guards ... ok
+test recursive_forwarding_and_argument_ownership ... ok
+test polymorphic_targets_closures_and_exceptions ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/function_source_text.rs (target/debug/deps/function_source_text-f327008adc79fd8c)
+
+running 1 test
+test function_source_preserves_unicode_comments_and_template_offsets ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/issue_40.rs (target/debug/deps/issue_40-6e4128516b2289a0)
+
+running 4 tests
+test push_respects_non_extensible_arrays ... ok
+test nested_async_arrow_bodies_leave_parameter_context ... ok
+test tail_optional_chains_short_circuit_once ... ok
+test tail_call_errors_evaluate_receivers_callees_and_arguments_once ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/jit_integer_ops.rs (target/debug/deps/jit_integer_ops-bf70041253ed947c)
+
+running 1 test
+test integer_templates_match_to_int32_and_shift_boundaries ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/jit_last_uses.rs (target/debug/deps/jit_last_uses-4d1bec92590e860b)
+
+running 3 tests
+test branches_loops_and_overwrites_preserve_live_values ... ok
+test throws_captures_and_tdz_keep_original_semantics ... ok
+test returns_and_arguments_keep_every_value_representation ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/jit_numeric_elements.rs (target/debug/deps/jit_numeric_elements-531008596df8a067)
+
+running 1 test
+test numeric_element_reads_recheck_holes_descriptors_and_exotic_receivers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/jit_numeric_stores.rs (target/debug/deps/jit_numeric_stores-26ceaaddf20b0ccf)
+
+running 1 test
+test numeric_element_stores_keep_properties_and_mirrors_coherent ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/jit_property_values.rs (target/debug/deps/jit_property_values-4d0be9243e60b3f1)
+
+running 1 test
+test cached_property_values_keep_ownership_and_recheck_live_objects ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/jit_scalar_ops.rs (target/debug/deps/jit_scalar_ops-6fbfd28675410daa)
+
+running 1 test
+test scalar_templates_match_interpreter_edges_and_fallbacks ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/lexical_this.rs (target/debug/deps/lexical_this-13d0462e115f2977)
+
+running 4 tests
+test receiver_read_precedes_assignment_rhs ... ok
+test derived_this_is_checked_at_each_read_not_at_entry ... ok
+test nested_arrows_forward_this_through_captured_activations ... ok
+test lexical_receiver_ignores_call_bind_and_apply ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/static_object_keys.rs (target/debug/deps/static_object_keys-175cbc7b0ad6c373)
+
+running 2 tests
+test names_unicode_and_value_evaluation_order ... ok
+test computed_proto_is_data_and_duplicate_order_is_preserved ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/switch_lexicals.rs (target/debug/deps/switch_lexicals-c6087d31ee639d0b)
+
+running 4 tests
+test escaped_case_binding_remains_live ... ok
+test discriminant_shadowing_fallthrough_and_default ... ok
+test case_tests_see_tdz_and_const_writes_throw ... ok
+test reentry_resets_tdz_and_continue_targets_outer_loop ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/temporal_feature.rs (target/debug/deps/temporal_feature-5e533bb2171ddb2e)
+
+running 1 test
+test temporal_feature_installs_the_temporal_surface ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/typedarray_constructor_copy.rs (target/debug/deps/typedarray_constructor_copy-3ca905cdf8ed2de3)
+
+running 1 test
+test typedarray_constructor_copies_internal_elements ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/typedarray_set.rs (target/debug/deps/typedarray_set-53c5068b74d9524c)
+
+running 1 test
+test typedarray_set_preserves_bytes_overlap_and_validation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests lumen
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

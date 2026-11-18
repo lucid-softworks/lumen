@@ -844,6 +844,7 @@ pub struct Interp {
     pub(crate) tier: crate::bytecode::Tier,
     /// Calls before an eligible function tier-ups to bytecode (env `LUMEN_TIER_THRESHOLD`).
     pub(crate) tier_threshold: u32,
+    pub(crate) compile_cache: Option<crate::compile_cache::CompileCache>,
     /// Recycled (slots, operand stack) buffers for bytecode-VM activations, so a hot call tree
     /// doesn't allocate two `Vec`s per call (see `bytecode::run`).
     pub(crate) vm_pool: Vec<(Vec<Value>, Vec<Value>)>,
@@ -1500,6 +1501,7 @@ impl Interp {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8),
+            compile_cache: None,
             vm_pool: Vec::new(),
             stub_cache: vec![std::cell::Cell::new(StubEntry::default()); STUB_CACHE_SIZE],
             frame_pool: FramePool(Vec::new()),
@@ -2164,6 +2166,34 @@ impl Interp {
         &mut self.host_state
     }
 
+    /// Enable an optional per-engine source-validated parse cache. Cache I/O failures after
+    /// initialization fall back to parsing; they never change JavaScript execution.
+    pub fn enable_compile_cache(
+        &mut self,
+        directory: &std::path::Path,
+    ) -> std::io::Result<std::path::PathBuf> {
+        if self.compile_cache.is_none() {
+            self.compile_cache = Some(crate::compile_cache::CompileCache::new(directory)?);
+        }
+        Ok(self.compile_cache.as_ref().unwrap().directory().to_owned())
+    }
+
+    /// The active build-specific directory, or None when caching is disabled.
+    pub fn compile_cache_directory(&self) -> Option<&std::path::Path> {
+        self.compile_cache.as_ref().map(|cache| cache.directory())
+    }
+
+    pub(crate) fn parse_cached(
+        &self,
+        source: &str,
+        module: bool,
+    ) -> Result<Vec<crate::ast::Stmt>, crate::parser::ParseError> {
+        match &self.compile_cache {
+            Some(cache) => cache.parse(source, module),
+            None => crate::compile_cache::parse(source, module),
+        }
+    }
+
     /// Shorthand for `op_state().get_mut::<T>()`.
     pub fn host_mut<T: std::any::Any>(&mut self) -> Option<&mut T> {
         self.host_state.get_mut()
@@ -2346,6 +2376,18 @@ impl Interp {
     /// handled by routing to their wrapper prototype (and string index/length specially). The
     /// receiver defaults to `base`.
     pub fn get_member(&mut self, base: &Value, key: &str) -> Result<Value, Abrupt> {
+        // Own data reads on ordinary objects need neither a receiver clone nor the
+        // side-table/prototype walk. The same per-object guard protects property ICs.
+        if let Value::Obj(object) = base {
+            let object = object.borrow();
+            if object.ic_plain.get() && matches!(object.exotic, Exotic::None | Exotic::Array) {
+                if let Some(property) = object.props.get(key) {
+                    if !property.accessor() {
+                        return Ok(property.value());
+                    }
+                }
+            }
+        }
         self.get_member_recv(base, key, base.clone())
     }
 

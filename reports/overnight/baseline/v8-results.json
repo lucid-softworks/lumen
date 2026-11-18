@@ -1,0 +1,794 @@
+[
+  {
+    "engine": "v8",
+    "name": "richards",
+    "round": 1,
+    "status": "ok",
+    "score": 58693,
+    "wallMs": 2027.916114,
+    "code": 0,
+    "signal": null,
+    "stdout": "Richards: 58693\n----\nScore (version 7): 58693\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/richards.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "richards",
+    "round": 1,
+    "status": "ok",
+    "score": 487,
+    "wallMs": 2005.0295249999995,
+    "code": 0,
+    "signal": null,
+    "stdout": "Richards: 487\n----\nScore (version 7): 487\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/richards.js"
+    ]
+  },
+  {
+    "engine": "v8",
+    "name": "deltablue",
+    "round": 1,
+    "status": "ok",
+    "score": 127013,
+    "wallMs": 2034.7916889999997,
+    "code": 0,
+    "signal": null,
+    "stdout": "DeltaBlue: 127013\n----\nScore (version 7): 127013\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/deltablue.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "deltablue",
+    "round": 1,
+    "status": "ok",
+    "score": 487,
+    "wallMs": 2031.812758,
+    "code": 0,
+    "signal": null,
+    "stdout": "DeltaBlue: 487\n----\nScore (version 7): 487\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/deltablue.js"
+    ]
+  },
+  {
+    "engine": "v8",
+    "name": "crypto",
+    "round": 1,
+    "status": "ok",
+    "score": 55553,
+    "wallMs": 4033.7600700000003,
+    "code": 0,
+    "signal": null,
+    "stdout": "Crypto: 55553\n----\nScore (version 7): 55553\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/crypto.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "crypto",
+    "round": 1,
+    "status": "ok",
+    "score": 311,
+    "wallMs": 15033.126316000002,
+    "code": 0,
+    "signal": null,
+    "stdout": "Crypto: 311\n----\nScore (version 7): 311\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/crypto.js"
+    ]
+  },
+  {
+    "engine": "v8",
+    "name": "raytrace",
+    "round": 1,
+    "status": "ok",
+    "score": 98937,
+    "wallMs": 2033.9493370000018,
+    "code": 0,
+    "signal": null,
+    "stdout": "RayTrace: 98937\n----\nScore (version 7): 98937\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/raytrace.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "raytrace",
+    "round": 1,
+    "status": "ok",
+    "score": 2023,
+    "wallMs": 3083.875809000001,
+    "code": 0,
+    "signal": null,
+    "stdout": "RayTrace: 2023\n----\nScore (version 7): 2023\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/raytrace.js"
+    ]
+  },
+  {
+    "engine": "v8",
+    "name": "earley-boyer",
+    "round": 1,
+    "status": "ok",
+    "score": 102973,
+    "wallMs": 4045.4230070000012,
+    "code": 0,
+    "signal": null,
+    "stdout": "EarleyBoyer: 102973\n----\nScore (version 7): 102973\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/earley-boyer.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "earley-boyer",
+    "round": 1,
+    "status": "ok",
+    "score": 747,
+    "wallMs": 10950.482827,
+    "code": 0,
+    "signal": null,
+    "stdout": "EarleyBoyer: 747\n----\nScore (version 7): 747\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/earley-boyer.js"
+    ]
+  },
+  {
+    "engine": "v8",
+    "name": "regexp",
+    "round": 1,
+    "status": "ok",
+    "score": 13701,
+    "wallMs": 2063.809548999998,
+    "code": 0,
+    "signal": null,
+    "stdout": "RegExp: 13701\n----\nScore (version 7): 13701\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/regexp.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "regexp",
+    "round": 1,
+    "status": "ok",
+    "score": 286,
+    "wallMs": 12414.645943000003,
+    "code": 0,
+    "signal": null,
+    "stdout": "RegExp: 286\n----\nScore (version 7): 286\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/regexp.js"
+    ]
+  },
+  {
+    "engine": "v8",
+    "name": "splay",
+    "round": 1,
+    "status": "ok",
+    "score": 42962,
+    "wallMs": 2125.5124030000006,
+    "code": 0,
+    "signal": null,
+    "stdout": "Splay: 42962\n----\nScore (version 7): 42962\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/splay.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "splay",
+    "round": 1,
+    "status": "ok",
+    "score": 2340,
+    "wallMs": 2463.9501350000064,
+    "code": 0,
+    "signal": null,
+    "stdout": "Splay: 2340\n----\nScore (version 7): 2340\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/splay.js"
+    ]
+  },
+  {
+    "engine": "v8",
+    "name": "navier-stokes",
+    "round": 1,
+    "status": "ok",
+    "score": 55205,
+    "wallMs": 2034.778019999998,
+    "code": 0,
+    "signal": null,
+    "stdout": "NavierStokes: 55205\n----\nScore (version 7): 55205\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/navier-stokes.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "navier-stokes",
+    "round": 1,
+    "status": "ok",
+    "score": 538,
+    "wallMs": 10763.466323,
+    "code": 0,
+    "signal": null,
+    "stdout": "NavierStokes: 538\n----\nScore (version 7): 538\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/navier-stokes.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "richards",
+    "round": 2,
+    "status": "ok",
+    "score": 477,
+    "wallMs": 2016.5823519999976,
+    "code": 0,
+    "signal": null,
+    "stdout": "Richards: 477\n----\nScore (version 7): 477\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/richards.js"
+    ]
+  },
+  {
+    "engine": "v8",
+    "name": "richards",
+    "round": 2,
+    "status": "ok",
+    "score": 56801,
+    "wallMs": 2030.247543000005,
+    "code": 0,
+    "signal": null,
+    "stdout": "Richards: 56801\n----\nScore (version 7): 56801\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/richards.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "deltablue",
+    "round": 2,
+    "status": "ok",
+    "score": 567,
+    "wallMs": 2014.3559520000126,
+    "code": 0,
+    "signal": null,
+    "stdout": "DeltaBlue: 567\n----\nScore (version 7): 567\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/deltablue.js"
+    ]
+  },
+  {
+    "engine": "v8",
+    "name": "deltablue",
+    "round": 2,
+    "status": "ok",
+    "score": 137995,
+    "wallMs": 2031.2198500000086,
+    "code": 0,
+    "signal": null,
+    "stdout": "DeltaBlue: 137995\n----\nScore (version 7): 137995\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/deltablue.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "crypto",
+    "round": 2,
+    "status": "ok",
+    "score": 359,
+    "wallMs": 13516.269969,
+    "code": 0,
+    "signal": null,
+    "stdout": "Crypto: 359\n----\nScore (version 7): 359\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/crypto.js"
+    ]
+  },
+  {
+    "engine": "v8",
+    "name": "crypto",
+    "round": 2,
+    "status": "ok",
+    "score": 58348,
+    "wallMs": 4035.873252999998,
+    "code": 0,
+    "signal": null,
+    "stdout": "Crypto: 58348\n----\nScore (version 7): 58348\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/crypto.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "raytrace",
+    "round": 2,
+    "status": "ok",
+    "score": 1948,
+    "wallMs": 3029.709222999998,
+    "code": 0,
+    "signal": null,
+    "stdout": "RayTrace: 1948\n----\nScore (version 7): 1948\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/raytrace.js"
+    ]
+  },
+  {
+    "engine": "v8",
+    "name": "raytrace",
+    "round": 2,
+    "status": "ok",
+    "score": 104856,
+    "wallMs": 2029.45457300001,
+    "code": 0,
+    "signal": null,
+    "stdout": "RayTrace: 104856\n----\nScore (version 7): 104856\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/raytrace.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "earley-boyer",
+    "round": 2,
+    "status": "ok",
+    "score": 733,
+    "wallMs": 12079.930076999997,
+    "code": 0,
+    "signal": null,
+    "stdout": "EarleyBoyer: 733\n----\nScore (version 7): 733\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/earley-boyer.js"
+    ]
+  },
+  {
+    "engine": "v8",
+    "name": "earley-boyer",
+    "round": 2,
+    "status": "ok",
+    "score": 107432,
+    "wallMs": 4048.3059240000002,
+    "code": 0,
+    "signal": null,
+    "stdout": "EarleyBoyer: 107432\n----\nScore (version 7): 107432\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/earley-boyer.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "regexp",
+    "round": 2,
+    "status": "ok",
+    "score": 282,
+    "wallMs": 12261.64184700002,
+    "code": 0,
+    "signal": null,
+    "stdout": "RegExp: 282\n----\nScore (version 7): 282\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/regexp.js"
+    ]
+  },
+  {
+    "engine": "v8",
+    "name": "regexp",
+    "round": 2,
+    "status": "ok",
+    "score": 12845,
+    "wallMs": 2066.564344000013,
+    "code": 0,
+    "signal": null,
+    "stdout": "RegExp: 12845\n----\nScore (version 7): 12845\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/regexp.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "splay",
+    "round": 2,
+    "status": "ok",
+    "score": 2190,
+    "wallMs": 2521.6425290000043,
+    "code": 0,
+    "signal": null,
+    "stdout": "Splay: 2190\n----\nScore (version 7): 2190\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/splay.js"
+    ]
+  },
+  {
+    "engine": "v8",
+    "name": "splay",
+    "round": 2,
+    "status": "ok",
+    "score": 37926,
+    "wallMs": 2303.272094999993,
+    "code": 0,
+    "signal": null,
+    "stdout": "Splay: 37926\n----\nScore (version 7): 37926\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/splay.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "navier-stokes",
+    "round": 2,
+    "status": "ok",
+    "score": 528,
+    "wallMs": 10124.002752,
+    "code": 0,
+    "signal": null,
+    "stdout": "NavierStokes: 528\n----\nScore (version 7): 528\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/navier-stokes.js"
+    ]
+  },
+  {
+    "engine": "v8",
+    "name": "navier-stokes",
+    "round": 2,
+    "status": "ok",
+    "score": 57522,
+    "wallMs": 2040.5299499999965,
+    "code": 0,
+    "signal": null,
+    "stdout": "NavierStokes: 57522\n----\nScore (version 7): 57522\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/navier-stokes.js"
+    ]
+  },
+  {
+    "engine": "v8",
+    "name": "richards",
+    "round": 3,
+    "status": "ok",
+    "score": 55428,
+    "wallMs": 2029.630371999985,
+    "code": 0,
+    "signal": null,
+    "stdout": "Richards: 55428\n----\nScore (version 7): 55428\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/richards.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "richards",
+    "round": 3,
+    "status": "ok",
+    "score": 452,
+    "wallMs": 2006.2594329999993,
+    "code": 0,
+    "signal": null,
+    "stdout": "Richards: 452\n----\nScore (version 7): 452\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/richards.js"
+    ]
+  },
+  {
+    "engine": "v8",
+    "name": "deltablue",
+    "round": 3,
+    "status": "ok",
+    "score": 103699,
+    "wallMs": 2034.4412469999806,
+    "code": 0,
+    "signal": null,
+    "stdout": "DeltaBlue: 103699\n----\nScore (version 7): 103699\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/deltablue.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "deltablue",
+    "round": 3,
+    "status": "ok",
+    "score": 512,
+    "wallMs": 2019.1096580000012,
+    "code": 0,
+    "signal": null,
+    "stdout": "DeltaBlue: 512\n----\nScore (version 7): 512\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/deltablue.js"
+    ]
+  },
+  {
+    "engine": "v8",
+    "name": "crypto",
+    "round": 3,
+    "status": "ok",
+    "score": 54308,
+    "wallMs": 4031.021080000006,
+    "code": 0,
+    "signal": null,
+    "stdout": "Crypto: 54308\n----\nScore (version 7): 54308\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/crypto.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "crypto",
+    "round": 3,
+    "status": "ok",
+    "score": 340,
+    "wallMs": 14361.02956699999,
+    "code": 0,
+    "signal": null,
+    "stdout": "Crypto: 340\n----\nScore (version 7): 340\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/crypto.js"
+    ]
+  },
+  {
+    "engine": "v8",
+    "name": "raytrace",
+    "round": 3,
+    "status": "ok",
+    "score": 100565,
+    "wallMs": 2031.2814279999875,
+    "code": 0,
+    "signal": null,
+    "stdout": "RayTrace: 100565\n----\nScore (version 7): 100565\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/raytrace.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "raytrace",
+    "round": 3,
+    "status": "ok",
+    "score": 1683,
+    "wallMs": 3107.7236829999893,
+    "code": 0,
+    "signal": null,
+    "stdout": "RayTrace: 1683\n----\nScore (version 7): 1683\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/raytrace.js"
+    ]
+  },
+  {
+    "engine": "v8",
+    "name": "earley-boyer",
+    "round": 3,
+    "status": "ok",
+    "score": 95953,
+    "wallMs": 4052.2070269999967,
+    "code": 0,
+    "signal": null,
+    "stdout": "EarleyBoyer: 95953\n----\nScore (version 7): 95953\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/earley-boyer.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "earley-boyer",
+    "round": 3,
+    "status": "ok",
+    "score": 712,
+    "wallMs": 12728.909151,
+    "code": 0,
+    "signal": null,
+    "stdout": "EarleyBoyer: 712\n----\nScore (version 7): 712\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/earley-boyer.js"
+    ]
+  },
+  {
+    "engine": "v8",
+    "name": "regexp",
+    "round": 3,
+    "status": "ok",
+    "score": 13728,
+    "wallMs": 2061.1562069999927,
+    "code": 0,
+    "signal": null,
+    "stdout": "RegExp: 13728\n----\nScore (version 7): 13728\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/regexp.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "regexp",
+    "round": 3,
+    "status": "ok",
+    "score": 307,
+    "wallMs": 11158.853727000009,
+    "code": 0,
+    "signal": null,
+    "stdout": "RegExp: 307\n----\nScore (version 7): 307\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/regexp.js"
+    ]
+  },
+  {
+    "engine": "v8",
+    "name": "splay",
+    "round": 3,
+    "status": "ok",
+    "score": 39604,
+    "wallMs": 2339.7243460000027,
+    "code": 0,
+    "signal": null,
+    "stdout": "Splay: 39604\n----\nScore (version 7): 39604\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/splay.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "splay",
+    "round": 3,
+    "status": "ok",
+    "score": 2326,
+    "wallMs": 2604.6212720000185,
+    "code": 0,
+    "signal": null,
+    "stdout": "Splay: 2326\n----\nScore (version 7): 2326\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/splay.js"
+    ]
+  },
+  {
+    "engine": "v8",
+    "name": "navier-stokes",
+    "round": 3,
+    "status": "ok",
+    "score": 56484,
+    "wallMs": 2030.9380439999804,
+    "code": 0,
+    "signal": null,
+    "stdout": "NavierStokes: 56484\n----\nScore (version 7): 56484\n",
+    "stderr": "",
+    "command": [
+      "node",
+      "reports/v8-comparison/navier-stokes.js"
+    ]
+  },
+  {
+    "engine": "lumen",
+    "name": "navier-stokes",
+    "round": 3,
+    "status": "ok",
+    "score": 562,
+    "wallMs": 9512.66485500001,
+    "code": 0,
+    "signal": null,
+    "stdout": "NavierStokes: 562\n----\nScore (version 7): 562\n",
+    "stderr": "",
+    "command": [
+      "./target/release/lumen",
+      "--tier=jit",
+      "reports/v8-comparison/navier-stokes.js"
+    ]
+  }
+]

@@ -1,0 +1,22 @@
+[
+  {
+    "binary": "reports/vite-comparison/baseline/lumen-cli",
+    "code": 0,
+    "signal": null,
+    "timedOut": false,
+    "stdout": "streams 2\n",
+    "stderr": "",
+    "clientError": "Error [ERR_STREAM_WRITE_AFTER_END]: write after endError [ERR_HTTP2_ERROR]: Protocol errorError [ERR_HTTP2_ERROR]: Protocol error",
+    "responses": []
+  },
+  {
+    "binary": "reports/overnight/bin/lumen-cli",
+    "code": 0,
+    "signal": null,
+    "timedOut": false,
+    "stdout": "streams 2\n",
+    "stderr": "",
+    "clientError": "Error [ERR_STREAM_WRITE_AFTER_END]: write after endError [ERR_HTTP2_ERROR]: Protocol errorError [ERR_HTTP2_ERROR]: Protocol error",
+    "responses": []
+  }
+]

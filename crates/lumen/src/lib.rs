@@ -26,6 +26,7 @@ mod ast;
 mod bigint;
 mod builtins;
 pub mod bytecode;
+mod compile_cache;
 mod coroutine;
 mod eval;
 /// The engine's size-class caching allocator — allocation-bound workloads (one refcounted box
@@ -338,6 +339,8 @@ impl Engine {
 /// published crate; it stabilizes together with the `lumen-host`/`lumen-runtime` crates.
 #[cfg(feature = "embed")]
 pub mod embed {
+    /// Decode the engine's internal string representation into JavaScript UTF-16 units.
+    pub use crate::jstr::units as string_utf16_units;
     pub use crate::host::{OpState, ResourceId, ResourceTable};
     /// The context a [`NativeFn`] receives: a curated view of the interpreter. Only the
     /// audited embedder-safe methods are `pub`; the rest of the interpreter is `pub(crate)`.

@@ -1,0 +1,383 @@
+   Compiling lumen v0.1.4 (/home/luna/.t3/worktrees/lumen/t3-8af223a6/crates/lumen)
+warning: unused import: `proto_epoch_ptr`
+    --> crates/lumen/src/value.rs:1386:55
+     |
+1386 |     bump_proto_epoch, fn_key, index_key, proto_epoch, proto_epoch_ptr, MIRROR_ALL_I32,
+     |                                                       ^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: use of deprecated method `std::sync::atomic::Atomic::<u32>::fetch_update`: renamed to `try_update` for consistency
+  --> crates/lumen/src/value/props/shapes.rs:35:25
+   |
+35 |     let _ = PROTO_EPOCH.fetch_update(
+   |                         ^^^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+   |
+35 -     let _ = PROTO_EPOCH.fetch_update(
+35 +     let _ = PROTO_EPOCH.try_update(
+   |
+
+warning: multiple methods are never used
+    --> crates/lumen/src/bytecode.rs:5592:19
+     |
+5587 | impl Chunk {
+     | ---------- methods in this implementation
+...
+5592 |     pub(crate) fn jit_slot_names(&self) -> &[Rc<str>] {
+     |                   ^^^^^^^^^^^^^^
+...
+5608 |     pub(crate) fn jit_cache_ptr(&self, idx: u32) -> usize {
+     |                   ^^^^^^^^^^^^^
+...
+5629 |     pub(crate) fn jit_cache_for_shape(&self, idx: u32, recv_shape: u32) -> Option<IcState> {
+     |                   ^^^^^^^^^^^^^^^^^^^
+...
+5646 |     pub(crate) fn jit_call_cache_ptr(&self, idx: u32) -> usize {
+     |                   ^^^^^^^^^^^^^^^^^^
+...
+5653 |     pub(crate) fn jit_call_target(&self, idx: u32) -> Option<(CallIc, crate::value::Gc)> {
+     |                   ^^^^^^^^^^^^^^^
+...
+5674 |     pub(crate) fn jit_call_targets(&self, idx: u32) -> Vec<(CallIc, crate::value::Gc)> {
+     |                   ^^^^^^^^^^^^^^^^
+...
+5693 |     pub(crate) fn jit_name_cache_ptr(&self, idx: u32) -> usize {
+     |                   ^^^^^^^^^^^^^^^^^^
+...
+5698 |     pub(crate) fn jit_cap_cache_ptr(&self, idx: u32) -> usize {
+     |                   ^^^^^^^^^^^^^^^^^
+...
+5704 |     pub(crate) fn jit_name_number(&self, idx: u32) -> Option<u64> {
+     |                   ^^^^^^^^^^^^^^^
+...
+6267 |     pub(crate) fn jit_inline_attempted_off(&self) -> usize {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+6311 |     pub(crate) fn jit_const_ptr(&self, k: u32) -> *const Value {
+     |                   ^^^^^^^^^^^^^
+...
+6315 |     pub(crate) fn jit_const_is_str(&self, k: u32) -> bool {
+     |                   ^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `jit_mod_num` is never used
+    --> crates/lumen/src/bytecode.rs:9267:26
+     |
+9267 | pub(crate) extern "C" fn jit_mod_num(a: f64, b: f64) -> f64 {
+     |                          ^^^^^^^^^^^
+
+warning: method `jit_capture_offset` is never used
+   --> crates/lumen/src/bytecode/activation.rs:120:19
+    |
+113 | impl Chunk {
+    | ---------- method in this implementation
+...
+120 |     pub(crate) fn jit_capture_offset(&self, name: u32) -> Option<usize> {
+    |                   ^^^^^^^^^^^^^^^^^^
+
+warning: methods `inline_closure_target`, `has_inline_closures`, `dynamic_inline_location`, and `has_inline_frames` are never used
+   --> crates/lumen/src/bytecode/inline_frames.rs:77:19
+    |
+ 76 | impl Chunk {
+    | ---------- methods in this implementation
+ 77 |     pub(crate) fn inline_closure_target(&self, target: u32) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+ 88 |     pub(crate) fn has_inline_closures(&self) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^
+...
+ 93 |     pub(crate) fn dynamic_inline_location(&self, pc: usize) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+110 |     pub(crate) fn has_inline_frames(&self) -> bool {
+    |                   ^^^^^^^^^^^^^^^^^
+
+warning: constant `GC_DIRECT_MAINT_MASK` is never used
+    --> crates/lumen/src/interpreter.rs:1222:18
+     |
+1222 | pub(crate) const GC_DIRECT_MAINT_MASK: u32 = 4095;
+     |                  ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `LEN_OFF` is never used
+  --> crates/lumen/src/lstr.rs:41:18
+   |
+41 | pub(crate) const LEN_OFF: usize = std::mem::offset_of!(Header, len);
+   |                  ^^^^^^^
+
+warning: constant `CAP_OFF` is never used
+  --> crates/lumen/src/lstr.rs:44:18
+   |
+44 | pub(crate) const CAP_OFF: usize = std::mem::offset_of!(Header, cap);
+   |                  ^^^^^^^
+
+warning: constant `DATA_OFF` is never used
+  --> crates/lumen/src/lstr.rs:46:18
+   |
+46 | pub(crate) const DATA_OFF: usize = HDR;
+   |                  ^^^^^^^^
+
+warning: multiple fields are never read
+   --> crates/lumen/src/value.rs:342:9
+    |
+337 | pub struct JitLayout {
+    |            --------- fields in this struct
+...
+342 |     pub gc_data_off: usize,
+    |         ^^^^^^^^^^^
+...
+348 |     pub obj_is_constructor: usize,
+    |         ^^^^^^^^^^^^^^^^^^
+349 |     pub obj_extensible: usize,
+    |         ^^^^^^^^^^^^^^
+350 |     pub props_shape: usize,
+351 |     pub props_proto_flag: usize,
+    |         ^^^^^^^^^^^^^^^^
+...
+359 |     pub vec_cap_off: usize,
+    |         ^^^^^^^^^^^
+...
+368 |     pub dense_packed: usize,
+    |         ^^^^^^^^^^^^
+369 |     /// Initialized inline element count and slot base within DenseBuffers.
+370 |     pub dense_inline_len: usize,
+    |         ^^^^^^^^^^^^^^^^
+371 |     pub dense_inline_slots: usize,
+    |         ^^^^^^^^^^^^^^^^^^
+...
+381 |     pub entry_writable: usize,
+    |         ^^^^^^^^^^^^^^
+382 |     /// Standalone `Property` layout used by keyless packed elements (not tuple-entry offsets).
+383 |     pub property_size: usize,
+    |         ^^^^^^^^^^^^^
+384 |     pub property_value: usize,
+    |         ^^^^^^^^^^^^^^
+385 |     pub property_meta: usize,
+    |         ^^^^^^^^^^^^^
+386 |     /// The `Option<Box<Vec<Property>>>` niche and Vec header words matched the live probes.
+387 |     pub packed_elems_valid: bool,
+    |         ^^^^^^^^^^^^^^^^^^
+...
+394 |     pub exotic_strwrap_tag: u8,
+    |         ^^^^^^^^^^^^^^^^^^
+...
+398 |     pub scope_gen: usize,
+    |         ^^^^^^^^^
+399 |     /// `value` within a `Binding` (the LoadName template's 16-byte copy source).
+400 |     pub binding_value: usize,
+    |         ^^^^^^^^^^^^^
+401 |     /// `mutable` within a `Binding` (free-name update/store guard).
+402 |     pub binding_mutable: usize,
+    |         ^^^^^^^^^^^^^^^
+403 |     /// `initialized` bool within a `Binding` (TDZ check).
+404 |     pub binding_init: usize,
+    |         ^^^^^^^^^^^^
+405 |     /// The `Rc<str>` key within an entry `(Rc<str>, Property)` (tuple field order is unstable).
+406 |     pub entry_key: usize,
+    |         ^^^^^^^^^
+407 |     /// The length word within an `Rc<str>` fat pointer (0 or 8 — layout is unstable).
+408 |     pub str_len_word: usize,
+    |         ^^^^^^^^^^^^
+409 |     /// The pointer word within an `Rc<str>` fat pointer (the other one).
+410 |     pub str_ptr_word: usize,
+    |         ^^^^^^^^^^^^
+411 |     /// Stored `Rc<str>` pointer word → the first byte of the string data (the RcBox header).
+412 |     pub str_data_off: usize,
+    |         ^^^^^^^^^^^^
+...
+415 |     pub key_probe_ok: bool,
+    |         ^^^^^^^^^^^^
+    |
+    = note: `JitLayout` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: methods `reserve_small_holes`, `jit_packed_numeric_slots`, and `get_index_mut` are never used
+   --> crates/lumen/src/value/props/elements.rs:33:19
+    |
+  6 | impl Props {
+    | ---------- methods in this implementation
+...
+ 33 |     pub(crate) fn reserve_small_holes(&mut self, len: usize) {
+    |                   ^^^^^^^^^^^^^^^^^^^
+...
+ 53 |     pub(crate) fn jit_packed_numeric_slots(&mut self, len: usize) -> Option<*mut Vec<Property>> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+106 |     pub(crate) fn get_index_mut(&mut self, n: u32) -> Option<&mut Property> {
+    |                   ^^^^^^^^^^^^^
+
+warning: function `proto_epoch_ptr` is never used
+  --> crates/lumen/src/value/props/shapes.rs:29:15
+   |
+29 | pub(crate) fn proto_epoch_ptr() -> *const u32 {
+   |               ^^^^^^^^^^^^^^^
+
+warning: `lumen` (lib) generated 13 warnings (run `cargo fix --lib -p lumen` to apply 2 suggestions)
+warning: function `test_with_enabled` is never used
+   --> crates/lumen/src/bytecode/inline_closure.rs:132:15
+    |
+132 | pub(crate) fn test_with_enabled(run: impl FnOnce()) {
+    |               ^^^^^^^^^^^^^^^^^
+
+warning: methods `inline_closure_target` and `dynamic_inline_location` are never used
+  --> crates/lumen/src/bytecode/inline_frames.rs:77:19
+   |
+76 | impl Chunk {
+   | ---------- methods in this implementation
+77 |     pub(crate) fn inline_closure_target(&self, target: u32) -> bool {
+   |                   ^^^^^^^^^^^^^^^^^^^^^
+...
+93 |     pub(crate) fn dynamic_inline_location(&self, pc: usize) -> bool {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `lumen` (lib test) generated 14 warnings (12 duplicates)
+    Finished `test` profile [optimized] target(s) in 44.81s
+     Running unittests src/lib.rs (target/debug/deps/lumen-543e84d486d87150)
+
+running 4 tests
+test snapshot::tests::every_lexer_operator_can_be_reinterned ... ok
+test snapshot::tests::malformed_snapshots_are_bounded_and_rejected ... ok
+test snapshot::tests::roundtrip_diverse_constructs ... ok
+test snapshot::tests::roundtrip_real_web_glue ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 716 filtered out; finished in 0.00s
+
+     Running unittests src/bin/lumen.rs (target/debug/deps/lumen-c5bf8dd3b2899e6f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/activation_layouts.rs (target/debug/deps/activation_layouts-937dbcba848b133b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/async_iterator_close.rs (target/debug/deps/async_iterator_close-412f3ae3d419118d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/captured_arguments.rs (target/debug/deps/captured_arguments-010f5fdb931ee7e7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/captured_defaults.rs (target/debug/deps/captured_defaults-d7eee048950fb3ab)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/collection_index.rs (target/debug/deps/collection_index-8062b29ebde232ef)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/dense_property_lookup.rs (target/debug/deps/dense_property_lookup-83b89f4678721a47)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/for_in.rs (target/debug/deps/for_in-d2f70207a84e4445)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/forwarded_calls.rs (target/debug/deps/forwarded_calls-e4cead1769690ac9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/function_source_text.rs (target/debug/deps/function_source_text-f327008adc79fd8c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/issue_40.rs (target/debug/deps/issue_40-6e4128516b2289a0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/jit_integer_ops.rs (target/debug/deps/jit_integer_ops-bf70041253ed947c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/jit_last_uses.rs (target/debug/deps/jit_last_uses-4d1bec92590e860b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/jit_numeric_elements.rs (target/debug/deps/jit_numeric_elements-531008596df8a067)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/jit_numeric_stores.rs (target/debug/deps/jit_numeric_stores-26ceaaddf20b0ccf)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/jit_property_values.rs (target/debug/deps/jit_property_values-4d0be9243e60b3f1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/jit_scalar_ops.rs (target/debug/deps/jit_scalar_ops-6fbfd28675410daa)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/lexical_this.rs (target/debug/deps/lexical_this-13d0462e115f2977)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/static_object_keys.rs (target/debug/deps/static_object_keys-175cbc7b0ad6c373)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/switch_lexicals.rs (target/debug/deps/switch_lexicals-c6087d31ee639d0b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/temporal_feature.rs (target/debug/deps/temporal_feature-5e533bb2171ddb2e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/typedarray_constructor_copy.rs (target/debug/deps/typedarray_constructor_copy-3ca905cdf8ed2de3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/typedarray_set.rs (target/debug/deps/typedarray_set-53c5068b74d9524c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s

@@ -24,7 +24,7 @@ pub fn extension() -> Extension {
             "clearInterval" (1) => op_clear_timer,
             "setImmediate" (1) => op_set_immediate,
         ],
-        namespaces: &[],
+        namespaces: &[("__timers", ops!["setRef" (2) => op_set_ref])],
         state_init: Some(|state| state.put(Timers::default())),
         js_init: None,
         js_init_snapshot: None,
@@ -36,6 +36,7 @@ struct Entry {
     args: Vec<Value>,
     /// `Some(period)` for `setInterval`: reschedule after each firing.
     repeat: Option<Duration>,
+    referenced: bool,
 }
 
 /// The timer heap. Cancellation is lazy: `clear*` removes the entry; stale heap nodes are
@@ -63,6 +64,7 @@ impl Timers {
                 callback,
                 args,
                 repeat: repeat.then_some(delay),
+                referenced: true,
             },
         );
         self.heap.push(Reverse((Instant::now() + delay, id)));
@@ -73,9 +75,16 @@ impl Timers {
         self.entries.remove(&id);
     }
 
-    /// Whether any live timer remains (the loop stays alive while true).
+    /// Unreferenced timers may still fire while other work keeps the loop alive, but must not
+    /// keep it alive themselves. Cancelling and unreferencing are deliberately distinct.
     pub fn has_pending(&self) -> bool {
-        !self.entries.is_empty()
+        self.entries.values().any(|entry| entry.referenced)
+    }
+
+    fn set_ref(&mut self, id: u64, referenced: bool) {
+        if let Some(entry) = self.entries.get_mut(&id) {
+            entry.referenced = referenced;
+        }
     }
 
     /// When the loop may sleep until. Pops cancelled heap nodes so a cleared timer can't
@@ -147,6 +156,18 @@ fn op_set_interval(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value,
     schedule_op(ctx, args, true)
 }
 
+fn op_set_ref(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    if let Some(id) = args.first().and_then(Value::as_num_opt) {
+        if id.is_finite() && id >= 0.0 {
+            let referenced = matches!(args.get(1), Some(Value::Bool(true)));
+            ctx.host_mut::<Timers>()
+                .expect("timers state installed")
+                .set_ref(id as u64, referenced);
+        }
+    }
+    Ok(Value::Undefined)
+}
+
 /// Shared by `clearTimeout`/`clearInterval` (per spec either clears either kind). Unknown or
 /// non-numeric ids are ignored.
 fn op_clear_timer(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
@@ -169,4 +190,38 @@ fn op_set_immediate(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value
     let extra: Vec<Value> = args.iter().skip(1).cloned().collect();
     CallbackQueue::enqueue(ctx.op_state(), callback, extra);
     Ok(Value::Undefined)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unref_preserves_deadlines_and_callbacks_without_keeping_the_loop_alive() {
+        let mut timers = Timers::default();
+        let id = timers.schedule(Value::Undefined, vec![], Duration::ZERO, false);
+        assert!(timers.has_pending());
+        timers.set_ref(id, false);
+        assert!(!timers.has_pending());
+        assert!(timers.next_deadline().is_some());
+        assert_eq!(timers.take_due(Instant::now()).len(), 1);
+        assert!(timers.next_deadline().is_none());
+    }
+
+    #[test]
+    fn ref_and_cancel_are_independent_and_intervals_preserve_reference_state() {
+        let mut timers = Timers::default();
+        let id = timers.schedule(Value::Undefined, vec![], Duration::from_secs(1), true);
+        timers.set_ref(id, false);
+        let deadline = timers.next_deadline().unwrap();
+        assert_eq!(timers.take_due(deadline).len(), 1);
+        assert!(!timers.has_pending());
+        assert!(timers.next_deadline().unwrap() > deadline);
+        timers.set_ref(id, true);
+        assert!(timers.has_pending());
+        timers.clear(id);
+        timers.set_ref(id, true);
+        assert!(!timers.has_pending());
+        assert!(timers.next_deadline().is_none());
+    }
 }

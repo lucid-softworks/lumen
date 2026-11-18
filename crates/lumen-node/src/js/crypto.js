@@ -1011,8 +1011,10 @@ function getDiffieHellman(name) { return new DiffieHellmanGroup(name); }
 
 const ED_P = (1n << 255n) - 19n;
 const ED_L = (1n << 252n) + 27742317777372353535851937790883648493n;
-const ED_D = amod(-121665n * modInv(121666n, ED_P), ED_P);
-const ED_SQRT_M1 = modPow(2n, (ED_P - 1n) / 4n, ED_P);
+// Fixed curve constants: -121665/121666 and 2^((p-1)/4) modulo p. Keep these
+// precomputed so every runtime boot does not perform unused modular arithmetic.
+const ED_D = 0x52036cee2b6ffe738cc740797779e89800700a4d4141d8ab75eb4dca135978a3n;
+const ED_SQRT_M1 = 0x2b8324804fc1df0b2b4d00993dfbd7a72f431806ad2fe478c4ee1b274a0ea0b0n;
 function edRecoverX(y, sign) {
   const y2 = amod(y * y, ED_P);
   const uv = amod(amod(y2 - 1n, ED_P) * modInv(ED_D * y2 + 1n, ED_P), ED_P);
@@ -1022,9 +1024,10 @@ function edRecoverX(y, sign) {
   if ((x & 1n) !== sign) x = amod(-x, ED_P);
   return x;
 }
-const ED_BY = amod(4n * modInv(5n, ED_P), ED_P);
-const ED_BX = edRecoverX(ED_BY, 0n);
-const ED_B = [ED_BX, ED_BY, 1n, amod(ED_BX * ED_BY, ED_P)];
+// Base point: y=4/5 mod p, x=edRecoverX(y,0), T=x*y mod p.
+const ED_BY = 0x6666666666666666666666666666666666666666666666666666666666666658n;
+const ED_BX = 0x216936d3cd6e53fec0a4e231fdd6dc5c692cc7609525a7b2c9562d608f25d51an;
+const ED_B = [ED_BX, ED_BY, 1n, 0x67875f0fd78b766566ea4e8e64abe37d20f09f80775152f56dde8ab3a5b7dda3n];
 function edAdd(P, Q) {
   const [X1, Y1, Z1, T1] = P;
   const [X2, Y2, Z2, T2] = Q;
@@ -1813,14 +1816,16 @@ function rsaPkcs1Encrypt(key, msg) {
 
 // ---- probable primes (Miller-Rabin over BigInt) -------------------------------------------------
 
-const SMALL_PRIMES = (() => {
+let smallPrimes;
+function getSmallPrimes() {
+  if (smallPrimes) return smallPrimes;
   const out = [];
   const sieve = new Uint8Array(4096);
   for (let i = 2; i < 4096; i++) {
     if (!sieve[i]) { out.push(BigInt(i)); for (let j = i * i; j < 4096; j += i) sieve[j] = 1; }
   }
-  return out;
-})();
+  return smallPrimes = out;
+}
 function randomBigIntBits(bits) {
   const bytes = Math.ceil(bits / 8);
   const b = Uint8Array.from(randomBytes(bytes));
@@ -1838,7 +1843,7 @@ function millerRabinRound(n, d, r, a) {
 }
 function isProbablePrime(n, rounds) {
   if (n < 2n) return false;
-  for (const sp of SMALL_PRIMES) {
+  for (const sp of getSmallPrimes()) {
     if (n === sp) return true;
     if (n % sp === 0n) return false;
   }

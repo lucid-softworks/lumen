@@ -1,0 +1,20 @@
+[
+  {
+    "binary": "reports/vite-comparison/baseline/lumen-cli",
+    "code": 0,
+    "stdout": "body \nbody \n",
+    "stderr": "Uncaught (in promise) Error: This socket has been ended by the other party\n"
+  },
+  {
+    "binary": "reports/vite-comparison/native-buffer/lumen-cli",
+    "code": 0,
+    "stdout": "body \nbody \n",
+    "stderr": "Uncaught (in promise) Error: This socket has been ended by the other party\n"
+  },
+  {
+    "binary": "target/release/lumen-cli",
+    "code": 0,
+    "stdout": "body \nbody \n",
+    "stderr": "Uncaught (in promise) Error: This socket has been ended by the other party\n"
+  }
+]

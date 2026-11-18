@@ -2,7 +2,7 @@
 //! streaming buys nothing) and resolves the classic `/`-is-it-a-regex-or-division ambiguity by
 //! tracking whether the previously emitted token can end an expression.
 
-use crate::token::{Tok, Token, TplPart, KEYWORDS, PUNCTUATORS};
+use crate::token::{punctuator, Tok, Token, TplPart, KEYWORDS};
 
 pub struct LexError {
     pub message: String,
@@ -364,8 +364,8 @@ impl<'a> Lexer<'a> {
         // A reserved word is always a keyword — even spelled with a `\u` escape. An escaped reserved
         // word can't be an Identifier (the parser rejects a keyword there), but it still works as a
         // property name (keywords are accepted in those positions).
-        if let Some(kw) = KEYWORDS.iter().find(|k| **k == s) {
-            self.push(Tok::Keyword(kw));
+        if let Ok(index) = KEYWORDS.binary_search(&s.as_str()) {
+            self.push(Tok::Keyword(KEYWORDS[index]));
             if had_escape {
                 self.mark_escaped();
             }
@@ -1080,12 +1080,10 @@ impl<'a> Lexer<'a> {
     }
 
     fn read_punct(&mut self) -> Result<(), LexError> {
-        let rest: String = self.chars[self.pos..(self.pos + 4).min(self.chars.len())]
-            .iter()
-            .collect();
         // `?.` followed by a digit is `?` then `.` (a conditional like `x ? .5 : .3`), not optional
         // chaining.
-        if rest.starts_with("?.")
+        if self.peek() == Some('?')
+            && self.peek2() == Some('.')
             && self
                 .chars
                 .get(self.pos + 2)
@@ -1095,14 +1093,10 @@ impl<'a> Lexer<'a> {
             self.push(Tok::Punct("?"));
             return Ok(());
         }
-        for p in PUNCTUATORS {
-            if rest.starts_with(p) {
-                for _ in 0..p.chars().count() {
-                    self.bump();
-                }
-                self.push(Tok::Punct(p));
-                return Ok(());
-            }
+        if let Some(p) = punctuator(&self.chars[self.pos..]) {
+            self.pos += p.len();
+            self.push(Tok::Punct(p));
+            return Ok(());
         }
         let _ = self.src; // keep field used; byte view reserved for future fast paths
         Err(self.err(format!(

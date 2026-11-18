@@ -52,7 +52,7 @@ impl Props {
             )],
             shape,
             elems: DenseStorage(Some(Box::new(DenseBuffers {
-                index: None,
+                index: Default::default(),
                 packed,
                 inline_packed,
                 elems: Vec::new(),

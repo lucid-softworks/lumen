@@ -113,14 +113,16 @@ pub struct ClassAlloc;
 unsafe impl GlobalAlloc for ClassAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if let Some(class) = class_of(layout.size(), layout.align()) {
-            let cached = CACHE.with(|c| {
-                let p = c.heads[class].get();
-                if !p.is_null() {
-                    c.heads[class].set(unsafe { *(p as *mut *mut u8) });
-                    c.counts[class].set(c.counts[class].get() - 1);
-                }
-                p
-            });
+            let cached = CACHE
+                .try_with(|c| {
+                    let p = c.heads[class].get();
+                    if !p.is_null() {
+                        c.heads[class].set(unsafe { *(p as *mut *mut u8) });
+                        c.counts[class].set(c.counts[class].get() - 1);
+                    }
+                    p
+                })
+                .unwrap_or(std::ptr::null_mut());
             if !cached.is_null() {
                 return cached;
             }
@@ -131,16 +133,18 @@ unsafe impl GlobalAlloc for ClassAlloc {
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         if let Some(class) = class_of(layout.size(), layout.align()) {
-            let cached = CACHE.with(|c| {
-                if c.counts[class].get() < CLASS_CAPS[class] {
-                    unsafe { *(ptr as *mut *mut u8) = c.heads[class].get() };
-                    c.heads[class].set(ptr);
-                    c.counts[class].set(c.counts[class].get() + 1);
-                    true
-                } else {
-                    false
-                }
-            });
+            let cached = CACHE
+                .try_with(|c| {
+                    if c.counts[class].get() < CLASS_CAPS[class] {
+                        unsafe { *(ptr as *mut *mut u8) = c.heads[class].get() };
+                        c.heads[class].set(ptr);
+                        c.counts[class].set(c.counts[class].get() + 1);
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false);
             if !cached {
                 System.dealloc(ptr, class_layout(class));
             }
@@ -169,5 +173,46 @@ unsafe impl GlobalAlloc for ClassAlloc {
             }
         }
         new_ptr
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn allocations_during_thread_teardown_fall_back_to_system() {
+        static DROPPED: AtomicUsize = AtomicUsize::new(0);
+        struct AllocatesOnDrop;
+        impl Drop for AllocatesOnDrop {
+            fn drop(&mut self) {
+                let layout = Layout::from_size_align(33, 8).unwrap();
+                unsafe {
+                    let p = ClassAlloc.alloc(layout);
+                    assert!(!p.is_null());
+                    p.write_bytes(0xab, layout.size());
+                    ClassAlloc.dealloc(p, layout);
+                }
+                DROPPED.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        thread_local! {
+            static LATE: AllocatesOnDrop = const { AllocatesOnDrop };
+        }
+        std::thread::spawn(|| {
+            // Register LATE first, then the allocator cache: reverse destruction order
+            // forces LATE's allocation to occur after CACHE has already been destroyed.
+            LATE.with(|_| {});
+            let layout = Layout::from_size_align(33, 8).unwrap();
+            unsafe {
+                let p = ClassAlloc.alloc(layout);
+                assert!(!p.is_null());
+                ClassAlloc.dealloc(p, layout);
+            }
+        })
+        .join()
+        .unwrap();
+        assert_eq!(DROPPED.load(Ordering::Relaxed), 1);
     }
 }

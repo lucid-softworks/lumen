@@ -20,6 +20,10 @@ use std::sync::mpsc;
 
 pub use lumen::bytecode::Tier;
 pub use lumen::embed::{Ctx, NativeClosure, NativeFn, OpState, ResourceId, ResourceTable, Value};
+pub use lumen::embed::string_utf16_units;
+/// Optional engine allocator for executable hosts; libraries do not install it globally.
+#[cfg(not(target_arch = "wasm32"))]
+pub use lumen::fastalloc::ClassAlloc;
 pub use lumen::{Completion, Engine, ParseError};
 
 /// DEFLATE/zlib/gzip codec (std-only), shared by web CompressionStream and node:zlib.

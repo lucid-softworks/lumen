@@ -64,6 +64,7 @@ pub enum TplPart {
 /// Contextual keywords (`let`, `const` is reserved but `of`/`async`/`get`/`set`/`static`/`yield`/
 /// `await`/`as`/`from`) are deliberately NOT here — they are valid identifiers in many positions,
 /// so they stay `Ident` and the parser recognises them by text where the grammar calls for them.
+// Keep lexicographically sorted: the lexer uses binary search for identifier classification.
 pub const KEYWORDS: &[&str] = &[
     "break",
     "case",
@@ -110,3 +111,60 @@ pub const PUNCTUATORS: &[&str] = &[
     "**", "<<", ">>", "{", "}", "(", ")", "[", "]", ".", ";", ",", "<", ">", "+", "-", "*", "/",
     "%", "&", "|", "^", "!", "~", "?", ":", "=", "@",
 ];
+
+// Index the longest-first table by its first ASCII character at compile time. Most
+// punctuation tokens have just one candidate; shifts have at most six.
+const PUNCTUATOR_PREFIXES: [u64; 128] = {
+    assert!(PUNCTUATORS.len() <= 64);
+    let mut prefixes = [0; 128];
+    let mut n = 0;
+    while n < PUNCTUATORS.len() {
+        prefixes[PUNCTUATORS[n].as_bytes()[0] as usize] |= 1 << n;
+        n += 1;
+    }
+    prefixes
+};
+
+pub(crate) fn punctuator(chars: &[char]) -> Option<&'static str> {
+    let mut candidates = *PUNCTUATOR_PREFIXES.get(*chars.first()? as usize)?;
+    while candidates != 0 {
+        let p = PUNCTUATORS[candidates.trailing_zeros() as usize];
+        candidates &= candidates - 1;
+        if p.bytes()
+            .enumerate()
+            .skip(1)
+            .all(|(n, b)| chars.get(n).copied() == Some(b as char))
+        {
+            return Some(p);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn keyword_table_is_sorted_for_binary_search() {
+        assert!(super::KEYWORDS.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn punctuation_dispatch_preserves_longest_match() {
+        for first in super::PUNCTUATORS {
+            for suffix in super::PUNCTUATORS.iter().copied().chain(["", "é", "🌙"]) {
+                let source = format!("{first}{suffix}");
+                let expected = super::PUNCTUATORS
+                    .iter()
+                    .copied()
+                    .find(|p| source.starts_with(p));
+                assert_eq!(
+                    super::punctuator(&source.chars().collect::<Vec<_>>()),
+                    expected
+                );
+            }
+        }
+        assert_eq!(super::punctuator(&[]), None);
+        assert_eq!(super::punctuator(&['é']), None);
+        assert_eq!(super::punctuator(&['a']), None);
+    }
+}

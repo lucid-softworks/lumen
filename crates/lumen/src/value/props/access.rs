@@ -11,6 +11,19 @@ impl Props {
     /// then on (an emptied-but-once-large map keeps using it).
     #[inline(always)]
     pub(super) fn find(&self, key: &str) -> Option<usize> {
+        // Canonical indices already have an entry-slot map. In particular, inserting every
+        // element through defineProperty must not scan the growing array to prove each new
+        // key absent. Sparse/map-only indices retain the generic lookup below.
+        if let Some(n) = canonical_index(key) {
+            if let Some(&slot) = self.elems.get(n as usize) {
+                if slot != NO_SLOT {
+                    return Some(slot as usize);
+                }
+            }
+            if !self.has_far.get() {
+                return None;
+            }
+        }
         // `length` and `prototype` are the hottest keys in array-heavy / allocation-heavy code
         // (every push/pop/length read; every `new`); their slots are memoized — answer without
         // hashing or scanning.
@@ -31,13 +44,22 @@ impl Props {
                 return Some(s as usize);
             }
         }
-        let found = if self.elems.index.is_none() {
-            self.entries.iter().position(|(k, _)| &**k == key)
-        } else {
-            self.elems
-                .index
-                .as_ref()
-                .and_then(|index| index.get(key).copied())
+        // Dense appends deliberately avoid a second index. Once a large array needs
+        // generic lookup, build it lazily: repeated missing names must not scan every
+        // element. Only mutate a live sidecar, never the shared empty sentinel.
+        let index = self.elems.index.get().or_else(|| {
+            (self.entries.len() > super::shapes::INDEX_THRESHOLD)
+                .then(|| {
+                    self.elems
+                        .0
+                        .as_ref()
+                        .map(|dense| dense.index.get_or_init(|| self.make_index()))
+                })
+                .flatten()
+        });
+        let found = match index {
+            Some(index) => index.get(key).copied(),
+            None => self.entries.iter().position(|(k, _)| &**k == key),
         };
         if let Some(s) = found {
             if key == "length" {

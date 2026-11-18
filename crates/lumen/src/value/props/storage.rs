@@ -1,5 +1,6 @@
 //! Optional dense buffers and inline packed property ownership.
 use crate::value::{Property, Value};
+use std::cell::OnceCell;
 use std::rc::Rc;
 /// Insertion-ordered string-keyed property map. A `Vec` of entries preserves order (good enough for
 /// `for-in`/`Object.keys`); a side `HashMap` keeps lookup O(1).
@@ -73,7 +74,7 @@ impl Drop for InlinePacked {
 
 #[derive(Clone, Default)]
 pub(in crate::value) struct DenseBuffers {
-    pub(in crate::value) index: Option<Box<crate::fasthash::FastMap<Rc<str>, usize>>>,
+    pub(in crate::value) index: OnceCell<Box<crate::fasthash::FastMap<Rc<str>, usize>>>,
     pub(in crate::value) packed: Option<Box<Vec<Property>>>,
     pub(super) inline_packed: InlinePacked,
     pub(in crate::value) elems: Vec<u32>,
@@ -96,7 +97,7 @@ struct EmptyDenseBuffers(DenseBuffers);
 unsafe impl Sync for EmptyDenseBuffers {}
 
 static EMPTY_DENSE_BUFFERS: EmptyDenseBuffers = EmptyDenseBuffers(DenseBuffers {
-    index: None,
+    index: OnceCell::new(),
     packed: None,
     inline_packed: InlinePacked::EMPTY,
     elems: Vec::new(),
@@ -122,7 +123,7 @@ impl DenseStorage {
     pub(in crate::value) fn index_mut(
         &mut self,
     ) -> Option<&mut crate::fasthash::FastMap<Rc<str>, usize>> {
-        self.0.as_deref_mut()?.index.as_deref_mut()
+        self.0.as_deref_mut()?.index.get_mut().map(Box::as_mut)
     }
     pub(in crate::value) fn packed_mut(&mut self) -> Option<&mut Vec<Property>> {
         let dense = self.0.as_deref_mut()?;
@@ -146,10 +147,10 @@ impl DenseStorage {
         &mut self,
         index: Option<Box<crate::fasthash::FastMap<Rc<str>, usize>>>,
     ) {
-        if index.is_some() {
-            self.buffers_mut().index = index;
+        if let Some(index) = index {
+            self.buffers_mut().index = index.into();
         } else if let Some(d) = self.0.as_deref_mut() {
-            d.index = None;
+            d.index.take();
         }
     }
     pub(in crate::value) fn set_packed(&mut self, packed: Option<Box<Vec<Property>>>) {

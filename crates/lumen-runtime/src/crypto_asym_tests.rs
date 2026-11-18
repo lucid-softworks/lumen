@@ -50,6 +50,28 @@ fn eval_ok(rt: &mut Runtime, src: &str) {
     }
 }
 
+#[test]
+fn node_crypto_prime_table_initializes_on_first_use_and_is_reused() {
+    let (mut rt, out) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        const c = require('node:crypto');
+        for (let round=0; round<2; round++) {
+            console.log([0n,1n,2n,4093n,4096n,65537n,1009n*1013n]
+                .map(n=>c.checkPrimeSync(n,{checks:2})).join(','));
+        }
+    "#,
+    );
+    assert_eq!(
+        out.lines(),
+        [
+            "false,false,true,true,false,true,false",
+            "false,false,true,true,false,true,false",
+        ]
+    );
+}
+
 /// SHA-384/SHA-512 digests + HMAC — vectors from Node v22 (`createHash`/`createHmac`).
 #[test]
 fn node_crypto_sha512_family() {

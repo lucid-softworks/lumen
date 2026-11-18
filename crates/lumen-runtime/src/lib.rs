@@ -79,6 +79,11 @@ impl Runtime {
             ],
         );
         process::install_data_props(&mut engine);
+        if std::env::var_os("NODE_COMPILE_CACHE").is_some() {
+            engine
+                .eval("require('node:module').enableCompileCache()", false)
+                .expect("compile cache initialization parses");
+        }
         // queueMicrotask, via the promise queue the engine already has. Close enough to spec
         // for v0 (a thrown callback error becomes an unhandled rejection, not a reported
         // exception); a native microtask hook can replace it if that gap ever matters.
@@ -332,8 +337,7 @@ impl Runtime {
         }
     }
 
-    /// Pull the JS-precomputed synthetic ESM source for each `node:` builtin out of the engine
-    /// (the loader can't enumerate a builtin's exports from Rust; see the node module glue).
+    /// Build synthetic ESM source from the export names captured during builtin installation.
     fn builtin_modules(&mut self) -> esm::BuiltinModules {
         let global = self.engine.global_this();
         let ctx = self.engine.ctx();
@@ -344,14 +348,24 @@ impl Runtime {
             .and_then(|v| ctx.coerce_string(&v).ok())
             .map(|s| s.to_string())
             .unwrap_or_default();
-        let sources = ctx.get_member(&global, "__esmBuiltinSources").ok();
-        if let Some(sources) = sources {
+        let exports = ctx.get_member(&global, "__esmBuiltinExports").ok();
+        if let Some(exports) = exports {
             for name in names.split(',').filter(|s| !s.is_empty()) {
                 let key = format!("node:{name}");
-                if let Ok(src) = ctx.get_member(&sources, &key) {
-                    if let Ok(src) = ctx.coerce_string(&src) {
-                        map.insert(key, src.to_string());
+                if let Ok(keys) = ctx.get_member(&exports, &key) {
+                    let len = ctx
+                        .get_member(&keys, "length")
+                        .ok()
+                        .and_then(|v| v.as_num_opt())
+                        .filter(|n| n.is_finite() && *n >= 0.0 && *n <= 1_000_000.0)
+                        .unwrap_or(0.0) as usize;
+                    let mut names = Vec::with_capacity(len);
+                    for n in 0..len {
+                        if let Ok(Value::Str(name)) = ctx.get_member(&keys, &n.to_string()) {
+                            names.push(name.to_string());
+                        }
                     }
+                    map.insert(key, esm::builtin_source(name, names));
                 }
             }
         }
@@ -460,6 +474,11 @@ impl Runtime {
     }
 
     fn take_due_timers(&mut self) -> Vec<(Value, Vec<Value>)> {
+        // Even an already-due unref'd timer must not keep an otherwise idle runtime alive.
+        // When a referenced timer/task or queued work exists, all due timers may still fire.
+        if self.idle() {
+            return Vec::new();
+        }
         let now = Instant::now();
         match self.engine.ctx().host_mut::<lumen_timers::Timers>() {
             Some(t) => t.take_due(now),

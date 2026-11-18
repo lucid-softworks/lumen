@@ -22,8 +22,33 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Synthetic ESM source for each builtin (`"node:fs"` -> `export default …; export const …`),
-/// generated in JS where the export names are known, and ferried here as plain strings.
+/// generated from the enumerable export names captured during builtin installation.
 pub struct BuiltinModules(pub HashMap<String, String>);
+
+pub fn builtin_source(name: &str, keys: impl IntoIterator<Item = String>) -> String {
+    let mut source = format!(
+        "const __m = globalThis.__esmBuiltin({});\nexport default __m;\n",
+        js_string_literal(name)
+    );
+    for key in keys {
+        // Match the bridge's existing ASCII IdentifierName filter. Only accepted names
+        // enter the generated source; punctuation and quotes cannot inject a statement.
+        let mut bytes = key.bytes();
+        let valid = bytes
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c == b'$')
+            && bytes.all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'$');
+        if !valid || key == "default" {
+            continue;
+        }
+        source.push_str("export const ");
+        source.push_str(&key);
+        source.push_str(" = __m[\"");
+        source.push_str(&key);
+        source.push_str("\"];\n");
+    }
+    source
+}
 
 const EXTENSIONS: [&str; 5] = [".mjs", ".js", ".jsx", ".json", ".cjs"];
 
@@ -886,5 +911,23 @@ mod tests {
     #[test]
     fn js_string_escapes() {
         assert_eq!(js_string(r#"a"b\c"#), r#""a\"b\\c""#);
+    }
+    #[test]
+    fn builtin_source_preserves_export_filter_and_escapes_module_name() {
+        let source = super::builtin_source(
+            "a\"b",
+            [
+                "readFileSync",
+                "_x",
+                "$x",
+                "default",
+                "9bad",
+                "bad-name",
+                "x\";throw 1;//",
+                "λ",
+            ]
+            .map(str::to_owned),
+        );
+        assert_eq!(source, "const __m = globalThis.__esmBuiltin(\"a\\\"b\");\nexport default __m;\nexport const readFileSync = __m[\"readFileSync\"];\nexport const _x = __m[\"_x\"];\nexport const $x = __m[\"$x\"];\n");
     }
 }

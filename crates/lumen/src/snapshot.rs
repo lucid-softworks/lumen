@@ -29,11 +29,43 @@ const VERSION: u32 = 1;
 
 struct Writer {
     buf: Vec<u8>,
+    limit: Option<usize>,
+    depth: usize,
+    failed: bool,
 }
 
 impl Writer {
+    fn new(limit: Option<usize>) -> Self {
+        Self {
+            buf: Vec::new(),
+            limit,
+            depth: 0,
+            failed: false,
+        }
+    }
+    fn bytes(&mut self, bytes: &[u8]) {
+        if self.failed {
+            return;
+        }
+        if self
+            .limit
+            .is_some_and(|limit| bytes.len() > limit.saturating_sub(self.buf.len()))
+        {
+            self.failed = true;
+            return;
+        }
+        self.buf.extend_from_slice(bytes);
+    }
+    fn enter(&mut self) -> bool {
+        if self.failed || (self.limit.is_some() && self.depth >= 128) {
+            self.failed = true;
+            return false;
+        }
+        self.depth += 1;
+        true
+    }
     fn u8(&mut self, v: u8) {
-        self.buf.push(v);
+        self.bytes(&[v]);
     }
     /// LEB128 unsigned varint (small counts/tags stay one byte).
     fn uv(&mut self, mut v: u64) {
@@ -41,32 +73,49 @@ impl Writer {
             let byte = (v & 0x7f) as u8;
             v >>= 7;
             if v == 0 {
-                self.buf.push(byte);
+                self.u8(byte);
                 break;
             }
-            self.buf.push(byte | 0x80);
+            self.u8(byte | 0x80);
         }
     }
     fn f64(&mut self, v: f64) {
-        self.buf.extend_from_slice(&v.to_le_bytes());
+        self.bytes(&v.to_le_bytes());
     }
     fn bool(&mut self, v: bool) {
-        self.buf.push(v as u8);
+        self.u8(v as u8);
     }
     fn str(&mut self, s: &str) {
         self.uv(s.len() as u64);
-        self.buf.extend_from_slice(s.as_bytes());
+        self.bytes(s.as_bytes());
     }
 }
 
 struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
+    depth: usize,
 }
 
 type R<T> = Result<T, String>;
 
-impl Reader<'_> {
+impl<'a> Reader<'a> {
+    fn count(&mut self) -> R<usize> {
+        let n = usize::try_from(self.uv()?).map_err(|_| "snapshot: length overflow")?;
+        if n > self.buf.len() - self.pos {
+            return Err("snapshot: truncated sequence".into());
+        }
+        Ok(n)
+    }
+    fn nested<T>(&mut self, read: impl FnOnce(&mut Self) -> R<T>) -> R<T> {
+        if self.depth >= 128 {
+            return Err("snapshot: nesting limit".into());
+        }
+        self.depth += 1;
+        let result = read(self);
+        self.depth -= 1;
+        result
+    }
     fn u8(&mut self) -> R<u8> {
         let b = *self.buf.get(self.pos).ok_or("snapshot: truncated")?;
         self.pos += 1;
@@ -77,6 +126,9 @@ impl Reader<'_> {
         let mut shift = 0;
         loop {
             let byte = self.u8()?;
+            if shift == 63 && byte > 1 {
+                return Err("snapshot: varint overflow".into());
+            }
             result |= ((byte & 0x7f) as u64) << shift;
             if byte & 0x80 == 0 {
                 return Ok(result);
@@ -97,50 +149,73 @@ impl Reader<'_> {
         Ok(f64::from_le_bytes(bytes.try_into().unwrap()))
     }
     fn bool(&mut self) -> R<bool> {
-        Ok(self.u8()? != 0)
+        match self.u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err("snapshot: bad boolean".into()),
+        }
     }
-    fn str(&mut self) -> R<String> {
-        let len = self.uv()? as usize;
-        let end = self.pos + len;
+    fn str_slice(&mut self) -> R<&'a str> {
+        let len = self.count()?;
+        let end = self
+            .pos
+            .checked_add(len)
+            .ok_or("snapshot: length overflow")?;
         let bytes = self
             .buf
             .get(self.pos..end)
             .ok_or("snapshot: truncated str")?;
         self.pos = end;
-        String::from_utf8(bytes.to_vec()).map_err(|_| "snapshot: bad utf8".into())
+        std::str::from_utf8(bytes).map_err(|_| "snapshot: bad utf8".into())
+    }
+    fn str(&mut self) -> R<String> {
+        Ok(self.str_slice()?.to_owned())
     }
     fn rcstr(&mut self) -> R<Rc<str>> {
-        Ok(Rc::from(self.str()?.as_str()))
+        Ok(Rc::from(self.str_slice()?))
     }
 }
 
 /// Re-intern an operator string to the `&'static str` the parser would have used.
 fn intern_op(s: &str) -> R<&'static str> {
-    KEYWORDS
-        .iter()
-        .chain(PUNCTUATORS.iter())
-        .find(|k| **k == s)
-        .copied()
-        .ok_or_else(|| format!("snapshot: unknown operator {s:?}"))
+    let found = if s.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) {
+        KEYWORDS.binary_search(&s).ok().map(|index| KEYWORDS[index])
+    } else {
+        // Almost every decoded operator is punctuation. Avoid scanning all keywords
+        // before looking at the short punctuation table on every AST expression.
+        PUNCTUATORS.iter().find(|&&op| op == s).copied()
+    };
+    found.ok_or_else(|| format!("snapshot: unknown operator {s:?}"))
 }
 
 // ---- public API -------------------------------------------------------------------------------
 
 /// Encode a parsed script body to a snapshot blob.
 pub fn encode(body: &[Stmt]) -> Vec<u8> {
-    let mut w = Writer {
-        buf: Vec::with_capacity(body.len() * 32),
-    };
+    let mut w = Writer::new(None);
     w.uv(MAGIC as u64);
     w.uv(VERSION as u64);
     enc_stmts(&mut w, body);
     w.buf
 }
 
+/// Encode a disk-cache entry with bounded size and nesting; unsupported entries are skipped.
+pub(crate) fn encode_limited(body: &[Stmt], limit: usize) -> Option<Vec<u8>> {
+    let mut w = Writer::new(Some(limit));
+    w.uv(MAGIC as u64);
+    w.uv(VERSION as u64);
+    enc_stmts(&mut w, body);
+    (!w.failed).then_some(w.buf)
+}
+
 /// Decode a snapshot blob back into a script body. `Err` (skew/truncation/corruption) tells the
 /// caller to fall back to parsing the original source.
 pub fn decode(bytes: &[u8]) -> R<Vec<Stmt>> {
-    let mut r = Reader { buf: bytes, pos: 0 };
+    let mut r = Reader {
+        buf: bytes,
+        pos: 0,
+        depth: 0,
+    };
     if r.uv()? != MAGIC as u64 {
         return Err("snapshot: bad magic".into());
     }
@@ -148,6 +223,9 @@ pub fn decode(bytes: &[u8]) -> R<Vec<Stmt>> {
         return Err("snapshot: version mismatch".into());
     }
     let body = dec_stmts(&mut r)?;
+    if r.pos != bytes.len() {
+        return Err("snapshot: trailing data".into());
+    }
     Ok(body)
 }
 
@@ -160,7 +238,7 @@ fn enc_stmts(w: &mut Writer, v: &[Stmt]) {
     }
 }
 fn dec_stmts(r: &mut Reader) -> R<Vec<Stmt>> {
-    let n = r.uv()? as usize;
+    let n = r.count()?;
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         out.push(dec_stmt(r)?);
@@ -175,7 +253,7 @@ fn enc_exprs(w: &mut Writer, v: &[Expr]) {
     }
 }
 fn dec_exprs(r: &mut Reader) -> R<Vec<Expr>> {
-    let n = r.uv()? as usize;
+    let n = r.count()?;
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         out.push(dec_expr(r)?);
@@ -229,6 +307,13 @@ fn dec_opt_rcstr(r: &mut Reader) -> R<Option<Rc<str>>> {
 // ---- Stmt -------------------------------------------------------------------------------------
 
 fn enc_stmt(w: &mut Writer, s: &Stmt) {
+    if !w.enter() {
+        return;
+    }
+    enc_stmt_inner(w, s);
+    w.depth -= 1;
+}
+fn enc_stmt_inner(w: &mut Writer, s: &Stmt) {
     match s {
         Stmt::Expr(e) => {
             w.u8(0);
@@ -418,11 +503,30 @@ fn enc_stmt(w: &mut Writer, s: &Stmt) {
 }
 
 fn dec_stmt(r: &mut Reader) -> R<Stmt> {
-    Ok(match r.u8()? {
+    r.nested(dec_stmt_inner)
+}
+
+// Separate tag groups keep unoptimized stack frames small enough for the
+// 128-level decoder limit on ordinary 2 MiB test/embedder threads.
+fn dec_stmt_inner(r: &mut Reader) -> R<Stmt> {
+    let tag = r.u8()?;
+    match tag {
+        0..=5 => dec_stmt_group_0(r, tag),
+        6..=11 => dec_stmt_group_1(r, tag),
+        12..=17 => dec_stmt_group_2(r, tag),
+        18..=23 => dec_stmt_group_3(r, tag),
+        24 => dec_stmt_group_4(r, tag),
+        t => Err(format!("snapshot: bad Stmt tag {t}")),
+    }
+}
+
+#[inline(never)]
+fn dec_stmt_group_0(r: &mut Reader, tag: u8) -> R<Stmt> {
+    Ok(match tag {
         0 => Stmt::Expr(dec_expr(r)?),
         1 => {
             let kind = dec_declkind(r)?;
-            let n = r.uv()? as usize;
+            let n = r.count()?;
             let mut decls = Vec::with_capacity(n);
             for _ in 0..n {
                 decls.push((dec_pattern(r)?, dec_opt_expr(r)?));
@@ -442,6 +546,13 @@ fn dec_stmt(r: &mut Reader) -> R<Stmt> {
             Stmt::If { test, cons, alt }
         }
         5 => Stmt::Block(dec_stmts(r)?),
+        _ => unreachable!("validated Stmt tag group"),
+    })
+}
+
+#[inline(never)]
+fn dec_stmt_group_1(r: &mut Reader, tag: u8) -> R<Stmt> {
+    Ok(match tag {
         6 => Stmt::While {
             test: dec_expr(r)?,
             body: Box::new(dec_stmt(r)?),
@@ -480,6 +591,13 @@ fn dec_stmt(r: &mut Reader) -> R<Stmt> {
         }
         10 => Stmt::Break(dec_opt_str(r)?),
         11 => Stmt::Continue(dec_opt_str(r)?),
+        _ => unreachable!("validated Stmt tag group"),
+    })
+}
+
+#[inline(never)]
+fn dec_stmt_group_2(r: &mut Reader, tag: u8) -> R<Stmt> {
+    Ok(match tag {
         12 => Stmt::Throw(dec_expr(r)?),
         13 => {
             let block = dec_stmts(r)?;
@@ -506,7 +624,7 @@ fn dec_stmt(r: &mut Reader) -> R<Stmt> {
         }
         14 => {
             let disc = dec_expr(r)?;
-            let n = r.uv()? as usize;
+            let n = r.count()?;
             let mut cases = Vec::with_capacity(n);
             for _ in 0..n {
                 cases.push(SwitchCase {
@@ -525,11 +643,18 @@ fn dec_stmt(r: &mut Reader) -> R<Stmt> {
             body: Box::new(dec_stmt(r)?),
         },
         17 => Stmt::ClassDecl(Rc::new(dec_class(r)?)),
+        _ => unreachable!("validated Stmt tag group"),
+    })
+}
+
+#[inline(never)]
+fn dec_stmt_group_3(r: &mut Reader, tag: u8) -> R<Stmt> {
+    Ok(match tag {
         18 => Stmt::Empty,
         19 => Stmt::Debugger,
         20 => {
             let source = r.rcstr()?;
-            let n = r.uv()? as usize;
+            let n = r.count()?;
             let mut specs = Vec::with_capacity(n);
             for _ in 0..n {
                 specs.push(dec_importspec(r)?);
@@ -541,7 +666,7 @@ fn dec_stmt(r: &mut Reader) -> R<Stmt> {
             })
         }
         21 => {
-            let n = r.uv()? as usize;
+            let n = r.count()?;
             let mut specs = Vec::with_capacity(n);
             for _ in 0..n {
                 specs.push(ExportSpec {
@@ -556,17 +681,31 @@ fn dec_stmt(r: &mut Reader) -> R<Stmt> {
         }
         22 => Stmt::ExportDecl(Box::new(dec_stmt(r)?)),
         23 => Stmt::ExportDefault(Box::new(dec_stmt(r)?)),
+        _ => unreachable!("validated Stmt tag group"),
+    })
+}
+
+#[inline(never)]
+fn dec_stmt_group_4(r: &mut Reader, tag: u8) -> R<Stmt> {
+    Ok(match tag {
         24 => Stmt::ExportAll {
             source: r.rcstr()?,
             exported: dec_opt_str(r)?,
         },
-        t => return Err(format!("snapshot: bad Stmt tag {t}")),
+        _ => unreachable!("validated Stmt tag group"),
     })
 }
 
 // ---- Expr -------------------------------------------------------------------------------------
 
 fn enc_expr(w: &mut Writer, e: &Expr) {
+    if !w.enter() {
+        return;
+    }
+    enc_expr_inner(w, e);
+    w.depth -= 1;
+}
+fn enc_expr_inner(w: &mut Writer, e: &Expr) {
     match e {
         Expr::Paren(x) => {
             w.u8(0);
@@ -758,13 +897,40 @@ fn enc_expr(w: &mut Writer, e: &Expr) {
 }
 
 fn dec_expr(r: &mut Reader) -> R<Expr> {
-    Ok(match r.u8()? {
+    r.nested(dec_expr_inner)
+}
+
+// Separate tag groups keep unoptimized stack frames small enough for the
+// 128-level decoder limit on ordinary 2 MiB test/embedder threads.
+fn dec_expr_inner(r: &mut Reader) -> R<Expr> {
+    let tag = r.u8()?;
+    match tag {
+        0..=5 => dec_expr_group_0(r, tag),
+        6..=11 => dec_expr_group_1(r, tag),
+        12..=17 => dec_expr_group_2(r, tag),
+        18..=23 => dec_expr_group_3(r, tag),
+        24..=29 => dec_expr_group_4(r, tag),
+        30..=34 => dec_expr_group_5(r, tag),
+        t => Err(format!("snapshot: bad Expr tag {t}")),
+    }
+}
+
+#[inline(never)]
+fn dec_expr_group_0(r: &mut Reader, tag: u8) -> R<Expr> {
+    Ok(match tag {
         0 => Expr::Paren(Box::new(dec_expr(r)?)),
         1 => Expr::Num(r.f64()?),
         2 => Expr::BigInt(JsBigInt::parse_radix(&r.str()?, 16).ok_or("snapshot: bad bigint")?),
         3 => Expr::Str(r.rcstr()?),
         4 => Expr::ToStr(Box::new(dec_expr(r)?)),
         5 => Expr::Bool(r.bool()?),
+        _ => unreachable!("validated Expr tag group"),
+    })
+}
+
+#[inline(never)]
+fn dec_expr_group_1(r: &mut Reader, tag: u8) -> R<Expr> {
+    Ok(match tag {
         6 => Expr::Null,
         7 => Expr::Undefined,
         8 => Expr::Ident(r.str()?),
@@ -774,8 +940,15 @@ fn dec_expr(r: &mut Reader) -> R<Expr> {
             flags: r.rcstr()?,
         },
         11 => Expr::Array(dec_array_elems(r)?),
+        _ => unreachable!("validated Expr tag group"),
+    })
+}
+
+#[inline(never)]
+fn dec_expr_group_2(r: &mut Reader, tag: u8) -> R<Expr> {
+    Ok(match tag {
         12 => {
-            let n = r.uv()? as usize;
+            let n = r.count()?;
             let mut props = Vec::with_capacity(n);
             for _ in 0..n {
                 props.push(dec_propdef(r)?);
@@ -795,27 +968,34 @@ fn dec_expr(r: &mut Reader) -> R<Expr> {
         }
         16 => Expr::Await(Box::new(dec_expr(r)?)),
         17 => Expr::Super,
+        _ => unreachable!("validated Expr tag group"),
+    })
+}
+
+#[inline(never)]
+fn dec_expr_group_3(r: &mut Reader, tag: u8) -> R<Expr> {
+    Ok(match tag {
         18 => Expr::Unary {
-            op: intern_op(&r.str()?)?,
+            op: intern_op(r.str_slice()?)?,
             arg: Box::new(dec_expr(r)?),
         },
         19 => Expr::Update {
-            op: intern_op(&r.str()?)?,
+            op: intern_op(r.str_slice()?)?,
             prefix: r.bool()?,
             arg: Box::new(dec_expr(r)?),
         },
         20 => Expr::Binary {
-            op: intern_op(&r.str()?)?,
+            op: intern_op(r.str_slice()?)?,
             left: Box::new(dec_expr(r)?),
             right: Box::new(dec_expr(r)?),
         },
         21 => Expr::Logical {
-            op: intern_op(&r.str()?)?,
+            op: intern_op(r.str_slice()?)?,
             left: Box::new(dec_expr(r)?),
             right: Box::new(dec_expr(r)?),
         },
         22 => Expr::Assign {
-            op: intern_op(&r.str()?)?,
+            op: intern_op(r.str_slice()?)?,
             target: Box::new(dec_expr(r)?),
             value: Box::new(dec_expr(r)?),
         },
@@ -824,6 +1004,13 @@ fn dec_expr(r: &mut Reader) -> R<Expr> {
             cons: Box::new(dec_expr(r)?),
             alt: Box::new(dec_expr(r)?),
         },
+        _ => unreachable!("validated Expr tag group"),
+    })
+}
+
+#[inline(never)]
+fn dec_expr_group_4(r: &mut Reader, tag: u8) -> R<Expr> {
+    Ok(match tag {
         24 => Expr::Call {
             callee: Box::new(dec_expr(r)?),
             args: dec_array_elems(r)?,
@@ -846,7 +1033,7 @@ fn dec_expr(r: &mut Reader) -> R<Expr> {
         28 => Expr::Seq(dec_exprs(r)?),
         29 => {
             let tag = Box::new(dec_expr(r)?);
-            let n = r.uv()? as usize;
+            let n = r.count()?;
             let mut quasis = Vec::with_capacity(n);
             for _ in 0..n {
                 quasis.push((dec_opt_str(r)?, r.str()?));
@@ -857,6 +1044,13 @@ fn dec_expr(r: &mut Reader) -> R<Expr> {
                 subs: dec_exprs(r)?,
             }
         }
+        _ => unreachable!("validated Expr tag group"),
+    })
+}
+
+#[inline(never)]
+fn dec_expr_group_5(r: &mut Reader, tag: u8) -> R<Expr> {
+    Ok(match tag {
         30 => Expr::OptionalChain(Box::new(dec_expr(r)?)),
         31 => Expr::PrivateIn {
             name: r.str()?,
@@ -878,7 +1072,7 @@ fn dec_expr(r: &mut Reader) -> R<Expr> {
         },
         33 => Expr::ImportMeta,
         34 => Expr::NewTarget,
-        t => return Err(format!("snapshot: bad Expr tag {t}")),
+        _ => unreachable!("validated Expr tag group"),
     })
 }
 
@@ -901,7 +1095,7 @@ fn enc_array_elems(w: &mut Writer, elems: &[ArrayElem]) {
     }
 }
 fn dec_array_elems(r: &mut Reader) -> R<Vec<ArrayElem>> {
-    let n = r.uv()? as usize;
+    let n = r.count()?;
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         out.push(match r.u8()? {
@@ -1010,6 +1204,13 @@ fn dec_propkey(r: &mut Reader) -> R<PropKey> {
 }
 
 fn enc_pattern(w: &mut Writer, p: &Pattern) {
+    if !w.enter() {
+        return;
+    }
+    enc_pattern_inner(w, p);
+    w.depth -= 1;
+}
+fn enc_pattern_inner(w: &mut Writer, p: &Pattern) {
     match p {
         Pattern::Ident(n) => {
             w.u8(0);
@@ -1050,10 +1251,14 @@ fn enc_pattern(w: &mut Writer, p: &Pattern) {
     }
 }
 fn dec_pattern(r: &mut Reader) -> R<Pattern> {
+    r.nested(dec_pattern_inner)
+}
+
+fn dec_pattern_inner(r: &mut Reader) -> R<Pattern> {
     Ok(match r.u8()? {
         0 => Pattern::Ident(r.str()?),
         1 => {
-            let n = r.uv()? as usize;
+            let n = r.count()?;
             let mut elems = Vec::with_capacity(n);
             for _ in 0..n {
                 elems.push(match r.u8()? {
@@ -1069,7 +1274,7 @@ fn dec_pattern(r: &mut Reader) -> R<Pattern> {
             Pattern::Array(elems)
         }
         2 => {
-            let n = r.uv()? as usize;
+            let n = r.count()?;
             let mut props = Vec::with_capacity(n);
             for _ in 0..n {
                 props.push(ObjPatProp {
@@ -1089,6 +1294,13 @@ fn dec_pattern(r: &mut Reader) -> R<Pattern> {
 }
 
 fn enc_function(w: &mut Writer, f: &Function) {
+    if !w.enter() {
+        return;
+    }
+    enc_function_inner(w, f);
+    w.depth -= 1;
+}
+fn enc_function_inner(w: &mut Writer, f: &Function) {
     enc_opt_str(w, &f.name);
     w.uv(f.params.len() as u64);
     for p in &f.params {
@@ -1109,8 +1321,12 @@ fn enc_function(w: &mut Writer, f: &Function) {
     enc_opt_rcstr(w, &f.source);
 }
 fn dec_function(r: &mut Reader) -> R<Function> {
+    r.nested(dec_function_inner)
+}
+
+fn dec_function_inner(r: &mut Reader) -> R<Function> {
     let name = dec_opt_str(r)?;
-    let n = r.uv()? as usize;
+    let n = r.count()?;
     let mut params = Vec::with_capacity(n);
     for _ in 0..n {
         params.push(Param {
@@ -1186,7 +1402,7 @@ fn dec_class(r: &mut Reader) -> R<Class> {
     } else {
         None
     };
-    let n = r.uv()? as usize;
+    let n = r.count()?;
     let mut members = Vec::with_capacity(n);
     for _ in 0..n {
         let key = dec_propkey(r)?;
@@ -1245,7 +1461,7 @@ fn dec_forinit(r: &mut Reader) -> R<ForInit> {
     Ok(match r.u8()? {
         0 => {
             let kind = dec_declkind(r)?;
-            let n = r.uv()? as usize;
+            let n = r.count()?;
             let mut decls = Vec::with_capacity(n);
             for _ in 0..n {
                 decls.push((dec_pattern(r)?, dec_opt_expr(r)?));
@@ -1318,7 +1534,17 @@ fn dec_declkind(r: &mut Reader) -> R<DeclKind> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode, encode};
+    use super::{decode, encode, Stmt, Writer, MAGIC, VERSION};
+
+    #[test]
+    fn every_lexer_operator_can_be_reinterned() {
+        for &op in super::KEYWORDS.iter().chain(super::PUNCTUATORS) {
+            assert_eq!(super::intern_op(op).unwrap(), op);
+        }
+        for invalid in ["", "unknownKeyword", "@@@@"] {
+            assert!(super::intern_op(invalid).is_err());
+        }
+    }
 
     /// `encode` and `decode` must be exact inverses: re-encoding a decoded tree reproduces the
     /// bytes. This catches every tag/field-order asymmetry (a *dropped* field is caught instead
@@ -1363,5 +1589,57 @@ mod tests {
             let src = std::fs::read_to_string(format!("{dir}{file}")).unwrap();
             assert_roundtrips(&src);
         }
+    }
+    #[test]
+    fn malformed_snapshots_are_bounded_and_rejected() {
+        let body = crate::parser::parse_script("function f(x) { return x+1; } f(2)", false)
+            .unwrap_or_else(|e| panic!("{}", e.message));
+        let bytes = encode(&body);
+        for n in 0..bytes.len() {
+            assert!(decode(&bytes[..n]).is_err(), "prefix {n}");
+        }
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(decode(&trailing).is_err());
+        let mut huge = Writer::new(None);
+        huge.uv(MAGIC as u64);
+        huge.uv(VERSION as u64);
+        huge.uv(u64::MAX);
+        assert!(decode(&huge.buf).is_err());
+        let mut nested = Stmt::Empty;
+        for _ in 0..160 {
+            nested = Stmt::Block(vec![nested]);
+        }
+        let nested = [nested];
+        assert!(decode(&encode(&nested)).is_err());
+        assert!(super::encode_limited(&nested, 1024 * 1024).is_none());
+        assert!(super::encode_limited(&body, 4).is_none());
+    }
+
+    #[test]
+    fn nesting_limit_is_safe_on_a_two_megabyte_stack() {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                for depth in [128, 129] {
+                    let mut statement = Stmt::Empty;
+                    for _ in 1..depth {
+                        statement = Stmt::Block(vec![statement]);
+                    }
+                    let bytes = encode(&[statement]);
+                    assert_eq!(decode(&bytes).is_ok(), depth == 128, "blocks: {depth}");
+
+                    // The enclosing expression statement also consumes one depth level.
+                    let mut expression = crate::ast::Expr::Num(1.0);
+                    for _ in 2..depth {
+                        expression = crate::ast::Expr::Paren(Box::new(expression));
+                    }
+                    let bytes = encode(&[Stmt::Expr(expression)]);
+                    assert_eq!(decode(&bytes).is_ok(), depth == 128, "expressions: {depth}");
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

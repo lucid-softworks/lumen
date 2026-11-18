@@ -1,0 +1,22 @@
+{
+  "date": "2026-11-18T02:38:11.843Z",
+  "commit": "35eb8e5b47687f167bc7a23260ea13f50f08e370",
+  "node": "v24.22.2",
+  "v8": "13.6.233.17-node.63",
+  "lumen": "lumen 0.1.4",
+  "rust": "rustc 1.99.1 (58cf8f9c3 2026-10-13) (built from a source tarball)",
+  "cpu": "AMD Ryzen 7 PRO 8845HS w/ Radeon 780M Graphics",
+  "platform": "linux",
+  "arch": "x64",
+  "kernel": "6.18.62",
+  "loadAtStart": [
+    10.39,
+    12.71,
+    12.65
+  ],
+  "timeoutMs": 60000,
+  "repeats": 3,
+  "source": "https://github.com/mozilla/arewefastyet/tree/master/benchmarks/v8-v7",
+  "binarySha256": "3981641d108a2042bf88433f25fec5bd274619c775661a070ac982b2b992670e",
+  "method": "Sequential isolated processes, alternating engine order by round; unchanged upstream warmup, timing and minimum 32 iterations. 60-second process timeout; failed/time-out workloads not repeated for that engine. Scores parsed without rounding. No CPU isolation. Suite correctness checks enabled."
+}

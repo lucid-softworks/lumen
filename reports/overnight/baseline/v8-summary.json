@@ -1,0 +1,222 @@
+{
+  "aggregateRatio": 86.019627371528,
+  "pairedWorkloads": 8,
+  "rows": [
+    {
+      "key": "richards",
+      "name": "Richards",
+      "v8": {
+        "scores": [
+          58693,
+          56801,
+          55428
+        ],
+        "median": 56801,
+        "min": 55428,
+        "max": 58693,
+        "status": "ok"
+      },
+      "lumen": {
+        "scores": [
+          487,
+          477,
+          452
+        ],
+        "median": 477,
+        "min": 452,
+        "max": 487,
+        "status": "ok"
+      },
+      "ratio": 119.0796645702306
+    },
+    {
+      "key": "deltablue",
+      "name": "DeltaBlue",
+      "v8": {
+        "scores": [
+          127013,
+          137995,
+          103699
+        ],
+        "median": 127013,
+        "min": 103699,
+        "max": 137995,
+        "status": "ok"
+      },
+      "lumen": {
+        "scores": [
+          487,
+          567,
+          512
+        ],
+        "median": 512,
+        "min": 487,
+        "max": 567,
+        "status": "ok"
+      },
+      "ratio": 248.072265625
+    },
+    {
+      "key": "crypto",
+      "name": "Crypto",
+      "v8": {
+        "scores": [
+          55553,
+          58348,
+          54308
+        ],
+        "median": 55553,
+        "min": 54308,
+        "max": 58348,
+        "status": "ok"
+      },
+      "lumen": {
+        "scores": [
+          311,
+          359,
+          340
+        ],
+        "median": 340,
+        "min": 311,
+        "max": 359,
+        "status": "ok"
+      },
+      "ratio": 163.39117647058825
+    },
+    {
+      "key": "raytrace",
+      "name": "RayTrace",
+      "v8": {
+        "scores": [
+          98937,
+          104856,
+          100565
+        ],
+        "median": 100565,
+        "min": 98937,
+        "max": 104856,
+        "status": "ok"
+      },
+      "lumen": {
+        "scores": [
+          2023,
+          1948,
+          1683
+        ],
+        "median": 1948,
+        "min": 1683,
+        "max": 2023,
+        "status": "ok"
+      },
+      "ratio": 51.624743326488705
+    },
+    {
+      "key": "earley-boyer",
+      "name": "EarleyBoyer",
+      "v8": {
+        "scores": [
+          102973,
+          107432,
+          95953
+        ],
+        "median": 102973,
+        "min": 95953,
+        "max": 107432,
+        "status": "ok"
+      },
+      "lumen": {
+        "scores": [
+          747,
+          733,
+          712
+        ],
+        "median": 733,
+        "min": 712,
+        "max": 747,
+        "status": "ok"
+      },
+      "ratio": 140.48158253751706
+    },
+    {
+      "key": "regexp",
+      "name": "RegExp",
+      "v8": {
+        "scores": [
+          13701,
+          12845,
+          13728
+        ],
+        "median": 13701,
+        "min": 12845,
+        "max": 13728,
+        "status": "ok"
+      },
+      "lumen": {
+        "scores": [
+          286,
+          282,
+          307
+        ],
+        "median": 286,
+        "min": 282,
+        "max": 307,
+        "status": "ok"
+      },
+      "ratio": 47.90559440559441
+    },
+    {
+      "key": "splay",
+      "name": "Splay",
+      "v8": {
+        "scores": [
+          42962,
+          37926,
+          39604
+        ],
+        "median": 39604,
+        "min": 37926,
+        "max": 42962,
+        "status": "ok"
+      },
+      "lumen": {
+        "scores": [
+          2340,
+          2190,
+          2326
+        ],
+        "median": 2326,
+        "min": 2190,
+        "max": 2340,
+        "status": "ok"
+      },
+      "ratio": 17.02665520206363
+    },
+    {
+      "key": "navier-stokes",
+      "name": "NavierStokes",
+      "v8": {
+        "scores": [
+          55205,
+          57522,
+          56484
+        ],
+        "median": 56484,
+        "min": 55205,
+        "max": 57522,
+        "status": "ok"
+      },
+      "lumen": {
+        "scores": [
+          538,
+          528,
+          562
+        ],
+        "median": 538,
+        "min": 528,
+        "max": 562,
+        "status": "ok"
+      },
+      "ratio": 104.98884758364312
+    }
+  ]
+}

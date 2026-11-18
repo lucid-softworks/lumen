@@ -244,7 +244,8 @@ fn create_dynamic_function(i: &mut Interp, args: &[Value], prefix: &str) -> Resu
             .map_err(|e| i.make_error("SyntaxError", e.message))?;
     }
     let src = format!("{prefix} anonymous({params}\n) {{\n{body}\n}}");
-    let program = crate::parser::parse_script(&src, false)
+    let program = i
+        .parse_cached(&src, false)
         .map_err(|e| i.make_error("SyntaxError", e.message))?;
     match program.into_iter().next() {
         Some(crate::ast::Stmt::FuncDecl(f)) => {

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lumen performance comparison</title>
+<style>
+#lumen-overnight { display: grid; gap: 20px; color: var(--foreground); font-family: var(--font-sans); }
+#lumen-overnight p { margin: 0; }
+#lumen-overnight .note { color: var(--muted-foreground); }
+#lumen-overnight section { min-width: 0; }
+#lumen-overnight [data-viz-container] { width: 100%; }
+#lumen-overnight .status { display: flex; flex-wrap: wrap; gap: 8px 20px; }
+</style>
+</head>
+<body>
+<main id="lumen-overnight">
+<div class="status"><span>Performance PR: threshold not met</span><span>glibc fix: PR #53</span></div>
+<section id="vite-build-chart" data-viz-composition aria-label="End-to-end Vite build medians in milliseconds. Lower is better.">
+<div data-viz-container></div>
+<script type="application/json" data-viz-chart>{"id":"vite-build-chart","title":"Vite build · median wall time","description":"Lower is better. Includes startup, bundling and shutdown.","height":280,"spec":{"type":"bar","x":"Compile cache","y":["Lumen","Node","Bun"],"yLabel":"Milliseconds","showValues":true,"valueFormat":{"style":"decimal","maximumFractionDigits":0},"colors":{"Lumen":"var(--chart-1)","Node":"var(--chart-2)","Bun":"var(--chart-3)"}},"columns":["Compile cache","Lumen","Node","Bun"],"rows":[["Warm",236.82477800000015,177.7578609999996,210.78787600000032],["Empty",363.60320999999976,217.93151100000023,210.21049200000016]]}</script>
+</section>
+<p class="note">Fresh processes; identical output hashes. Warm: 21 measured builds per runtime. Empty compile cache: 7. Filesystem caches remain warm. Shared Linux x64 host; timings vary with machine load.</p>
+<section id="v8-gap-chart" data-viz-composition aria-label="V8 score divided by Lumen score for eight workloads. One means parity; the PR gate is two or less for every workload.">
+<div data-viz-container></div>
+<script type="application/json" data-viz-chart>{"id":"v8-gap-chart","title":"V8 benchmark · remaining speed gap","description":"V8 score ÷ Lumen score. Every workload must be at or below 2× for the JIT PR.","height":350,"spec":{"type":"horizontalBar","y":"Workload","x":"Ratio","xLabel":"V8 / Lumen score (×)","showValues":true,"valueFormat":{"style":"decimal","maximumFractionDigits":1},"referenceLines":[{"axis":"x","value":2,"label":"2× gate"}]},"columns":["Workload","Ratio"],"rows":[["Richards",89.03001579778831],["DeltaBlue",202.2099533437014],["Crypto",25.97108208955224],["RayTrace",39.56012110726643],["EarleyBoyer",129.46902654867256],["RegExp",44.769503546099294],["Splay",16.32909783989835],["NavierStokes",19.30668016194332]]}</script>
+</section>
+<p class="note">Three fresh processes per engine and workload; original V8 v7 correctness checks enabled. Score ratios, lower is better. All 48 runs passed. Geometric mean gap: 49.1×; original baseline: 86.0× (separate measurement window).</p>
+<p class="note">Node 24.22.2 · V8 13.6.233.17-node.63 · Bun 1.3.10 · Vite 6.4.6 · Ryzen 7 PRO 8845HS</p>
+</main>
+<script type="module">
+import { mountChart } from 'https://persistent.oaistatic.com/plugins/visualize/charts/1.2.3/element.js';
+for (const id of ['vite-build-chart', 'v8-gap-chart']) {
+  const section = document.getElementById(id);
+  const config = JSON.parse(section.querySelector('[data-viz-chart]').textContent);
+  mountChart(section.querySelector('[data-viz-container]'), config);
+}
+</script>
+</body>
+</html>

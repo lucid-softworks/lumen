@@ -14,6 +14,12 @@ use lumen_host::Completion;
 use lumen_repl::Repl;
 use lumen_runtime::Runtime;
 
+// Match the engine CLI's bounded small-allocation cache. Runtime startup and module
+// parsing otherwise pay system malloc/free costs for every short-lived AST/object.
+#[cfg(not(target_arch = "wasm32"))]
+#[global_allocator]
+static GLOBAL_ALLOC: lumen_host::ClassAlloc = lumen_host::ClassAlloc;
+
 fn main() {
     let mut tier = None;
     let mut threshold = None;
