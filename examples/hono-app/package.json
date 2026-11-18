@@ -6,6 +6,6 @@
   "main": "app.js",
   "description": "A small Hono app run on the lumen runtime",
   "dependencies": {
-    "hono": "^4.12.28"
+    "hono": "^4.13.19"
   }
 }

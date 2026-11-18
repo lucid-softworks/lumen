@@ -4,8 +4,8 @@
   "private": true,
   "description": "A real-world Express app on the lumen runtime",
   "dependencies": {
-    "express": "^4.21.2",
-    "morgan": "^1.10.0",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "express": "^4.22.3",
+    "morgan": "^1.12.1"
   }
 }
