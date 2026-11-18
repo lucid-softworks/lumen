@@ -26,11 +26,15 @@ impl Props {
 
     /// Build the hash index for every current entry (crossing the small-map threshold).
     pub(super) fn build_index(&mut self) {
+        self.elems.set_index(Some(self.make_index()));
+    }
+
+    pub(super) fn make_index(&self) -> Box<crate::fasthash::FastMap<Rc<str>, usize>> {
         let mut index = Box::<crate::fasthash::FastMap<Rc<str>, usize>>::default();
         for (j, (k, _)) in self.entries.iter().enumerate() {
             index.insert(k.clone(), j);
         }
-        self.elems.set_index(Some(index));
+        index
     }
 
     /// Drop every property (used by the GC to break a garbage object's reference cycles).
