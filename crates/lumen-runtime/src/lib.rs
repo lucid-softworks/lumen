@@ -460,6 +460,11 @@ impl Runtime {
     }
 
     fn take_due_timers(&mut self) -> Vec<(Value, Vec<Value>)> {
+        // Even an already-due unref'd timer must not keep an otherwise idle runtime alive.
+        // When a referenced timer/task or queued work exists, all due timers may still fire.
+        if self.idle() {
+            return Vec::new();
+        }
         let now = Instant::now();
         match self.engine.ctx().host_mut::<lumen_timers::Timers>() {
             Some(t) => t.take_due(now),

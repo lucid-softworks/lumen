@@ -108,6 +108,69 @@ fn clear_timeout_cancels() {
 }
 
 #[test]
+fn timer_unref_allows_exit_but_ref_restores_liveness() {
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        const timer = setTimeout(() => console.log("fired"), 0);
+        console.log(timer.hasRef(), timer.unref() === timer, timer.hasRef());
+        console.log(require("node:timers").setTimeout === setTimeout);
+    "#,
+    );
+    assert_eq!(out.lines(), ["true true false", "true"]);
+    eval_ok(
+        &mut rt,
+        "console.log(timer.ref() === timer, timer.hasRef());",
+    );
+    assert_eq!(
+        out.lines(),
+        ["true true false", "true", "true true", "fired"]
+    );
+}
+
+#[test]
+fn unref_timer_still_fires_while_other_work_keeps_the_loop_alive() {
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        setTimeout(() => console.log("unref"), 0).unref();
+        setTimeout(() => console.log("ref"), 0);
+    "#,
+    );
+    assert_eq!(out.lines(), ["unref", "ref"]);
+}
+
+#[test]
+fn timer_handles_support_numeric_cancellation_and_survive_clear() {
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        const timer = setInterval(() => console.log("unexpected"), 10);
+        clearTimeout(+timer);
+        console.log(timer.hasRef(), timer.unref().hasRef(), timer.ref().hasRef());
+        const other = require("node:timers").setTimeout(() => console.log("unexpected"), 0);
+        clearInterval(other);
+    "#,
+    );
+    assert_eq!(out.lines(), ["true false true"]);
+}
+
+#[test]
+fn timer_promises_ref_false_does_not_keep_the_loop_alive() {
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        r#"
+        require("node:timers/promises").setTimeout(0, "unexpected", {ref: false}).then(console.log);
+    "#,
+    );
+    assert!(out.lines().is_empty());
+}
+
+#[test]
 fn next_tick_and_set_immediate_run_before_timers() {
     let (mut rt, out, _err) = test_runtime();
     eval_ok(

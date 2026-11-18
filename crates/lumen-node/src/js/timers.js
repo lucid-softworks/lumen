@@ -7,11 +7,30 @@
 // iterator forms — with `AbortSignal` support — over those same primitives.
 
 {
-  const gSetTimeout = globalThis.setTimeout;
+  const rawSetTimeout = globalThis.setTimeout;
   const gClearTimeout = globalThis.clearTimeout;
-  const gSetInterval = globalThis.setInterval;
+  const rawSetInterval = globalThis.setInterval;
   const gClearInterval = globalThis.clearInterval;
   const gSetImmediate = globalThis.setImmediate;
+  const setTimerRef = globalThis.__timers.setRef;
+  delete globalThis.__timers;
+
+  // Keep the raw numeric ids in the timer substrate for web embedders. Node exposes handles
+  // whose liveness can be changed independently of cancellation, and accepts their numeric
+  // primitive in either clear function. Reference state remains observable after cancellation.
+  class Timeout {
+    constructor(id) { this._id = id; this._referenced = true; }
+    ref() { this._referenced = true; setTimerRef(this._id, true); return this; }
+    unref() { this._referenced = false; setTimerRef(this._id, false); return this; }
+    hasRef() { return this._referenced; }
+    [Symbol.toPrimitive]() { return this._id; }
+    close() { gClearTimeout(this._id); return this; }
+    [Symbol.dispose]() { gClearTimeout(this._id); }
+  }
+  const gSetTimeout = (callback, delay, ...args) => new Timeout(rawSetTimeout(callback, delay, ...args));
+  const gSetInterval = (callback, delay, ...args) => new Timeout(rawSetInterval(callback, delay, ...args));
+  globalThis.setTimeout = gSetTimeout;
+  globalThis.setInterval = gSetInterval;
 
   // --- setImmediate / clearImmediate as cancellable handles ------------------------------------
   class Immediate {
@@ -50,7 +69,10 @@
       if (typeof item._onTimeout === "function") item._onTimeout();
     }, item._idleTimeout);
   }
-  const _unrefActive = active;
+  function _unrefActive(item) {
+    active(item);
+    if (item && item._idleTimeoutId != null) item._idleTimeoutId.unref();
+  }
 
   // --- timers/promises -------------------------------------------------------------------------
   const abortReason = (signal) => {
@@ -70,6 +92,7 @@
         if (signal) signal.removeEventListener("abort", onAbort);
         resolve(value);
       }, delay);
+      if (options.ref === false) id.unref();
       if (signal) signal.addEventListener("abort", onAbort, { once: true });
     });
   }
@@ -91,7 +114,7 @@
     const signal = options.signal;
     if (signal && signal.aborted) throw abortReason(signal);
     while (true) {
-      await setTimeoutP(delay, undefined, { signal });
+      await setTimeoutP(delay, undefined, { signal, ref: options.ref });
       yield value;
     }
   }
