@@ -145,8 +145,7 @@ lumen-repl ← lumen-cli` — so each op crate can be worked on in isolation.
 
 ## Install
 
-Grab a nightly prebuilt runtime on macOS arm64/x86_64 or Linux x86_64/arm64 (tagged releases
-also publish Windows x86_64 binaries):
+Grab a nightly prebuilt runtime on macOS arm64/x86_64 or Linux x86_64/arm64:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/lucid-softworks/lumen/main/scripts/install.sh | bash
@@ -155,6 +154,13 @@ curl -fsSL https://raw.githubusercontent.com/lucid-softworks/lumen/main/scripts/
 It installs the `lumen` CLI to `~/.lumen/bin` from the rolling `nightly` release
 (`LUMEN_INSTALL` and `LUMEN_RELEASE` override the location and tag). Other platforms build from
 source — see below.
+
+Windows x86_64 builds publish the standalone engine only, as
+`lumen-x86_64-pc-windows-msvc.exe` in nightly and tagged releases. Download it from the
+[release assets](https://github.com/lucid-softworks/lumen/releases) and run it with
+`.\lumen-x86_64-pc-windows-msvc.exe file.js` in PowerShell. The engine has no runtime/host
+APIs; `lumen-cli` and the install script are not supported on Windows while the runtime
+depends on the Unix-only TLS backend.
 
 ## Usage
 
