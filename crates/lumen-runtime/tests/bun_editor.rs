@@ -25,7 +25,7 @@ fn open_in_editor_spawns_configured_editor() {
         err: Box::new(Captured::default()),
     });
     let source = r#"
-      Bun.openInEditor(".", { editor: "/usr/bin/true", line: 4, column: 2 });
+      Bun.openInEditor(".", { editor: "true", line: 4, column: 2 });
       console.log("opened");
     "#;
     match runtime.eval(source).unwrap() {
