@@ -2376,6 +2376,18 @@ impl Interp {
     /// handled by routing to their wrapper prototype (and string index/length specially). The
     /// receiver defaults to `base`.
     pub fn get_member(&mut self, base: &Value, key: &str) -> Result<Value, Abrupt> {
+        // Own data reads on ordinary objects need neither a receiver clone nor the
+        // side-table/prototype walk. The same per-object guard protects property ICs.
+        if let Value::Obj(object) = base {
+            let object = object.borrow();
+            if object.ic_plain.get() && matches!(object.exotic, Exotic::None | Exotic::Array) {
+                if let Some(property) = object.props.get(key) {
+                    if !property.accessor() {
+                        return Ok(property.value());
+                    }
+                }
+            }
+        }
         self.get_member_recv(base, key, base.clone())
     }
 
