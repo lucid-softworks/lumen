@@ -465,10 +465,12 @@ fn emit_prop_value(
 
 /// Read a known numeric dense mirror without boxing the receiver or calling a helper.
 /// Holes, non-numeric elements, accessors and exotic receivers keep the checked path.
-fn emit_elem_local_number(
+// On success: rax=index, rdx=dense sidecar, r11=object. All checks precede mutation.
+fn emit_elem_local_guard(
     a: &mut Asm,
     layout: &crate::value::JitLayout,
     slot: u16,
+    key_offset: i32,
     slow: usize,
 ) -> bool {
     let offsets = [
@@ -483,8 +485,8 @@ fn emit_elem_local_number(
     if !layout.valid || offsets.iter().any(|&off| off > i32::MAX as usize) {
         return false;
     }
-    let [rcv, exotic, plain, flags, elems, mirror_ptr, mirror_len] = offsets.map(|v| v as i32);
-    a.cmp_byte_r13(-16, 4);
+    let [rcv, exotic, plain, flags, elems, _mirror_ptr, mirror_len] = offsets.map(|v| v as i32);
+    a.cmp_byte_r13(key_offset, 4);
     a.jcc(0x85, slow);
     let off = i32::from(slot) * 16;
     a.load_byte_r15(off);
@@ -492,14 +494,14 @@ fn emit_elem_local_number(
     a.jcc(0x85, slow);
     // Convert exactly to a canonical uint32 array index (0..2^32-2). Negative zero is 0.
     a.bytes(&[0xf2, 0x49, 0x0f, 0x2c, 0x85]);
-    a.bytes(&(-8i32).to_le_bytes());
+    a.bytes(&(key_offset + 8).to_le_bytes());
     a.bytes(&[0xb9]);
     a.bytes(&(u32::MAX - 1).to_le_bytes());
     a.bytes(&[0x48, 0x39, 0xc8]);
     a.jcc(0x87, slow);
     a.bytes(&[0xf2, 0x48, 0x0f, 0x2a, 0xc0]); // cvtsi2sd xmm0,rax
     a.bytes(&[0x66, 0x41, 0x0f, 0x2e, 0x85]);
-    a.bytes(&(-8i32).to_le_bytes());
+    a.bytes(&(key_offset + 8).to_le_bytes());
     a.jcc(0x85, slow);
     a.jcc(0x8a, slow);
     a.bytes(&[0x4d, 0x8b, 0x97]);
@@ -530,6 +532,19 @@ fn emit_elem_local_number(
     a.bytes(&[0x48, 0x3b, 0x82]);
     a.bytes(&mirror_len.to_le_bytes());
     a.jcc(0x83, slow);
+    true
+}
+
+fn emit_elem_local_number(
+    a: &mut Asm,
+    layout: &crate::value::JitLayout,
+    slot: u16,
+    slow: usize,
+) -> bool {
+    if !emit_elem_local_guard(a, layout, slot, -16, slow) {
+        return false;
+    }
+    let mirror_ptr = (layout.dense_mirror + layout.vec_ptr_off) as i32;
     a.bytes(&[0x48, 0x8b, 0x92]);
     a.bytes(&mirror_ptr.to_le_bytes());
     a.bytes(&[0xf2, 0x0f, 0x10, 0x04, 0xc2]); // xmm0=mirror[index]
@@ -537,6 +552,75 @@ fn emit_elem_local_number(
     a.store_pair_r13(-16);
     a.bytes(&[0xf2, 0x41, 0x0f, 0x11, 0x85]);
     a.bytes(&(-8i32).to_le_bytes());
+    true
+}
+
+fn emit_set_elem_local_number(
+    a: &mut Asm,
+    layout: &crate::value::JitLayout,
+    slot: u16,
+    keep: bool,
+    slow: usize,
+) -> bool {
+    let offsets = [
+        layout.dense_elems + layout.vec_ptr_off,
+        layout.dense_elems + layout.vec_len_off,
+        layout.obj_props + layout.props_entries + layout.vec_ptr_off,
+        layout.obj_props + layout.props_entries + layout.vec_len_off,
+        layout.entry_size,
+        layout.entry_value,
+        layout.obj_props + layout.props_mirror_flags,
+        layout.dense_mirror + layout.vec_ptr_off,
+    ];
+    // The current packed Property stores numeric f64 bits directly. Other layouts
+    // continue through the checked helper rather than depending on a tag guess.
+    if layout.entry_accessor != layout.entry_value + 8
+        || offsets.iter().any(|&off| off > i32::MAX as usize)
+    {
+        return false;
+    }
+    let [elements, elements_len, entries, entries_len, stride, value, flags, mirror] =
+        offsets.map(|v| v as i32);
+    if !emit_elem_local_guard(a, layout, slot, -32, slow) {
+        return false;
+    }
+    a.cmp_byte_r13(-16, 4);
+    a.jcc(0x85, slow);
+    a.bytes(&[0xf2, 0x41, 0x0f, 0x10, 0x4d, 0xf8]); // xmm1=value
+    a.bytes(&[0x66, 0x0f, 0x2e, 0xc9]); // ucomisd xmm1,xmm1
+    a.jcc(0x8a, slow); // NaNs need canonical packing / mirror-hole handling.
+    a.bytes(&[0x48, 0x3b, 0x82]); // index < elements.len
+    a.bytes(&elements_len.to_le_bytes());
+    a.jcc(0x83, slow);
+    a.bytes(&[0x4c, 0x8b, 0x82]); // r8=elements.data
+    a.bytes(&elements.to_le_bytes());
+    a.bytes(&[0x45, 0x8b, 0x04, 0x80]); // r8d=elements[index]
+    a.bytes(&[0x4d, 0x3b, 0x83]); // entry slot < entries.len (rejects NO_SLOT)
+    a.bytes(&entries_len.to_le_bytes());
+    a.jcc(0x83, slow);
+    a.bytes(&[0x4d, 0x69, 0xc0]); // r8 *= entry stride
+    a.bytes(&stride.to_le_bytes());
+    a.bytes(&[0x4d, 0x8b, 0x93]); // r10=entries.data
+    a.bytes(&entries.to_le_bytes());
+    a.bytes(&[0x4d, 0x01, 0xc2]); // r10=entry
+    // MIRROR_OK|NO_HOLES proves every covered property is writable numeric data.
+    // No allocation, JS call or fallible guard occurs between this point and commit.
+    a.bytes(&[0xf2, 0x41, 0x0f, 0x11, 0x8a]);
+    a.bytes(&value.to_le_bytes());
+    a.bytes(&[0x48, 0x8b, 0x92]); // rdx=mirror.data
+    a.bytes(&mirror.to_le_bytes());
+    a.bytes(&[0xf2, 0x0f, 0x11, 0x0c, 0xc2]); // mirror[index]=value
+    a.bytes(&[0x41, 0x80, 0xa3]);
+    a.bytes(&flags.to_le_bytes());
+    a.bytes(&[!crate::value::MIRROR_ALL_I32]);
+    if keep {
+        a.bytes(&[0xb8, 4, 0, 0, 0, 0x31, 0xd2]);
+        a.store_pair_r13(-32);
+        a.bytes(&[0xf2, 0x41, 0x0f, 0x11, 0x4d, 0xe8]); // result payload at -24
+        a.bytes(&[0x49, 0x83, 0xed, 0x10]);
+    } else {
+        a.bytes(&[0x49, 0x83, 0xed, 0x20]);
+    }
     true
 }
 
@@ -918,6 +1002,19 @@ pub(super) fn compile(
                 let slow = a.label();
                 let done = a.label();
                 if emit_elem_local_number(&mut a, layout, *slot, slow) {
+                    a.jmp(done);
+                    a.bind(slow);
+                    a.helper_spflag(H_EXEC, pc as u32, unwind);
+                    a.bind(done);
+                } else {
+                    a.helper_spflag(H_EXEC, pc as u32, unwind);
+                }
+            }
+            Op::SetElemLocal(slot) | Op::SetElemLocalDrop(slot) => {
+                let slow = a.label();
+                let done = a.label();
+                let keep = matches!(op, Op::SetElemLocal(_));
+                if emit_set_elem_local_number(&mut a, layout, *slot, keep, slow) {
                     a.jmp(done);
                     a.bind(slow);
                     a.helper_spflag(H_EXEC, pc as u32, unwind);
