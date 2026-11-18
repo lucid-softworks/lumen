@@ -1281,13 +1281,14 @@ impl Interp {
             return Err(self.throw("TypeError", "iterator 'return' is not callable"));
         }
         let r = self.call(ret, iter.clone(), &[])?;
-        let r = if from_sync { r } else { self.await_value(r)? };
+        // Closing must suspend just like stepping: return() may settle in a later host turn.
+        let r = if from_sync { r } else { self.coro_await(r)? };
         if !matches!(r, Value::Obj(_)) {
             return Err(self.throw("TypeError", "iterator result is not an object"));
         }
         if from_sync {
             let raw = self.get_member(&r, "value")?;
-            self.await_value(raw)?;
+            self.coro_await(raw)?;
         }
         Ok(())
     }
