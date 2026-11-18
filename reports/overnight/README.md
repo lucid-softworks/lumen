@@ -1,6 +1,6 @@
 # Lumen overnight performance investigation
 
-The glibc fix is open separately as [PR #53](https://github.com/lucid-softworks/lumen/pull/53). No performance PR has been opened: the final Vite builds are slower than Node and Bun, and the full V8 suite is still outside the requested 2× limit. The work is preserved on `perf/vite-runtime`.
+The glibc fix is open separately as [PR #53](https://github.com/lucid-softworks/lumen/pull/53). The performance changes are now being submitted for review at the user’s request despite the original speed gates remaining unmet: the final Vite builds are slower than Node and Bun, and the full V8 suite is still outside the requested 2× limit. The benchmark results and original gate outcomes below are unchanged.
 
 Open `lumen-performance.html` for the visual comparison. `summary.json` and the individual result files contain exact numbers, commands, versions, source/binary hashes and raw output.
 
