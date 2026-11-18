@@ -1832,6 +1832,30 @@ fn node_buffer() {
 }
 
 #[test]
+fn node_buffer_base64_matches_node() {
+    let (mut rt, out, _err) = test_runtime();
+    // Generated with Node 24.22.2: short tails, padding, junk, URL-safe alphabet,
+    // non-ASCII UTF-16 units and deterministic randomized malformed strings.
+    let source = format!(r#"
+        const cases = {};
+        for (const [input, expected] of cases) {{
+            for (const encoding of ['base64', 'base64url']) {{
+                const b = Buffer.from(input, encoding);
+                if (!Buffer.isBuffer(b) || b.toString('hex') !== expected)
+                    throw new Error(JSON.stringify([input, encoding, expected, b.toString('hex')]));
+            }}
+        }}
+        const source = Buffer.alloc(65539);
+        for (let i=0;i<source.length;i++) source[i]=(i*37)&255;
+        const copy=Buffer.from(source.toString('base64'), 'base64');
+        if (!copy.equals(source)) throw new Error('large base64 round trip');
+        console.log('passed');
+    "#, include_str!("fixtures/buffer-base64.json"));
+    eval_ok(&mut rt, &source);
+    assert_eq!(out.lines(), ["passed"]);
+}
+
+#[test]
 fn node_require_resolution() {
     use std::fs;
     let dir = TempDir::new("require");

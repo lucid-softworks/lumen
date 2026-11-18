@@ -30,20 +30,8 @@ function bytesFromString(str, enc) {
       return out;
     }
     case "base64":
-    case "base64url": {
-      let s = str.replace(/[-_]/g, (c) => (c === "-" ? "+" : "/")).replace(/[^A-Za-z0-9+/]/g, "");
-      const pad = s.length % 4;
-      const bytes = [];
-      for (let i = 0; i < s.length; i += 4) {
-        const q = [0, 1, 2, 3].map((j) => (i + j < s.length ? B64.indexOf(s[i + j]) : 0));
-        const n = (q[0] << 18) | (q[1] << 12) | (q[2] << 6) | q[3];
-        bytes.push((n >> 16) & 0xff);
-        if (i + 2 < s.length) bytes.push((n >> 8) & 0xff);
-        if (i + 3 < s.length) bytes.push(n & 0xff);
-      }
-      void pad;
-      return new Uint8Array(bytes);
-    }
+    case "base64url":
+      return __node.bufferDecodeBase64(str);
     case "utf16le": {
       const out = new Uint8Array(str.length * 2);
       for (let i = 0; i < str.length; i++) {

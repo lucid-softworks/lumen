@@ -25,6 +25,7 @@ use std::path::Path;
 use lumen_host::{ops, Ctx, Extension, SpawnHandle, Value};
 
 mod bunhash;
+mod buffer;
 mod child;
 mod crypto;
 mod dns;
@@ -69,6 +70,7 @@ pub fn extension() -> Extension {
                     "getCompileCacheDir" (0) => op_get_compile_cache_dir,
                     "pathNormalizePosix" (1) => path_posix::op_normalize,
                     "pathJoinPosix" (0) => path_posix::op_join,
+                    "bufferDecodeBase64" (1) => buffer::op_decode_base64,
                     "drainMicrotasks" (0) => op_drain_microtasks,
                     "transformJsx" (1) => op_transform_jsx,
                     "stat" (1) => op_stat,

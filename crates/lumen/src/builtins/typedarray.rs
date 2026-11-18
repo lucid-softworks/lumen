@@ -1460,6 +1460,31 @@ fn ta_construct(i: &mut Interp, args: &[Value], kind: TaKind) -> Result<Value, V
             let (bv, bp) = make_array_buffer(i, len * es);
             (bv, bp, 0, len, false)
         }
+        Some(Value::Obj(o)) if i.typed_arrays.contains_key(&(Rc::as_ptr(o) as usize)) => {
+            // TypedArray inputs bypass @@iterator and array-like properties. Same-kind
+            // copies preserve raw bits, including NaN payloads, in a fresh backing store.
+            let source = i.typed_arrays[&(Rc::as_ptr(o) as usize)];
+            let len = i.ta_len(&source).ok_or_else(|| {
+                i.make_error("TypeError", "TypedArray source is out of bounds")
+            })?;
+            if source.kind.is_bigint() != kind.is_bigint() {
+                return Err(i.make_error("TypeError", "TypedArray content types differ"));
+            }
+            let (bv, bp) = make_array_buffer(i, len * es);
+            let target = TaInfo { buffer: bp, offset: 0, len, kind, track: false };
+            if source.kind == kind {
+                let bytes = i.ta_read_bytes(&source, 0, len).ok_or_else(|| {
+                    i.make_error("TypeError", "TypedArray source is out of bounds")
+                })?;
+                i.ta_write_bytes(&target, 0, &bytes);
+            } else {
+                for index in 0..len {
+                    let value = i.ta_read(&source, index);
+                    ab(i.ta_store(&target, index, &value))?;
+                }
+            }
+            (bv, bp, 0, len, false)
+        }
         Some(other) => {
             // TypedArray / array-like / iterable object: copy element values into a fresh buffer.
             // GetMethod(@@iterator): a non-callable non-nullish value is a TypeError, and a
