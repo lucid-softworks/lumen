@@ -5,8 +5,9 @@
 //! can then be ported without duplicating runtime semantics or compromising deoptimization.
 
 use super::{
-    sys, JitCode, COND_PEEK_TRUTHY, COND_POP_TRUTHY, H_CALL, H_COND, H_EXEC, H_GET_PROP,
-    H_INLINE_CLOSURE, H_NEW, H_POP_HANDLER, H_PUSH_HANDLER, H_RETURN, H_SET_PROP, H_UNWIND,
+    sys, JitCode, COND_PEEK_TRUTHY, COND_POP_TRUTHY, H_ADD_STRINGS, H_CALL, H_COND, H_EXEC,
+    H_GET_PROP, H_INLINE_CLOSURE, H_NEW, H_POP_HANDLER, H_PUSH_HANDLER, H_RETURN, H_SET_PROP,
+    H_UNWIND,
 };
 use crate::bytecode::{Chunk, Op, UpdKind};
 
@@ -589,7 +590,15 @@ pub(super) fn compile(
                 a.add_sp(-16);
                 a.jmp(done);
                 a.bind(slow);
-                a.helper_spflag(H_EXEC, pc as u32, unwind);
+                a.helper_spflag(
+                    if matches!(op, Op::Add) {
+                        H_ADD_STRINGS
+                    } else {
+                        H_EXEC
+                    },
+                    pc as u32,
+                    unwind,
+                );
                 a.bind(done);
             }
             Op::Neg | Op::Plus => {

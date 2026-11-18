@@ -25,6 +25,8 @@ fn scalar_templates_match_interpreter_edges_and_fallbacks() {
             out.push(condition(a),logical(a).map(repr).join(','));
         }
         out.push(arithmetic('2',3).map(repr).join(','));
+        out.push(arithmetic('2','3').map(repr).join(','));
+        out.push(arithmetic('\ud83d','\ude00').map(repr).join(','));
         out.push(updates('2').map(repr).join(','));
         out.push(updates(2n).map(repr).join(','));
         let effects=[];
