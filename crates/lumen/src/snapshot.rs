@@ -506,8 +506,23 @@ fn dec_stmt(r: &mut Reader) -> R<Stmt> {
     r.nested(dec_stmt_inner)
 }
 
+// Separate tag groups keep unoptimized stack frames small enough for the
+// 128-level decoder limit on ordinary 2 MiB test/embedder threads.
 fn dec_stmt_inner(r: &mut Reader) -> R<Stmt> {
-    Ok(match r.u8()? {
+    let tag = r.u8()?;
+    match tag {
+        0..=5 => dec_stmt_group_0(r, tag),
+        6..=11 => dec_stmt_group_1(r, tag),
+        12..=17 => dec_stmt_group_2(r, tag),
+        18..=23 => dec_stmt_group_3(r, tag),
+        24 => dec_stmt_group_4(r, tag),
+        t => Err(format!("snapshot: bad Stmt tag {t}")),
+    }
+}
+
+#[inline(never)]
+fn dec_stmt_group_0(r: &mut Reader, tag: u8) -> R<Stmt> {
+    Ok(match tag {
         0 => Stmt::Expr(dec_expr(r)?),
         1 => {
             let kind = dec_declkind(r)?;
@@ -531,6 +546,13 @@ fn dec_stmt_inner(r: &mut Reader) -> R<Stmt> {
             Stmt::If { test, cons, alt }
         }
         5 => Stmt::Block(dec_stmts(r)?),
+        _ => unreachable!("validated Stmt tag group"),
+    })
+}
+
+#[inline(never)]
+fn dec_stmt_group_1(r: &mut Reader, tag: u8) -> R<Stmt> {
+    Ok(match tag {
         6 => Stmt::While {
             test: dec_expr(r)?,
             body: Box::new(dec_stmt(r)?),
@@ -569,6 +591,13 @@ fn dec_stmt_inner(r: &mut Reader) -> R<Stmt> {
         }
         10 => Stmt::Break(dec_opt_str(r)?),
         11 => Stmt::Continue(dec_opt_str(r)?),
+        _ => unreachable!("validated Stmt tag group"),
+    })
+}
+
+#[inline(never)]
+fn dec_stmt_group_2(r: &mut Reader, tag: u8) -> R<Stmt> {
+    Ok(match tag {
         12 => Stmt::Throw(dec_expr(r)?),
         13 => {
             let block = dec_stmts(r)?;
@@ -614,6 +643,13 @@ fn dec_stmt_inner(r: &mut Reader) -> R<Stmt> {
             body: Box::new(dec_stmt(r)?),
         },
         17 => Stmt::ClassDecl(Rc::new(dec_class(r)?)),
+        _ => unreachable!("validated Stmt tag group"),
+    })
+}
+
+#[inline(never)]
+fn dec_stmt_group_3(r: &mut Reader, tag: u8) -> R<Stmt> {
+    Ok(match tag {
         18 => Stmt::Empty,
         19 => Stmt::Debugger,
         20 => {
@@ -645,11 +681,18 @@ fn dec_stmt_inner(r: &mut Reader) -> R<Stmt> {
         }
         22 => Stmt::ExportDecl(Box::new(dec_stmt(r)?)),
         23 => Stmt::ExportDefault(Box::new(dec_stmt(r)?)),
+        _ => unreachable!("validated Stmt tag group"),
+    })
+}
+
+#[inline(never)]
+fn dec_stmt_group_4(r: &mut Reader, tag: u8) -> R<Stmt> {
+    Ok(match tag {
         24 => Stmt::ExportAll {
             source: r.rcstr()?,
             exported: dec_opt_str(r)?,
         },
-        t => return Err(format!("snapshot: bad Stmt tag {t}")),
+        _ => unreachable!("validated Stmt tag group"),
     })
 }
 
@@ -857,14 +900,37 @@ fn dec_expr(r: &mut Reader) -> R<Expr> {
     r.nested(dec_expr_inner)
 }
 
+// Separate tag groups keep unoptimized stack frames small enough for the
+// 128-level decoder limit on ordinary 2 MiB test/embedder threads.
 fn dec_expr_inner(r: &mut Reader) -> R<Expr> {
-    Ok(match r.u8()? {
+    let tag = r.u8()?;
+    match tag {
+        0..=5 => dec_expr_group_0(r, tag),
+        6..=11 => dec_expr_group_1(r, tag),
+        12..=17 => dec_expr_group_2(r, tag),
+        18..=23 => dec_expr_group_3(r, tag),
+        24..=29 => dec_expr_group_4(r, tag),
+        30..=34 => dec_expr_group_5(r, tag),
+        t => Err(format!("snapshot: bad Expr tag {t}")),
+    }
+}
+
+#[inline(never)]
+fn dec_expr_group_0(r: &mut Reader, tag: u8) -> R<Expr> {
+    Ok(match tag {
         0 => Expr::Paren(Box::new(dec_expr(r)?)),
         1 => Expr::Num(r.f64()?),
         2 => Expr::BigInt(JsBigInt::parse_radix(&r.str()?, 16).ok_or("snapshot: bad bigint")?),
         3 => Expr::Str(r.rcstr()?),
         4 => Expr::ToStr(Box::new(dec_expr(r)?)),
         5 => Expr::Bool(r.bool()?),
+        _ => unreachable!("validated Expr tag group"),
+    })
+}
+
+#[inline(never)]
+fn dec_expr_group_1(r: &mut Reader, tag: u8) -> R<Expr> {
+    Ok(match tag {
         6 => Expr::Null,
         7 => Expr::Undefined,
         8 => Expr::Ident(r.str()?),
@@ -874,6 +940,13 @@ fn dec_expr_inner(r: &mut Reader) -> R<Expr> {
             flags: r.rcstr()?,
         },
         11 => Expr::Array(dec_array_elems(r)?),
+        _ => unreachable!("validated Expr tag group"),
+    })
+}
+
+#[inline(never)]
+fn dec_expr_group_2(r: &mut Reader, tag: u8) -> R<Expr> {
+    Ok(match tag {
         12 => {
             let n = r.count()?;
             let mut props = Vec::with_capacity(n);
@@ -895,6 +968,13 @@ fn dec_expr_inner(r: &mut Reader) -> R<Expr> {
         }
         16 => Expr::Await(Box::new(dec_expr(r)?)),
         17 => Expr::Super,
+        _ => unreachable!("validated Expr tag group"),
+    })
+}
+
+#[inline(never)]
+fn dec_expr_group_3(r: &mut Reader, tag: u8) -> R<Expr> {
+    Ok(match tag {
         18 => Expr::Unary {
             op: intern_op(r.str_slice()?)?,
             arg: Box::new(dec_expr(r)?),
@@ -924,6 +1004,13 @@ fn dec_expr_inner(r: &mut Reader) -> R<Expr> {
             cons: Box::new(dec_expr(r)?),
             alt: Box::new(dec_expr(r)?),
         },
+        _ => unreachable!("validated Expr tag group"),
+    })
+}
+
+#[inline(never)]
+fn dec_expr_group_4(r: &mut Reader, tag: u8) -> R<Expr> {
+    Ok(match tag {
         24 => Expr::Call {
             callee: Box::new(dec_expr(r)?),
             args: dec_array_elems(r)?,
@@ -957,6 +1044,13 @@ fn dec_expr_inner(r: &mut Reader) -> R<Expr> {
                 subs: dec_exprs(r)?,
             }
         }
+        _ => unreachable!("validated Expr tag group"),
+    })
+}
+
+#[inline(never)]
+fn dec_expr_group_5(r: &mut Reader, tag: u8) -> R<Expr> {
+    Ok(match tag {
         30 => Expr::OptionalChain(Box::new(dec_expr(r)?)),
         31 => Expr::PrivateIn {
             name: r.str()?,
@@ -978,7 +1072,7 @@ fn dec_expr_inner(r: &mut Reader) -> R<Expr> {
         },
         33 => Expr::ImportMeta,
         34 => Expr::NewTarget,
-        t => return Err(format!("snapshot: bad Expr tag {t}")),
+        _ => unreachable!("validated Expr tag group"),
     })
 }
 
@@ -1520,5 +1614,32 @@ mod tests {
         assert!(decode(&encode(&nested)).is_err());
         assert!(super::encode_limited(&nested, 1024 * 1024).is_none());
         assert!(super::encode_limited(&body, 4).is_none());
+    }
+
+    #[test]
+    fn nesting_limit_is_safe_on_a_two_megabyte_stack() {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                for depth in [128, 129] {
+                    let mut statement = Stmt::Empty;
+                    for _ in 1..depth {
+                        statement = Stmt::Block(vec![statement]);
+                    }
+                    let bytes = encode(&[statement]);
+                    assert_eq!(decode(&bytes).is_ok(), depth == 128, "blocks: {depth}");
+
+                    // The enclosing expression statement also consumes one depth level.
+                    let mut expression = crate::ast::Expr::Num(1.0);
+                    for _ in 2..depth {
+                        expression = crate::ast::Expr::Paren(Box::new(expression));
+                    }
+                    let bytes = encode(&[Stmt::Expr(expression)]);
+                    assert_eq!(decode(&bytes).is_ok(), depth == 128, "expressions: {depth}");
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }
