@@ -11,6 +11,19 @@ impl Props {
     /// then on (an emptied-but-once-large map keeps using it).
     #[inline(always)]
     pub(super) fn find(&self, key: &str) -> Option<usize> {
+        // Canonical indices already have an entry-slot map. In particular, inserting every
+        // element through defineProperty must not scan the growing array to prove each new
+        // key absent. Sparse/map-only indices retain the generic lookup below.
+        if let Some(n) = canonical_index(key) {
+            if let Some(&slot) = self.elems.get(n as usize) {
+                if slot != NO_SLOT {
+                    return Some(slot as usize);
+                }
+            }
+            if !self.has_far.get() {
+                return None;
+            }
+        }
         // `length` and `prototype` are the hottest keys in array-heavy / allocation-heavy code
         // (every push/pop/length read; every `new`); their slots are memoized — answer without
         // hashing or scanning.
