@@ -765,6 +765,7 @@ __builtins.set("sys", __builtins.get("util"));
 
   // Diagnostic reports with live process/runtime data. Native stacks and libuv handles are not
   // available, but the report is useful and writable rather than an empty compatibility shell.
+  const glibcVersionRuntime = __node.glibcVersionRuntime();
   const report = {
     compact: false, directory: "", filename: "", signal: "SIGUSR2",
     reportOnFatalError: false, reportOnSignal: false, reportOnUncaughtException: false,
@@ -779,6 +780,7 @@ __builtins.set("sys", __builtins.get("util"));
           processId: proc.pid, cwd: proc.cwd(), commandLine: proc.argv.slice(),
           nodejsVersion: proc.version, wordSize: proc.arch.includes("64") || proc.arch === "arm64" ? 64 : 32,
           arch: proc.arch, platform: proc.platform, componentVersions: { ...proc.versions },
+          ...(glibcVersionRuntime === undefined ? {} : { glibcVersionRuntime }),
         },
         javascriptStack: { message: error ? String(error) : "No stack.", stack, errorProperties: {} },
         javascriptHeap: proc.memoryUsage(), resourceUsage: proc.resourceUsage(),

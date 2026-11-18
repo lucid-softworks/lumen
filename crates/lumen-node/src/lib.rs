@@ -63,6 +63,7 @@ pub fn extension() -> Extension {
                     "isProxy" (1) => op_is_proxy,
                     "collectGarbage" (0) => op_collect_garbage,
                     "heapObjectCount" (0) => op_heap_object_count,
+                    "glibcVersionRuntime" (0) => op_glibc_version_runtime,
                     "drainMicrotasks" (0) => op_drain_microtasks,
                     "transformJsx" (1) => op_transform_jsx,
                     "stat" (1) => op_stat,
@@ -800,6 +801,24 @@ fn op_statfs(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value
         );
         let _ = ctx.set_member(&err, "code", Value::str("ENOSYS"));
         Err(err)
+    }
+}
+
+/// Report the loaded GNU libc version, not a guessed build/host version. In particular, musl
+/// and non-Linux builds must leave the diagnostic header field absent for addon selection.
+fn op_glibc_version_runtime(_ctx: &mut Ctx, _this: Value, _args: &[Value]) -> Result<Value, Value> {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        extern "C" {
+            fn gnu_get_libc_version() -> *const std::ffi::c_char;
+        }
+        // SAFETY: glibc returns a non-null pointer to its static, NUL-terminated version string.
+        let version = unsafe { std::ffi::CStr::from_ptr(gnu_get_libc_version()) };
+        Ok(Value::str(version.to_string_lossy().as_ref()))
+    }
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    {
+        Ok(Value::Undefined)
     }
 }
 

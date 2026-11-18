@@ -272,6 +272,38 @@ fn process_diagnostic_reports_and_finalization_are_functional() {
 }
 
 #[test]
+fn process_report_identifies_glibc_for_native_addon_selection() {
+    let dir = TempDir::new("process-report-libc");
+    let report_path = dir.path("report.json");
+    let (mut rt, out, _err) = test_runtime();
+    eval_ok(
+        &mut rt,
+        &format!(
+            r#"
+            const report = require("node:process").report;
+            const header = report.getReport().header;
+            console.log(Object.hasOwn(header, "glibcVersionRuntime"));
+            console.log(/^\d+\.\d+$/.test(header.glibcVersionRuntime));
+            report.writeReport({report_path:?});
+            const saved = JSON.parse(require("node:fs").readFileSync({report_path:?}, "utf8"));
+            console.log(saved.header.glibcVersionRuntime === header.glibcVersionRuntime);
+            header.glibcVersionRuntime = "changed";
+            console.log(report.getReport().header.glibcVersionRuntime !== "changed");
+            "#,
+        ),
+    );
+    let is_glibc = cfg!(all(target_os = "linux", target_env = "gnu"));
+    assert_eq!(
+        out.lines(),
+        if is_glibc {
+            ["true", "true", "true", "true"]
+        } else {
+            ["false", "false", "true", "true"]
+        }
+    );
+}
+
+#[test]
 fn process_execve_validates_and_reports_os_errors() {
     let (mut rt, out, _err) = test_runtime();
     eval_ok(
