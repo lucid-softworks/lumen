@@ -127,7 +127,7 @@ impl Interp {
                     // ResolveBinding *before* GetV (observable through a `with` env's has trap).
                     let var_ref = if matches!(mode, BindMode::Var) {
                         if let Pattern::Ident(name) = &prop.value {
-                            let e = Expr::Ident(name.clone());
+                            let e = Expr::Ident(name.as_str().into());
                             Some(self.resolve_reference(&e, env)?)
                         } else {
                             None
@@ -531,8 +531,8 @@ impl Interp {
                                     if matches!(e, Expr::Class(c) if c.name.is_none()) {
                                         self.pending_fn_name = Some(n.clone());
                                     }
-                                    let mut lref =
-                                        self.resolve_reference(&Expr::Ident(n.clone()), env)?;
+                                    let mut lref = self
+                                        .resolve_reference(&Expr::Ident(n.as_str().into()), env)?;
                                     let value = self.eval(e, env)?;
                                     self.pending_fn_name = None;
                                     if is_anonymous_fn(e) {
@@ -843,9 +843,9 @@ impl Interp {
 
     fn exec_for(
         &mut self,
-        init: &Option<Box<ForInit>>,
-        test: &Option<Expr>,
-        update: &Option<Expr>,
+        init: &Option<P<ForInit>>,
+        test: &Option<P<Expr>>,
+        update: &Option<P<Expr>>,
         body: &Stmt,
         env: &Env,
         labels: &[&str],
@@ -878,9 +878,9 @@ impl Interp {
     #[allow(clippy::too_many_arguments)]
     fn exec_c_for_body(
         &mut self,
-        init: &Option<Box<ForInit>>,
-        test: &Option<Expr>,
-        update: &Option<Expr>,
+        init: &Option<P<ForInit>>,
+        test: &Option<P<Expr>>,
+        update: &Option<P<Expr>>,
         body: &Stmt,
         loop_env: &Env,
         labels: &[&str],
@@ -1436,6 +1436,11 @@ impl Interp {
             let arr = self.make_array(chars);
             return self.get_iterator(&arr);
         }
+        self.get_iterator_protocol(v)
+    }
+
+    /// GetIterator without shortcuts: primitive receivers also observe @@iterator overrides.
+    pub(crate) fn get_iterator_protocol(&mut self, v: &Value) -> Result<(Value, Value), Abrupt> {
         let key = match &self.iterator_sym {
             Some(s) => Interp::sym_key(s),
             None => return Err(self.throw("TypeError", "no iterator symbol")),
@@ -1556,7 +1561,7 @@ impl Interp {
     fn exec_try(
         &mut self,
         block: &[Stmt],
-        handler: &Option<(Option<Pattern>, Vec<Stmt>)>,
+        handler: &Option<P<(Option<Pattern>, Vec<Stmt>)>>,
         finalizer: &Option<Vec<Stmt>>,
         env: &Env,
     ) -> Completion {
@@ -1569,7 +1574,7 @@ impl Interp {
         self.tco_ok = saved_tco;
         let after_catch = match result {
             Err(Abrupt::Throw(ex)) => {
-                if let Some((param, body)) = handler {
+                if let Some((param, body)) = handler.as_deref() {
                     // The catch parameter lives in its own environment (flagged so a sloppy `eval`'s
                     // var-hoisting walk skips it); the body's lexicals + statements run in a child
                     // block environment.
@@ -2123,6 +2128,12 @@ impl Interp {
             let (with_obj, parent) = {
                 let mut b = s.borrow_mut();
                 if let Some(binding) = b.vars.get_mut(name) {
+                    if !binding.initialized {
+                        return Err(self.throw(
+                            "ReferenceError",
+                            format!("cannot access '{name}' before initialization"),
+                        ));
+                    }
                     if !binding.mutable && binding.initialized {
                         // A const always throws; a non-strict immutable binding (a named function
                         // expression's own name) is a silent no-op in sloppy code.
@@ -2258,7 +2269,7 @@ impl Interp {
         match expr {
             Expr::Num(n) => Ok(Value::Num(*n)),
             Expr::BigInt(n) => Ok(Value::BigInt(n.clone())),
-            Expr::Str(s) => Ok(Value::Str(s.clone().into())),
+            Expr::Str(s) => Ok(Value::Str(s.clone())),
             Expr::ToStr(inner) => {
                 let v = self.eval(inner, env)?;
                 Ok(Value::Str(self.to_string(&v)?))
@@ -2321,7 +2332,7 @@ impl Interp {
             }
             Expr::Logical { op, left, right } => {
                 let l = self.eval(left, env)?;
-                match *op {
+                match **op {
                     "&&" => {
                         if self.to_boolean(&l) {
                             self.eval(right, env)
@@ -2530,8 +2541,8 @@ impl Interp {
                 args,
                 optional,
             } => self.eval_call(callee, args, *optional, env),
-            Expr::TaggedTemplate { tag, quasis, subs } => {
-                self.eval_tagged_template(tag, quasis, subs, env)
+            Expr::TaggedTemplate { tag, parts } => {
+                self.eval_tagged_template(tag, &parts.quasis, &parts.subs, env)
             }
             Expr::New { callee, args } => {
                 let c = self.eval(callee, env)?;
@@ -2560,7 +2571,7 @@ impl Interp {
                 ArrayElem::Hole => idx += 1,
                 ArrayElem::Spread(e) => {
                     let v = self.eval(e, env)?;
-                    for item in self.iterate(&v)? {
+                    for item in crate::bytecode::array_literal::spread_values(self, &v)? {
                         ao.borrow_mut()
                             .props
                             .insert(idx.to_string(), crate::value::Property::plain(item));
@@ -2839,7 +2850,7 @@ impl Interp {
             }
             Expr::Logical { op, left, right } => {
                 let lv = self.eval(left, env)?;
-                let take_right = match *op {
+                let take_right = match **op {
                     "&&" => self.to_boolean(&lv),
                     "||" => !self.to_boolean(&lv),
                     "??" => matches!(lv, Value::Undefined | Value::Null),
@@ -2926,7 +2937,7 @@ impl Interp {
         e: &Expr,
         env: &Env,
     ) -> Result<Option<(Value, Value, Vec<Value>)>, Abrupt> {
-        let Expr::TaggedTemplate { tag, quasis, subs } = e else {
+        let Expr::TaggedTemplate { tag, parts } = e else {
             return Ok(None);
         };
         let (func, this) = match &**tag {
@@ -2938,9 +2949,9 @@ impl Interp {
             }
             _ => return Ok(None),
         };
-        let strings = self.template_object(quasis)?;
+        let strings = self.template_object(&parts.quasis)?;
         let mut argv = vec![strings];
-        for s in subs {
+        for s in parts.subs.iter() {
             argv.push(self.eval(s, env)?);
         }
         if !func.is_callable() {
@@ -5043,7 +5054,7 @@ impl Interp {
         v: Value,
         env: &Env,
     ) -> Result<(), Abrupt> {
-        let target = Expr::Ident(name.to_string());
+        let target = Expr::Ident(name.into());
         let mut r = self.resolve_reference(&target, env)?;
         self.put_reference(&mut r, v)
     }
@@ -5063,6 +5074,32 @@ impl Interp {
             }
         }
         Value::Obj(obj)
+    }
+
+    /// The VM's dynamic data-object path. The compiler supplies a fresh ordinary literal and
+    /// has already coerced observable keys before evaluating the value. Remaining Num/Str
+    /// normalization cannot invoke user code. Match eval_object's own-property/name semantics.
+    pub(crate) fn define_literal_data(
+        &mut self,
+        object: Value,
+        key: Value,
+        value: Value,
+        infer_name: bool,
+    ) -> Result<(), Abrupt> {
+        debug_assert!(matches!(key, Value::Num(_) | Value::Str(_)));
+        let key = self.to_property_key(&key)?;
+        if infer_name {
+            let name = self.fn_name_for_key(&key);
+            self.set_fn_name(&value, &name);
+        }
+        let Value::Obj(object) = object else {
+            unreachable!("fresh object literal")
+        };
+        object
+            .borrow_mut()
+            .props
+            .insert(key, Property::plain(value));
+        Ok(())
     }
 
     /// [`Interp::make_plain_object_templated`] reading the values straight off the JIT operand
@@ -5602,7 +5639,7 @@ impl Interp {
             let mut lref = self.resolve_reference(target, env)?;
             if let Expr::Ident(n) = target {
                 if matches!(value, Expr::Class(c) if c.name.is_none()) {
-                    self.pending_fn_name = Some(n.clone());
+                    self.pending_fn_name = Some(n.as_str().to_owned());
                 }
             }
             let v = self.eval(value, env)?;
@@ -5754,7 +5791,7 @@ impl Interp {
                                 // evaluated BEFORE the iterator step (AssignmentElement step 1).
                                 let (core, default) = match t {
                                     Expr::Assign {
-                                        op: "=",
+                                        op: &"=",
                                         target,
                                         value,
                                     } => (&**target, Some(&**value)),
@@ -5834,7 +5871,7 @@ impl Interp {
                             taken.push(k.clone());
                             let (core, default) = match t {
                                 Expr::Assign {
-                                    op: "=",
+                                    op: &"=",
                                     target,
                                     value,
                                 } => (&**target, Some(&**value)),
@@ -6794,8 +6831,8 @@ fn opt_obj(o: &Option<Gc>) -> Value {
 fn default_constructor(derived: bool) -> Function {
     let body = if derived {
         vec![Stmt::Expr(Expr::Call {
-            callee: Box::new(Expr::Super),
-            args: vec![ArrayElem::Spread(Expr::Ident("args".to_string()))],
+            callee: P::new(Expr::Super),
+            args: vec![ArrayElem::Spread(Expr::Ident("args".into()))].into_boxed_slice(),
             optional: false,
         })]
     } else {
@@ -6819,7 +6856,7 @@ fn default_constructor(derived: bool) -> Function {
         fn_maps: std::cell::OnceCell::new(),
         name: None,
         params,
-        body,
+        body: body.into(),
         is_arrow: false,
         is_strict: true,
         expr_body: false,
@@ -6878,8 +6915,8 @@ fn stmt_contains(s: &Stmt, pred: fn(&Expr) -> bool) -> bool {
                 ForInit::VarDecl { decls, .. } => {
                     decls.iter().any(|(_, x)| x.as_ref().is_some_and(&e))
                 }
-            }) || test.as_ref().is_some_and(&e)
-                || update.as_ref().is_some_and(&e)
+            }) || test.as_deref().is_some_and(&e)
+                || update.as_deref().is_some_and(&e)
                 || stmt_contains(body, pred)
         }
         Stmt::ForInOf { right, body, .. } => e(right) || stmt_contains(body, pred),
@@ -6890,7 +6927,7 @@ fn stmt_contains(s: &Stmt, pred: fn(&Expr) -> bool) -> bool {
         } => {
             stmts_contain(block, pred)
                 || handler
-                    .as_ref()
+                    .as_deref()
                     .is_some_and(|(_, b)| stmts_contain(b, pred))
                 || finalizer.as_ref().is_some_and(|b| stmts_contain(b, pred))
         }
@@ -6928,7 +6965,7 @@ pub(crate) fn expr_contains(x: &Expr, pred: fn(&Expr) -> bool) -> bool {
         Expr::Yield { arg, .. } => arg.as_deref().is_some_and(e),
         Expr::ImportCall { spec, .. } => e(spec),
         Expr::PrivateIn { obj, .. } => e(obj),
-        Expr::TaggedTemplate { tag, subs, .. } => e(tag) || subs.iter().any(e),
+        Expr::TaggedTemplate { tag, parts } => e(tag) || parts.subs.iter().any(e),
         Expr::Object(props) => props.iter().any(|p| match p {
             PropDef::KeyValue { value, .. } | PropDef::Cover { value, .. } => e(value),
             PropDef::Spread(x) => e(x),
@@ -7040,8 +7077,8 @@ fn fi_expr(e: &Expr, args: bool) -> Option<&'static str> {
         Expr::Yield { arg, .. } => arg.as_deref().and_then(|e| fi_expr(e, args)),
         Expr::ImportCall { spec, .. } => fi_expr(spec, args),
         Expr::PrivateIn { obj, .. } => fi_expr(obj, args),
-        Expr::TaggedTemplate { tag, subs, .. } => {
-            fi_expr(tag, args).or_else(|| subs.iter().find_map(|e| fi_expr(e, args)))
+        Expr::TaggedTemplate { tag, parts } => {
+            fi_expr(tag, args).or_else(|| parts.subs.iter().find_map(|e| fi_expr(e, args)))
         }
         Expr::Object(props) => props.iter().find_map(|p| match p {
             PropDef::KeyValue { key, value } | PropDef::Cover { key, value } => {
@@ -7122,7 +7159,7 @@ fn fi_stmt(s: &Stmt, args: bool) -> Option<&'static str> {
             handler,
             finalizer,
         } => fi_stmts(block, args)
-            .or_else(|| handler.as_ref().and_then(|(_, b)| fi_stmts(b, args)))
+            .or_else(|| handler.as_deref().and_then(|(_, b)| fi_stmts(b, args)))
             .or_else(|| finalizer.as_ref().and_then(|b| fi_stmts(b, args))),
         Stmt::Switch { disc, cases } => fi_expr(disc, args).or_else(|| {
             cases.iter().find_map(|c| {
@@ -7184,7 +7221,7 @@ fn arg_at(args: &[Value], k: usize) -> Value {
 
 fn describe_callee(callee: &Expr) -> String {
     match callee {
-        Expr::Ident(n) => n.clone(),
+        Expr::Ident(n) => n.as_str().to_owned(),
         Expr::Member { prop, .. } => format!("(intermediate value).{prop}"),
         _ => "expression".to_string(),
     }
@@ -7350,7 +7387,7 @@ enum RefKey {
 /// A resolved reference — computed once so a compound/logical assignment reuses the same base
 /// for both GetValue and PutValue (matching spec Reference semantics), rather than re-resolving.
 enum Reference {
-    Var(RefBase, String),
+    Var(RefBase, IdentName),
     /// `base.key` (Static) or `base[expr]` (Raw, coerced lazily).
     Prop(Value, RefKey),
     /// `super.key`: reads through `proto` with `receiver` as the this-value, writes to `receiver`.
@@ -7399,14 +7436,14 @@ impl Interp {
                     return Ok(Reference::Super {
                         proto,
                         receiver,
-                        key: RefKey::Static(prop.clone()),
+                        key: RefKey::Static(prop.to_string()),
                     });
                 }
                 let base = self.eval(obj, env)?;
                 let key = if prop.starts_with('#') {
                     self.resolve_private(prop, env)
                 } else {
-                    prop.clone()
+                    prop.to_string()
                 };
                 Ok(Reference::Prop(base, RefKey::Static(key)))
             }

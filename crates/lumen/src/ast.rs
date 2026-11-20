@@ -3,6 +3,27 @@
 
 use std::rc::Rc;
 
+mod function_body;
+pub use function_body::FunctionBody;
+mod function_source;
+pub use function_source::FunctionSource;
+pub(crate) use function_source::SharedSource;
+
+mod identifier;
+pub use identifier::IdentName;
+
+#[cfg(target_pointer_width = "64")]
+mod pointer;
+#[cfg(target_pointer_width = "64")]
+pub(crate) use pointer::AllocationScope;
+#[cfg(target_pointer_width = "64")]
+pub use pointer::AstBox;
+
+#[cfg(target_pointer_width = "64")]
+pub type P<T> = AstBox<T>;
+// Keep the existing layout/allocation behavior on narrower targets. Their AST alignment can
+// exceed pointer alignment, and the pool has only been measured on native 64-bit targets.
+#[cfg(not(target_pointer_width = "64"))]
 pub type P<T> = Box<T>;
 
 #[derive(Debug, Clone)]
@@ -32,14 +53,14 @@ pub enum Stmt {
     /// C-style `for (init; test; update) body`.
     For {
         init: Option<P<ForInit>>,
-        test: Option<Expr>,
-        update: Option<Expr>,
+        test: Option<P<Expr>>,
+        update: Option<P<Expr>>,
         body: P<Stmt>,
     },
     /// `for (left in right) body` / `for (left of right) body` (`is_await` for `for await … of`).
     ForInOf {
         decl: Option<DeclKind>,
-        left: Pattern,
+        left: P<Pattern>,
         right: Expr,
         of: bool,
         is_await: bool,
@@ -50,7 +71,7 @@ pub enum Stmt {
     Throw(Expr),
     Try {
         block: Vec<Stmt>,
-        handler: Option<(Option<Pattern>, Vec<Stmt>)>,
+        handler: Option<P<(Option<Pattern>, Vec<Stmt>)>>,
         finalizer: Option<Vec<Stmt>>,
     },
     Switch {
@@ -121,7 +142,7 @@ pub struct Class {
     /// `@dec` decorators applied to the whole class (outermost last).
     pub decorators: Vec<Expr>,
     /// The class's source text (what the constructor's `toString` returns).
-    pub source: Option<Rc<str>>,
+    pub source: Option<FunctionSource>,
 }
 
 #[derive(Debug, Clone)]
@@ -186,7 +207,7 @@ pub enum Pattern {
     Object(ObjectPat),
     /// A member-expression assignment target (`o.p`, `o[k]`) — only valid in assignment-style
     /// destructuring / `for (o.p of …)`, never in a declaration.
-    Member(Box<Expr>),
+    Member(P<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +234,17 @@ pub struct ObjPatProp {
     pub default: Option<Expr>,
 }
 
+/// A thin pointer to an immutable operator spelling. The outer reference avoids
+/// storing a string length in every expression; execution and snapshots still use text.
+pub type Operator = &'static &'static str;
+
+/// Variable-length parts of a tagged template share one out-of-line header.
+#[derive(Debug, Clone)]
+pub struct TemplateParts {
+    pub quasis: Vec<(Option<String>, String)>,
+    pub subs: Box<[Expr]>,
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // some node fields (regex body/flags) are parsed before they are interpreted
 pub enum Expr {
@@ -222,18 +254,19 @@ pub enum Expr {
     Paren(P<Expr>),
     Num(f64),
     BigInt(crate::bigint::JsBigInt),
-    Str(Rc<str>),
+    // Share literal storage with runtime values; string appends use LStr's copy-on-write path.
+    Str(crate::lstr::LStr),
     /// A template-literal substitution: evaluate the inner expression and apply ToString (which uses
     /// the `string` hint — toString before valueOf — unlike `+` which uses the `default` hint).
-    ToStr(Box<Expr>),
+    ToStr(P<Expr>),
     Bool(bool),
     Null,
     Undefined,
-    Ident(String),
+    Ident(IdentName),
     This,
     Regex {
-        body: Rc<str>,
-        flags: Rc<str>,
+        body: crate::lstr::LStr,
+        flags: crate::lstr::LStr,
     },
     Array(Vec<ArrayElem>),
     Object(Vec<PropDef>),
@@ -249,26 +282,26 @@ pub enum Expr {
     /// The bare `super` keyword (only valid as `super(...)` or `super.x` / `super[x]`).
     Super,
     Unary {
-        op: &'static str,
+        op: Operator,
         arg: P<Expr>,
     },
     Update {
-        op: &'static str,
+        op: Operator,
         prefix: bool,
         arg: P<Expr>,
     },
     Binary {
-        op: &'static str,
+        op: Operator,
         left: P<Expr>,
         right: P<Expr>,
     },
     Logical {
-        op: &'static str,
+        op: Operator,
         left: P<Expr>,
         right: P<Expr>,
     },
     Assign {
-        op: &'static str,
+        op: Operator,
         target: P<Expr>,
         value: P<Expr>,
     },
@@ -279,16 +312,16 @@ pub enum Expr {
     },
     Call {
         callee: P<Expr>,
-        args: Vec<ArrayElem>,
+        args: Box<[ArrayElem]>,
         optional: bool,
     },
     New {
         callee: P<Expr>,
-        args: Vec<ArrayElem>,
+        args: Box<[ArrayElem]>,
     },
     Member {
         obj: P<Expr>,
-        prop: String,
+        prop: Box<str>,
         optional: bool,
     },
     Index {
@@ -300,15 +333,16 @@ pub enum Expr {
     /// `tag\`a${x}b\`` — `quasis` are (cooked, raw) chunks (one more than `subs`).
     TaggedTemplate {
         tag: P<Expr>,
-        quasis: Vec<(Option<String>, String)>,
-        subs: Vec<Expr>,
+        // Share one header allocation so this rare variant stays small without
+        // separately boxing both collections.
+        parts: Box<TemplateParts>,
     },
     /// An optional chain (`a?.b.c`): evaluates the inner LHS, short-circuiting to `undefined` if any
     /// `?.` link sees a nullish base.
     OptionalChain(P<Expr>),
     /// Ergonomic brand check `#field in obj`: whether `obj` carries the private field.
     PrivateIn {
-        name: String,
+        name: Box<str>,
         obj: P<Expr>,
     },
     /// Dynamic `import(specifier)` / `import.source(...)` / `import.defer(...)` — returns a
@@ -392,7 +426,7 @@ pub enum PropKey {
 pub struct Function {
     pub name: Option<String>,
     pub params: Vec<Param>,
-    pub body: Vec<Stmt>,
+    pub body: FunctionBody,
     pub is_arrow: bool,
     pub is_strict: bool,
     /// Arrow with an expression body (`x => x+1`): the single statement is a synthetic `return`.
@@ -406,7 +440,7 @@ pub struct Function {
     /// function. A declaration's name binds (mutably) in the enclosing scope instead.
     pub is_fn_expr: bool,
     /// The source text this function was parsed from, for `Function.prototype.toString`.
-    pub source: Option<Rc<str>>,
+    pub source: Option<FunctionSource>,
     /// Lazily-computed body facts (see [`Function::scan_flags`]): bit 0 = scanned, bit 1 =
     /// references `arguments`, bit 2 = references `new.target`, bit 3 = references `this`.
     /// A direct `eval` sets all three (it can reach any of them dynamically).
@@ -569,7 +603,7 @@ fn scan_stmt(s: &Stmt, flags: &mut u8) {
             finalizer,
         } => {
             scan_stmts(block, flags);
-            if let Some((param, hbody)) = handler {
+            if let Some((param, hbody)) = handler.as_deref() {
                 if let Some(p) = param {
                     scan_pattern(p, flags);
                 }
@@ -693,7 +727,7 @@ fn scan_expr(e: &Expr, flags: &mut u8) {
                 *flags |= SCAN_ARGUMENTS | SCAN_NEW_TARGET | SCAN_THIS;
             }
             scan_expr(callee, flags);
-            for a in args {
+            for a in args.iter() {
                 match a {
                     ArrayElem::Item(e) | ArrayElem::Spread(e) => scan_expr(e, flags),
                     ArrayElem::Hole => {}
@@ -702,7 +736,7 @@ fn scan_expr(e: &Expr, flags: &mut u8) {
         }
         Expr::New { callee, args } => {
             scan_expr(callee, flags);
-            for a in args {
+            for a in args.iter() {
                 match a {
                     ArrayElem::Item(e) | ArrayElem::Spread(e) => scan_expr(e, flags),
                     ArrayElem::Hole => {}
@@ -727,13 +761,9 @@ fn scan_expr(e: &Expr, flags: &mut u8) {
                 scan_expr(e, flags);
             }
         }
-        Expr::TaggedTemplate {
-            tag,
-            quasis: _,
-            subs,
-        } => {
+        Expr::TaggedTemplate { tag, parts } => {
             scan_expr(tag, flags);
-            for e in subs {
+            for e in parts.subs.iter() {
                 scan_expr(e, flags);
             }
         }

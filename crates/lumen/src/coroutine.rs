@@ -131,6 +131,9 @@ impl Coroutine {
 
 /// An OS-thread-backed coroutine (a pooled worker runs the body; see [`spawn_coroutine`]).
 pub struct ThreadCoro {
+    // Until first drive, captures stay on the driver. Dropping an unstarted coroutine must
+    // not release its Rc values concurrently with Engine teardown on another thread.
+    pending: Option<(Sender<Job>, Job)>,
     resume_tx: Sender<Resume>,
     suspend_rx: Receiver<Suspend>,
     /// Set once the body has finished (Done/Throw); further resumes are no-ops.
@@ -157,6 +160,12 @@ impl ThreadCoro {
     pub(crate) fn resume(&mut self, i: &mut Interp, signal: Resume) -> Suspend {
         if self.done {
             return Suspend::Done(Value::Undefined);
+        }
+        if let Some((worker, job)) = self.pending.take() {
+            if worker.send(job).is_err() {
+                self.done = true;
+                return Suspend::Throw(i.make_error("TypeError", "coroutine worker unavailable"));
+            }
         }
         self.started = true;
         let (saved_strict, saved_depth, saved_tco) = (i.strict, i.depth, i.tco_ok);
@@ -186,6 +195,15 @@ impl ThreadCoro {
                 self.done = true;
                 Suspend::Done(Value::Undefined)
             }
+        }
+    }
+}
+
+impl Drop for ThreadCoro {
+    fn drop(&mut self) {
+        if let Some((worker, job)) = self.pending.take() {
+            drop(job);
+            IDLE.lock().unwrap().push(worker);
         }
     }
 }
@@ -306,8 +324,14 @@ fn run_job(job: Job) {
             let interp = unsafe { &mut *ptr.0 };
             body(interp)
         }
-        Ok(Resume::Return(v)) => Suspend::Done(v),
-        Ok(Resume::Throw(e)) => Suspend::Throw(e),
+        Ok(Resume::Return(v)) => {
+            drop(body);
+            Suspend::Done(v)
+        }
+        Ok(Resume::Throw(e)) => {
+            drop(body);
+            Suspend::Throw(e)
+        }
     };
     let _ = suspend_tx.send(outcome);
     // Clear the TLS so the next job starts clean and `in_coroutine()` reads false between jobs.
@@ -320,22 +344,158 @@ pub fn spawn_coroutine(interp: *mut Interp, body: SendBody) -> std::io::Result<C
     let (resume_tx, resume_rx) = channel::<Resume>();
     let (suspend_tx, suspend_rx) = channel::<Suspend>();
     let worker = get_worker()?;
+    let context = crate::value::gc_context();
+    let body = SendBody(Box::new(move |interp| {
+        let _context = context.enter();
+        (body.0)(interp)
+    }));
     let job = Job {
         ptr: InterpPtr(interp),
         body,
         resume_rx,
         suspend_tx,
     };
-    // The worker is idle in `job_rx.recv()`; hand it this coroutine. A send failure means the worker
-    // vanished — surface it like a failed spawn rather than wedging.
-    worker
-        .send(job)
-        .map_err(|_| std::io::Error::other("coroutine worker unavailable"))?;
     Ok(Coroutine::Thread(ThreadCoro {
+        pending: Some((worker, job)),
         id: CORO_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         resume_tx,
         suspend_rx,
         done: false,
         started: false,
     }))
+}
+
+#[cfg(test)]
+mod gc_tests {
+    use super::*;
+    use crate::value::{gc_snapshot, live_objects, Object};
+    use std::rc::Rc;
+
+    fn round_trips() {
+        let mut interp = Interp::new();
+        let baseline = live_objects();
+        for _ in 0..32 {
+            let parent = Object::new(None);
+            let parent_weak = Rc::downgrade(&parent);
+            let mut coroutine = spawn_coroutine(
+                &mut interp,
+                SendBody(Box::new(move |interp| {
+                    drop(parent);
+                    assert_eq!(live_objects(), baseline);
+                    let child = Object::new(None);
+                    assert!(gc_snapshot().iter().any(|o| Rc::ptr_eq(o, &child)));
+                    interp.collect_garbage_for_host();
+                    Suspend::Done(Value::Obj(child))
+                })),
+            )
+            .unwrap();
+            let Suspend::Done(Value::Obj(child)) =
+                coroutine.resume(&mut interp, Resume::Next(Value::Undefined))
+            else {
+                panic!("coroutine did not return its object");
+            };
+            assert!(parent_weak.upgrade().is_none());
+            assert!(gc_snapshot().iter().any(|o| Rc::ptr_eq(o, &child)));
+            assert_eq!(live_objects(), baseline + 1);
+            drop(child);
+            assert_eq!(live_objects(), baseline);
+        }
+    }
+
+    #[test]
+    fn gc_tracks_objects_across_coroutine_handoffs_and_worker_reuse() {
+        round_trips();
+    }
+
+    #[test]
+    fn gc_contexts_remain_independent_on_concurrent_drivers() {
+        let first = std::thread::spawn(round_trips);
+        let second = std::thread::spawn(round_trips);
+        first.join().unwrap();
+        second.join().unwrap();
+    }
+
+    #[test]
+    fn gc_collects_scopes_created_by_nested_coroutines() {
+        let mut interp = Interp::new();
+        let observed = Rc::new(RefCell::new(None));
+        let capture = observed.clone();
+        let mut outer = spawn_coroutine(
+            &mut interp,
+            SendBody(Box::new(move |interp| {
+                let mut inner = spawn_coroutine(
+                    interp,
+                    SendBody(Box::new(move |_| {
+                        let scope = crate::interpreter::new_scope(None);
+                        scope.borrow_mut().parent = Some(scope.clone());
+                        *capture.borrow_mut() = Some(Rc::downgrade(&scope));
+                        Suspend::Done(Value::Undefined)
+                    })),
+                )
+                .unwrap();
+                inner.resume(interp, Resume::Next(Value::Undefined))
+            })),
+        )
+        .unwrap();
+        assert!(matches!(
+            outer.resume(&mut interp, Resume::Next(Value::Undefined)),
+            Suspend::Done(Value::Undefined)
+        ));
+        let weak = observed.borrow_mut().take().unwrap();
+        assert!(weak.upgrade().is_some());
+        interp.collect_garbage_for_host();
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn dropping_unstarted_coroutines_releases_captures_on_driver() {
+        let mut interp = Interp::new();
+        let baseline = live_objects();
+        for _ in 0..32 {
+            let object = Object::new(None);
+            let weak = Rc::downgrade(&object);
+            let coroutine = spawn_coroutine(
+                &mut interp,
+                SendBody(Box::new(move |_| {
+                    drop(object);
+                    panic!("unstarted coroutine ran")
+                })),
+            )
+            .unwrap();
+            drop(coroutine);
+            assert!(weak.upgrade().is_none());
+            assert_eq!(live_objects(), baseline);
+        }
+    }
+
+    #[test]
+    fn initial_return_and_throw_release_captures_before_handoff() {
+        let mut interp = Interp::new();
+        let baseline = live_objects();
+        for throwing in [false, true] {
+            let object = Object::new(None);
+            let weak = Rc::downgrade(&object);
+            let mut coroutine = spawn_coroutine(
+                &mut interp,
+                SendBody(Box::new(move |_| {
+                    drop(object);
+                    panic!("body ran on initial return/throw")
+                })),
+            )
+            .unwrap();
+            let signal = if throwing {
+                Resume::Throw(Value::Num(7.0))
+            } else {
+                Resume::Return(Value::Num(7.0))
+            };
+            let result = coroutine.resume(&mut interp, signal);
+            assert!(match result {
+                Suspend::Throw(Value::Num(7.0)) => throwing,
+                Suspend::Done(Value::Num(7.0)) => !throwing,
+                _ => false,
+            });
+            assert!(weak.upgrade().is_none());
+            assert_eq!(live_objects(), baseline);
+        }
+    }
 }

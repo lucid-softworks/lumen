@@ -8,22 +8,59 @@
 //! - **Only parser output is encoded.** `Function`'s `scan`/`hoist`/`calls`/`code` are lazy
 //!   runtime caches (`Cell`/`OnceCell`); decode initializes them empty, exactly as the parser
 //!   leaves them, so a decoded tree is indistinguishable from a freshly parsed one.
-//! - Interned `&'static str` operators are re-interned from [`KEYWORDS`]/[`PUNCTUATORS`] on
+//! - Function bodies are validated on load but materialized only when execution or analysis
+//!   needs them. Nested body boundaries share an immutable byte buffer, avoiding repeated scans.
+//!   Immediately called function expressions decode eagerly to avoid an extra validation pass.
+//! - Interned `&'static str` operators are re-interned from the lexer's keyword/punctuation tables on
 //!   decode (every op the parser emits comes from those tables).
 //!
-//! The format is deliberately dumb — a preorder walk with a `u8` tag per enum, LEB128 lengths,
-//! little-endian `f64`. It is an internal build/runtime contract, never persisted across builds.
+//! The format is a preorder walk with a `u8` tag per enum, LEB128 lengths, little-endian `f64`,
+//! and a trailing table of shared source texts. Function/class source records reference UTF-8
+//! ranges in that table. It is an internal build/runtime contract, never persisted across builds.
 
-use std::cell::{Cell, OnceCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
 
 use crate::ast::*;
 use crate::bigint::JsBigInt;
-use crate::token::{KEYWORDS, PUNCTUATORS};
+use crate::token::{keyword_ref, punctuation_ref};
+
+mod validate;
+
+struct DecodedSource {
+    bytes: Rc<[u8]>,
+    body_end: usize,
+    roots: Vec<SharedSource>,
+    body_ends: RefCell<crate::fasthash::FastMap<usize, usize>>,
+}
+
+/// A body range is exposed only after every tag, field and nested body has been validated.
+#[derive(Clone)]
+pub(crate) struct DeferredBody {
+    source: Rc<DecodedSource>,
+    start: usize,
+    end: usize,
+    depth: usize,
+}
+
+impl DeferredBody {
+    pub(crate) fn decode(&self) -> Vec<Stmt> {
+        let mut reader = Reader {
+            buf: &self.source.bytes[..self.source.body_end],
+            pos: self.start,
+            depth: self.depth,
+            source: Some(&self.source),
+            roots: &self.source.roots,
+        };
+        let body = dec_stmts(&mut reader).expect("validated snapshot body must decode");
+        assert_eq!(reader.pos, self.end, "validated snapshot body boundary");
+        body
+    }
+}
 
 const MAGIC: u32 = 0x4c_53_4e_31; // "LSN1"
 /// Bump on any AST or format change. A mismatch makes `decode` fail → caller re-parses.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 // ---- writer / reader --------------------------------------------------------------------------
 
@@ -32,6 +69,8 @@ struct Writer {
     limit: Option<usize>,
     depth: usize,
     failed: bool,
+    source_ids: crate::fasthash::FastMap<(u8, usize), usize>,
+    source_roots: Vec<FunctionSource>,
 }
 
 impl Writer {
@@ -41,6 +80,8 @@ impl Writer {
             limit,
             depth: 0,
             failed: false,
+            source_ids: Default::default(),
+            source_roots: Vec::new(),
         }
     }
     fn bytes(&mut self, bytes: &[u8]) {
@@ -95,11 +136,18 @@ struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
     depth: usize,
+    source: Option<&'a Rc<DecodedSource>>,
+    roots: &'a [SharedSource],
 }
 
 type R<T> = Result<T, String>;
 
 impl<'a> Reader<'a> {
+    fn record_body(&self, start: usize) {
+        if let Some(source) = self.source {
+            source.body_ends.borrow_mut().insert(start, self.pos);
+        }
+    }
     fn count(&mut self) -> R<usize> {
         let n = usize::try_from(self.uv()?).map_err(|_| "snapshot: length overflow")?;
         if n > self.buf.len() - self.pos {
@@ -177,13 +225,13 @@ impl<'a> Reader<'a> {
 }
 
 /// Re-intern an operator string to the `&'static str` the parser would have used.
-fn intern_op(s: &str) -> R<&'static str> {
+fn intern_op(s: &str) -> R<Operator> {
     let found = if s.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) {
-        KEYWORDS.binary_search(&s).ok().map(|index| KEYWORDS[index])
+        keyword_ref(s)
     } else {
-        // Almost every decoded operator is punctuation. Avoid scanning all keywords
-        // before looking at the short punctuation table on every AST expression.
-        PUNCTUATORS.iter().find(|&&op| op == s).copied()
+        // Require a complete canonical spelling; a valid prefix followed by garbage
+        // must still invalidate the snapshot.
+        punctuation_ref(s)
     };
     found.ok_or_else(|| format!("snapshot: unknown operator {s:?}"))
 }
@@ -192,29 +240,46 @@ fn intern_op(s: &str) -> R<&'static str> {
 
 /// Encode a parsed script body to a snapshot blob.
 pub fn encode(body: &[Stmt]) -> Vec<u8> {
-    let mut w = Writer::new(None);
-    w.uv(MAGIC as u64);
-    w.uv(VERSION as u64);
-    enc_stmts(&mut w, body);
-    w.buf
+    encode_with_limit(body, None).expect("unbounded snapshot writer")
 }
 
 /// Encode a disk-cache entry with bounded size and nesting; unsupported entries are skipped.
 pub(crate) fn encode_limited(body: &[Stmt], limit: usize) -> Option<Vec<u8>> {
-    let mut w = Writer::new(Some(limit));
+    encode_with_limit(body, Some(limit))
+}
+
+fn encode_with_limit(body: &[Stmt], limit: Option<usize>) -> Option<Vec<u8>> {
+    let mut w = Writer::new(limit);
     w.uv(MAGIC as u64);
     w.uv(VERSION as u64);
+    let offset_position = w.buf.len();
+    w.bytes(&0u64.to_le_bytes());
     enc_stmts(&mut w, body);
+    if w.failed {
+        return None;
+    }
+    // Roots were discovered while encoding the AST, so no extra AST traversal is needed.
+    let table_start = w.buf.len();
+    w.uv(w.source_roots.len() as u64);
+    for root in std::mem::take(&mut w.source_roots) {
+        w.str(&root);
+    }
+    if !w.failed {
+        w.buf[offset_position..offset_position + 8]
+            .copy_from_slice(&(table_start as u64).to_le_bytes());
+    }
     (!w.failed).then_some(w.buf)
 }
 
-/// Decode a snapshot blob back into a script body. `Err` (skew/truncation/corruption) tells the
-/// caller to fall back to parsing the original source.
-pub fn decode(bytes: &[u8]) -> R<Vec<Stmt>> {
+/// Load every root before decoding any AST node. Deferred bodies then see an immutable table
+/// regardless of when they are materialized; the AST reader cannot run into the table bytes.
+fn decode_header(bytes: &[u8], backing: Option<&Rc<[u8]>>) -> R<(usize, usize, Vec<SharedSource>)> {
     let mut r = Reader {
         buf: bytes,
         pos: 0,
         depth: 0,
+        source: None,
+        roots: &[],
     };
     if r.uv()? != MAGIC as u64 {
         return Err("snapshot: bad magic".into());
@@ -222,8 +287,73 @@ pub fn decode(bytes: &[u8]) -> R<Vec<Stmt>> {
     if r.uv()? != VERSION as u64 {
         return Err("snapshot: version mismatch".into());
     }
-    let body = dec_stmts(&mut r)?;
+    let offset_end = r.pos.checked_add(8).ok_or("snapshot: offset overflow")?;
+    let offset = bytes
+        .get(r.pos..offset_end)
+        .ok_or("snapshot: missing source table offset")?;
+    let body_end = usize::try_from(u64::from_le_bytes(offset.try_into().unwrap()))
+        .map_err(|_| "snapshot: source table offset overflow")?;
+    let body_start = offset_end;
+    if body_end < body_start || body_end >= bytes.len() {
+        return Err("snapshot: invalid source table offset".into());
+    }
+    r.pos = body_end;
+    let count = r.count()?;
+    // Every emitted root has a reference with at least four bytes in the AST. Also avoid
+    // preallocating from an untrusted count before validating the corresponding strings.
+    if count > (body_end - body_start) / 4 {
+        return Err("snapshot: excessive source roots".into());
+    }
+    let mut roots = Vec::new();
+    for _ in 0..count {
+        let text = r.str_slice()?;
+        roots.push(match backing {
+            Some(bytes) => SharedSource::snapshot(bytes.clone(), r.pos - text.len(), text),
+            None => SharedSource::text(text.to_owned()),
+        });
+    }
     if r.pos != bytes.len() {
+        return Err("snapshot: trailing data".into());
+    }
+    Ok((body_start, body_end, roots))
+}
+
+/// Decode a snapshot blob back into a script body. `Err` (skew/truncation/corruption) tells the
+/// caller to fall back to parsing the original source.
+pub fn decode(bytes: &[u8]) -> R<Vec<Stmt>> {
+    let bytes: Rc<[u8]> = Rc::from(bytes);
+    let (body_start, body_end, roots) = decode_header(&bytes, Some(&bytes))?;
+    let source = Rc::new(DecodedSource {
+        bytes,
+        body_end,
+        roots,
+        body_ends: RefCell::new(Default::default()),
+    });
+    decode_reader(Reader {
+        buf: &source.bytes[..body_end],
+        pos: body_start,
+        depth: 0,
+        source: Some(&source),
+        roots: &source.roots,
+    })
+}
+
+/// Boot snapshots execute immediately; decode directly without an encoded backing copy or
+/// a separate validation pass. Disk-cache loads use `decode` to defer unused dependency bodies.
+pub(crate) fn decode_eager(bytes: &[u8]) -> R<Vec<Stmt>> {
+    let (body_start, body_end, roots) = decode_header(bytes, None)?;
+    decode_reader(Reader {
+        buf: &bytes[..body_end],
+        pos: body_start,
+        depth: 0,
+        source: None,
+        roots: &roots,
+    })
+}
+
+fn decode_reader(mut r: Reader) -> R<Vec<Stmt>> {
+    let body = dec_stmts(&mut r)?;
+    if r.pos != r.buf.len() {
         return Err("snapshot: trailing data".into());
     }
     Ok(body)
@@ -262,6 +392,10 @@ fn dec_exprs(r: &mut Reader) -> R<Vec<Expr>> {
 }
 
 fn enc_opt_expr(w: &mut Writer, o: &Option<Expr>) {
+    enc_opt_expr_ref(w, o.as_ref());
+}
+
+fn enc_opt_expr_ref(w: &mut Writer, o: Option<&Expr>) {
     match o {
         Some(e) => {
             w.u8(1);
@@ -302,6 +436,44 @@ fn enc_opt_rcstr(w: &mut Writer, o: &Option<Rc<str>>) {
 }
 fn dec_opt_rcstr(r: &mut Reader) -> R<Option<Rc<str>>> {
     Ok(if r.u8()? == 1 { Some(r.rcstr()?) } else { None })
+}
+
+fn enc_opt_source(w: &mut Writer, source: &Option<FunctionSource>) {
+    if w.failed {
+        return;
+    }
+    if let Some(source) = source {
+        w.u8(1);
+        let key = source.root_key();
+        let id = match w.source_ids.get(&key) {
+            Some(id) => *id,
+            None => {
+                let id = w.source_roots.len();
+                w.source_ids.insert(key, id);
+                w.source_roots.push(source.root());
+                id
+            }
+        };
+        let (start, end) = source.offsets();
+        w.uv(id as u64);
+        w.uv(start as u64);
+        w.uv(end as u64);
+    } else {
+        w.u8(0);
+    }
+}
+
+fn dec_opt_source(r: &mut Reader) -> R<Option<FunctionSource>> {
+    if r.u8()? != 1 {
+        return Ok(None);
+    }
+    let id = usize::try_from(r.uv()?).map_err(|_| "snapshot: source id overflow")?;
+    let start = usize::try_from(r.uv()?).map_err(|_| "snapshot: source start overflow")?;
+    let end = usize::try_from(r.uv()?).map_err(|_| "snapshot: source end overflow")?;
+    let root = r.roots.get(id).ok_or("snapshot: missing source root")?;
+    root.checked_range(start, end)
+        .map(Some)
+        .ok_or_else(|| "snapshot: invalid source range".into())
 }
 
 // ---- Stmt -------------------------------------------------------------------------------------
@@ -376,8 +548,8 @@ fn enc_stmt_inner(w: &mut Writer, s: &Stmt) {
                 }
                 None => w.u8(0),
             }
-            enc_opt_expr(w, test);
-            enc_opt_expr(w, update);
+            enc_opt_expr_ref(w, test.as_deref());
+            enc_opt_expr_ref(w, update.as_deref());
             enc_stmt(w, body);
         }
         Stmt::ForInOf {
@@ -421,7 +593,7 @@ fn enc_stmt_inner(w: &mut Writer, s: &Stmt) {
         } => {
             w.u8(13);
             enc_stmts(w, block);
-            match handler {
+            match handler.as_deref() {
                 Some((param, hbody)) => {
                     w.u8(1);
                     match param {
@@ -537,9 +709,9 @@ fn dec_stmt_group_0(r: &mut Reader, tag: u8) -> R<Stmt> {
         3 => Stmt::Return(dec_opt_expr(r)?),
         4 => {
             let test = dec_expr(r)?;
-            let cons = Box::new(dec_stmt(r)?);
+            let cons = P::new(dec_stmt(r)?);
             let alt = if r.u8()? == 1 {
-                Some(Box::new(dec_stmt(r)?))
+                Some(P::new(dec_stmt(r)?))
             } else {
                 None
             };
@@ -555,23 +727,23 @@ fn dec_stmt_group_1(r: &mut Reader, tag: u8) -> R<Stmt> {
     Ok(match tag {
         6 => Stmt::While {
             test: dec_expr(r)?,
-            body: Box::new(dec_stmt(r)?),
+            body: P::new(dec_stmt(r)?),
         },
         7 => Stmt::DoWhile {
-            body: Box::new(dec_stmt(r)?),
+            body: P::new(dec_stmt(r)?),
             test: dec_expr(r)?,
         },
         8 => {
             let init = if r.u8()? == 1 {
-                Some(Box::new(dec_forinit(r)?))
+                Some(P::new(dec_forinit(r)?))
             } else {
                 None
             };
             Stmt::For {
                 init,
-                test: dec_opt_expr(r)?,
-                update: dec_opt_expr(r)?,
-                body: Box::new(dec_stmt(r)?),
+                test: dec_opt_expr(r)?.map(P::new),
+                update: dec_opt_expr(r)?.map(P::new),
+                body: P::new(dec_stmt(r)?),
             }
         }
         9 => {
@@ -582,11 +754,11 @@ fn dec_stmt_group_1(r: &mut Reader, tag: u8) -> R<Stmt> {
             };
             Stmt::ForInOf {
                 decl,
-                left: dec_pattern(r)?,
+                left: P::new(dec_pattern(r)?),
                 right: dec_expr(r)?,
                 of: r.bool()?,
                 is_await: r.bool()?,
-                body: Box::new(dec_stmt(r)?),
+                body: P::new(dec_stmt(r)?),
             }
         }
         10 => Stmt::Break(dec_opt_str(r)?),
@@ -607,7 +779,7 @@ fn dec_stmt_group_2(r: &mut Reader, tag: u8) -> R<Stmt> {
                 } else {
                     None
                 };
-                Some((param, dec_stmts(r)?))
+                Some(P::new((param, dec_stmts(r)?)))
             } else {
                 None
             };
@@ -636,11 +808,11 @@ fn dec_stmt_group_2(r: &mut Reader, tag: u8) -> R<Stmt> {
         }
         15 => Stmt::Labeled {
             label: r.str()?,
-            body: Box::new(dec_stmt(r)?),
+            body: P::new(dec_stmt(r)?),
         },
         16 => Stmt::With {
             obj: dec_expr(r)?,
-            body: Box::new(dec_stmt(r)?),
+            body: P::new(dec_stmt(r)?),
         },
         17 => Stmt::ClassDecl(Rc::new(dec_class(r)?)),
         _ => unreachable!("validated Stmt tag group"),
@@ -679,8 +851,8 @@ fn dec_stmt_group_3(r: &mut Reader, tag: u8) -> R<Stmt> {
                 source: dec_opt_rcstr(r)?,
             }
         }
-        22 => Stmt::ExportDecl(Box::new(dec_stmt(r)?)),
-        23 => Stmt::ExportDefault(Box::new(dec_stmt(r)?)),
+        22 => Stmt::ExportDecl(P::new(dec_stmt(r)?)),
+        23 => Stmt::ExportDefault(P::new(dec_stmt(r)?)),
         _ => unreachable!("validated Stmt tag group"),
     })
 }
@@ -852,15 +1024,15 @@ fn enc_expr_inner(w: &mut Writer, e: &Expr) {
             w.u8(28);
             enc_exprs(w, exprs);
         }
-        Expr::TaggedTemplate { tag, quasis, subs } => {
+        Expr::TaggedTemplate { tag, parts } => {
             w.u8(29);
             enc_expr(w, tag);
-            w.uv(quasis.len() as u64);
-            for (cooked, raw) in quasis {
+            w.uv(parts.quasis.len() as u64);
+            for (cooked, raw) in parts.quasis.iter() {
                 enc_opt_str(w, cooked);
                 w.str(raw);
             }
-            enc_exprs(w, subs);
+            enc_exprs(w, &parts.subs);
         }
         Expr::OptionalChain(x) => {
             w.u8(30);
@@ -900,11 +1072,25 @@ fn dec_expr(r: &mut Reader) -> R<Expr> {
     r.nested(dec_expr_inner)
 }
 
+fn dec_callee(r: &mut Reader) -> R<Expr> {
+    r.nested(|r| dec_expr_inner_mode(r, true))
+}
+
 // Separate tag groups keep unoptimized stack frames small enough for the
 // 128-level decoder limit on ordinary 2 MiB test/embedder threads.
 fn dec_expr_inner(r: &mut Reader) -> R<Expr> {
+    dec_expr_inner_mode(r, false)
+}
+
+fn dec_expr_inner_mode(r: &mut Reader, directly_called: bool) -> R<Expr> {
     let tag = r.u8()?;
     match tag {
+        // An immediately invoked function needs its body as soon as this expression runs.
+        // Decode it once now, while still deferring functions declared inside that body.
+        0 if directly_called => Ok(Expr::Paren(P::new(dec_callee(r)?))),
+        13 if directly_called => Ok(Expr::Func(Rc::new(
+            r.nested(|r| dec_function_inner(r, false))?,
+        ))),
         0..=5 => dec_expr_group_0(r, tag),
         6..=11 => dec_expr_group_1(r, tag),
         12..=17 => dec_expr_group_2(r, tag),
@@ -918,11 +1104,11 @@ fn dec_expr_inner(r: &mut Reader) -> R<Expr> {
 #[inline(never)]
 fn dec_expr_group_0(r: &mut Reader, tag: u8) -> R<Expr> {
     Ok(match tag {
-        0 => Expr::Paren(Box::new(dec_expr(r)?)),
+        0 => Expr::Paren(P::new(dec_expr(r)?)),
         1 => Expr::Num(r.f64()?),
         2 => Expr::BigInt(JsBigInt::parse_radix(&r.str()?, 16).ok_or("snapshot: bad bigint")?),
-        3 => Expr::Str(r.rcstr()?),
-        4 => Expr::ToStr(Box::new(dec_expr(r)?)),
+        3 => Expr::Str(r.str_slice()?.into()),
+        4 => Expr::ToStr(P::new(dec_expr(r)?)),
         5 => Expr::Bool(r.bool()?),
         _ => unreachable!("validated Expr tag group"),
     })
@@ -933,11 +1119,11 @@ fn dec_expr_group_1(r: &mut Reader, tag: u8) -> R<Expr> {
     Ok(match tag {
         6 => Expr::Null,
         7 => Expr::Undefined,
-        8 => Expr::Ident(r.str()?),
+        8 => Expr::Ident(r.str_slice()?.into()),
         9 => Expr::This,
         10 => Expr::Regex {
-            body: r.rcstr()?,
-            flags: r.rcstr()?,
+            body: r.str_slice()?.into(),
+            flags: r.str_slice()?.into(),
         },
         11 => Expr::Array(dec_array_elems(r)?),
         _ => unreachable!("validated Expr tag group"),
@@ -960,13 +1146,13 @@ fn dec_expr_group_2(r: &mut Reader, tag: u8) -> R<Expr> {
         15 => {
             let delegate = r.bool()?;
             let arg = if r.u8()? == 1 {
-                Some(Box::new(dec_expr(r)?))
+                Some(P::new(dec_expr(r)?))
             } else {
                 None
             };
             Expr::Yield { delegate, arg }
         }
-        16 => Expr::Await(Box::new(dec_expr(r)?)),
+        16 => Expr::Await(P::new(dec_expr(r)?)),
         17 => Expr::Super,
         _ => unreachable!("validated Expr tag group"),
     })
@@ -977,32 +1163,32 @@ fn dec_expr_group_3(r: &mut Reader, tag: u8) -> R<Expr> {
     Ok(match tag {
         18 => Expr::Unary {
             op: intern_op(r.str_slice()?)?,
-            arg: Box::new(dec_expr(r)?),
+            arg: P::new(dec_expr(r)?),
         },
         19 => Expr::Update {
             op: intern_op(r.str_slice()?)?,
             prefix: r.bool()?,
-            arg: Box::new(dec_expr(r)?),
+            arg: P::new(dec_expr(r)?),
         },
         20 => Expr::Binary {
             op: intern_op(r.str_slice()?)?,
-            left: Box::new(dec_expr(r)?),
-            right: Box::new(dec_expr(r)?),
+            left: P::new(dec_expr(r)?),
+            right: P::new(dec_expr(r)?),
         },
         21 => Expr::Logical {
             op: intern_op(r.str_slice()?)?,
-            left: Box::new(dec_expr(r)?),
-            right: Box::new(dec_expr(r)?),
+            left: P::new(dec_expr(r)?),
+            right: P::new(dec_expr(r)?),
         },
         22 => Expr::Assign {
             op: intern_op(r.str_slice()?)?,
-            target: Box::new(dec_expr(r)?),
-            value: Box::new(dec_expr(r)?),
+            target: P::new(dec_expr(r)?),
+            value: P::new(dec_expr(r)?),
         },
         23 => Expr::Cond {
-            test: Box::new(dec_expr(r)?),
-            cons: Box::new(dec_expr(r)?),
-            alt: Box::new(dec_expr(r)?),
+            test: P::new(dec_expr(r)?),
+            cons: P::new(dec_expr(r)?),
+            alt: P::new(dec_expr(r)?),
         },
         _ => unreachable!("validated Expr tag group"),
     })
@@ -1012,27 +1198,27 @@ fn dec_expr_group_3(r: &mut Reader, tag: u8) -> R<Expr> {
 fn dec_expr_group_4(r: &mut Reader, tag: u8) -> R<Expr> {
     Ok(match tag {
         24 => Expr::Call {
-            callee: Box::new(dec_expr(r)?),
-            args: dec_array_elems(r)?,
+            callee: P::new(dec_callee(r)?),
+            args: dec_array_elems(r)?.into_boxed_slice(),
             optional: r.bool()?,
         },
         25 => Expr::New {
-            callee: Box::new(dec_expr(r)?),
-            args: dec_array_elems(r)?,
+            callee: P::new(dec_callee(r)?),
+            args: dec_array_elems(r)?.into_boxed_slice(),
         },
         26 => Expr::Member {
-            obj: Box::new(dec_expr(r)?),
-            prop: r.str()?,
+            obj: P::new(dec_expr(r)?),
+            prop: r.str()?.into_boxed_str(),
             optional: r.bool()?,
         },
         27 => Expr::Index {
-            obj: Box::new(dec_expr(r)?),
-            index: Box::new(dec_expr(r)?),
+            obj: P::new(dec_expr(r)?),
+            index: P::new(dec_expr(r)?),
             optional: r.bool()?,
         },
         28 => Expr::Seq(dec_exprs(r)?),
         29 => {
-            let tag = Box::new(dec_expr(r)?);
+            let tag = P::new(dec_expr(r)?);
             let n = r.count()?;
             let mut quasis = Vec::with_capacity(n);
             for _ in 0..n {
@@ -1040,8 +1226,10 @@ fn dec_expr_group_4(r: &mut Reader, tag: u8) -> R<Expr> {
             }
             Expr::TaggedTemplate {
                 tag,
-                quasis,
-                subs: dec_exprs(r)?,
+                parts: Box::new(TemplateParts {
+                    quasis,
+                    subs: dec_exprs(r)?.into_boxed_slice(),
+                }),
             }
         }
         _ => unreachable!("validated Expr tag group"),
@@ -1051,13 +1239,13 @@ fn dec_expr_group_4(r: &mut Reader, tag: u8) -> R<Expr> {
 #[inline(never)]
 fn dec_expr_group_5(r: &mut Reader, tag: u8) -> R<Expr> {
     Ok(match tag {
-        30 => Expr::OptionalChain(Box::new(dec_expr(r)?)),
+        30 => Expr::OptionalChain(P::new(dec_expr(r)?)),
         31 => Expr::PrivateIn {
-            name: r.str()?,
-            obj: Box::new(dec_expr(r)?),
+            name: r.str_slice()?.into(),
+            obj: P::new(dec_expr(r)?),
         },
         32 => Expr::ImportCall {
-            spec: Box::new(dec_expr(r)?),
+            spec: P::new(dec_expr(r)?),
             phase: match r.u8()? {
                 0 => ImportPhase::Evaluation,
                 1 => ImportPhase::Source,
@@ -1065,7 +1253,7 @@ fn dec_expr_group_5(r: &mut Reader, tag: u8) -> R<Expr> {
                 t => return Err(format!("snapshot: bad ImportPhase {t}")),
             },
             options: if r.u8()? == 1 {
-                Some(Box::new(dec_expr(r)?))
+                Some(P::new(dec_expr(r)?))
             } else {
                 None
             },
@@ -1288,7 +1476,7 @@ fn dec_pattern_inner(r: &mut Reader) -> R<Pattern> {
                 rest: dec_opt_str(r)?,
             })
         }
-        3 => Pattern::Member(Box::new(dec_expr(r)?)),
+        3 => Pattern::Member(P::new(dec_expr(r)?)),
         t => return Err(format!("snapshot: bad Pattern {t}")),
     })
 }
@@ -1318,13 +1506,13 @@ fn enc_function_inner(w: &mut Writer, f: &Function) {
         | (f.is_method as u8) << 5
         | (f.is_fn_expr as u8) << 6;
     w.u8(flags);
-    enc_opt_rcstr(w, &f.source);
+    enc_opt_source(w, &f.source);
 }
 fn dec_function(r: &mut Reader) -> R<Function> {
-    r.nested(dec_function_inner)
+    r.nested(|r| dec_function_inner(r, true))
 }
 
-fn dec_function_inner(r: &mut Reader) -> R<Function> {
+fn dec_function_inner(r: &mut Reader, defer_body: bool) -> R<Function> {
     let name = dec_opt_str(r)?;
     let n = r.count()?;
     let mut params = Vec::with_capacity(n);
@@ -1335,9 +1523,26 @@ fn dec_function_inner(r: &mut Reader) -> R<Function> {
             rest: r.bool()?,
         });
     }
-    let body = dec_stmts(r)?;
+    let body = if let Some(source) = r.source.filter(|_| defer_body) {
+        let start = r.pos;
+        let known_end = source.body_ends.borrow().get(&start).copied();
+        if let Some(end) = known_end {
+            r.pos = end;
+        } else {
+            validate::statements(r)?;
+            r.record_body(start);
+        }
+        FunctionBody::deferred(DeferredBody {
+            source: source.clone(),
+            start,
+            end: r.pos,
+            depth: r.depth,
+        })
+    } else {
+        dec_stmts(r)?.into()
+    };
     let flags = r.u8()?;
-    let source = dec_opt_rcstr(r)?;
+    let source = dec_opt_source(r)?;
     Ok(Function {
         name,
         params,
@@ -1393,12 +1598,12 @@ fn enc_class(w: &mut Writer, c: &Class) {
         enc_exprs(w, &m.decorators);
     }
     enc_exprs(w, &c.decorators);
-    enc_opt_rcstr(w, &c.source);
+    enc_opt_source(w, &c.source);
 }
 fn dec_class(r: &mut Reader) -> R<Class> {
     let name = dec_opt_str(r)?;
     let superclass = if r.u8()? == 1 {
-        Some(Box::new(dec_expr(r)?))
+        Some(P::new(dec_expr(r)?))
     } else {
         None
     };
@@ -1436,7 +1641,7 @@ fn dec_class(r: &mut Reader) -> R<Class> {
         superclass,
         members,
         decorators: dec_exprs(r)?,
-        source: dec_opt_rcstr(r)?,
+        source: dec_opt_source(r)?,
     })
 }
 
@@ -1534,14 +1739,224 @@ fn dec_declkind(r: &mut Reader) -> R<DeclKind> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode, encode, Stmt, Writer, MAGIC, VERSION};
+    use super::{decode, decode_eager as eager, encode, Expr, Stmt, Writer, MAGIC, VERSION};
+
+    #[test]
+    fn source_table_stores_one_root_for_nested_functions_and_classes() {
+        let input = "function first() { function nested() { return '🌙'; } return nested; }\nfunction second() { function later() { return 'é'; } return later; }\nclass Café { constructor() {} method() { return 1; } }";
+        let bytes = crate::compile_snapshot(input).unwrap();
+        let (_, _, roots) = super::decode_header(&bytes, None).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(&*roots[0].checked_range(0, input.len()).unwrap(), input);
+        assert_eq!(
+            bytes
+                .windows(input.len())
+                .filter(|part| *part == input.as_bytes())
+                .count(),
+            1
+        );
+        let lazy = decode(&bytes).unwrap();
+        // Materialize later bodies first: their source references must not depend on
+        // definitions encountered while materializing an earlier deferred body.
+        for (index, expected) in [
+            (1, "function later() { return 'é'; }"),
+            (0, "function nested() { return '🌙'; }"),
+        ] {
+            let Stmt::FuncDecl(outer) = &lazy[index] else {
+                panic!("outer")
+            };
+            assert!(!outer.body.is_materialized());
+            let Stmt::FuncDecl(inner) = &outer.body[0] else {
+                panic!("inner")
+            };
+            assert_eq!(inner.source.as_deref(), Some(expected));
+        }
+        assert_eq!(encode(&lazy), bytes);
+        assert_roundtrips("const f = (a = function defaultValue() {}) => `${function hole() { return `${() => 2}`; }}`; class C { [(() => 'x')()]() {} }");
+    }
+
+    #[test]
+    fn source_table_rejects_bad_offsets_utf8_and_ranges() {
+        let input = "function f() { return '🌙'; }";
+        let bytes = crate::compile_snapshot(input).unwrap();
+        let (body_start, body_end, _) = super::decode_header(&bytes, None).unwrap();
+        // This small function ends in Some(source), root 0, start 0, end input.len().
+        assert_eq!(
+            &bytes[body_end - 4..body_end],
+            &[1, 0, 0, input.len() as u8]
+        );
+        let rejected = |damaged: &[u8]| {
+            assert!(decode(damaged).is_err());
+            assert!(eager(damaged).is_err());
+        };
+        for offset in [0, body_start - 1, bytes.len(), usize::MAX] {
+            let mut damaged = bytes.clone();
+            damaged[body_start - 8..body_start].copy_from_slice(&(offset as u64).to_le_bytes());
+            rejected(&damaged);
+        }
+        let moon = input.find('🌙').unwrap() as u8;
+        for (field, value) in [
+            (3, 1),
+            (2, moon + 1),
+            (1, moon + 1),
+            (2, input.len() as u8 + 1),
+            (1, input.len() as u8 + 1),
+        ] {
+            let mut damaged = bytes.clone();
+            damaged[body_end - field] = value;
+            rejected(&damaged);
+        }
+        let mut damaged = bytes.clone();
+        // Corrupt only the root, including text inside a deferred body.
+        damaged[body_end + 2 + moon as usize] = 0xff;
+        rejected(&damaged);
+        let mut damaged = bytes.clone();
+        damaged[body_end] = 127;
+        rejected(&damaged);
+        let mut old = Writer::new(None);
+        old.uv(MAGIC as u64);
+        old.uv(1);
+        old.uv(0);
+        rejected(&old.buf);
+        assert!(super::encode_limited(
+            &crate::parser::parse_script(input, false).unwrap_or_else(|e| panic!("{}", e.message)),
+            bytes.len() - 1
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn function_source_survives_input_mutation_and_deferred_body_decoding() {
+        let outer_text =
+            "function outer(π) { /* 🌙 */ function inner() { return π; } return inner; }";
+        let class_text = "class Café { constructor() {} method() { return '🌙'; } }";
+        let mut input = format!("/* prefix é */ {outer_text}\n{class_text}");
+        let body =
+            crate::parser::parse_script(&input, false).unwrap_or_else(|e| panic!("{}", e.message));
+        input.clear();
+        input.push_str("overwritten caller source");
+        drop(input);
+        let encoded = encode(&body);
+        let mut temporary = encoded.clone();
+        let lazy = decode(&temporary).unwrap();
+        temporary.fill(0xff);
+        drop(temporary);
+        for body in [&body, &lazy] {
+            let Stmt::FuncDecl(outer) = &body[0] else {
+                panic!("outer")
+            };
+            assert_eq!(outer.source.as_deref(), Some(outer_text));
+            let Stmt::FuncDecl(inner) = &outer.body[0] else {
+                panic!("inner")
+            };
+            assert_eq!(
+                inner.source.as_deref(),
+                Some("function inner() { return π; }")
+            );
+            let Stmt::ClassDecl(class) = &body[1] else {
+                panic!("class")
+            };
+            assert_eq!(class.source.as_deref(), Some(class_text));
+            assert_eq!(
+                class.members[0].func.as_ref().unwrap().source.as_deref(),
+                Some(class_text)
+            );
+            assert_eq!(
+                class.members[1].func.as_ref().unwrap().source.as_deref(),
+                Some("method() { return '🌙'; }")
+            );
+            assert_eq!(encode(body), encoded);
+        }
+    }
+
+    #[test]
+    fn unused_function_bodies_remain_encoded() {
+        let bytes = crate::compile_snapshot(
+            "function outer() { function inner() { return 3; } return inner; }",
+        )
+        .unwrap();
+        let body = decode(&bytes).unwrap();
+        let Stmt::FuncDecl(outer) = &body[0] else {
+            panic!("outer function");
+        };
+        assert!(!outer.body.is_materialized());
+        assert_eq!(outer.name.as_deref(), Some("outer"));
+        assert!(!outer.body.is_materialized());
+        assert_eq!(outer.body.len(), 2);
+        let Stmt::FuncDecl(inner) = &outer.body[0] else {
+            panic!("inner function");
+        };
+        assert!(!inner.body.is_materialized());
+        assert_eq!(encode(&body), bytes);
+        assert!(inner.body.is_materialized());
+    }
+
+    #[test]
+    fn immediately_called_bodies_decode_once_but_nested_functions_stay_deferred() {
+        let bytes = crate::compile_snapshot(
+            "(function boot() { function unused() { return 3; } return 1; })()",
+        )
+        .unwrap();
+        let body = decode(&bytes).unwrap();
+        let Stmt::Expr(Expr::Call { callee, .. }) = &body[0] else {
+            panic!("immediate call");
+        };
+        let Expr::Func(function) = &**callee else {
+            panic!("function callee");
+        };
+        assert!(function.body.is_materialized());
+        let Stmt::FuncDecl(unused) = &function.body[0] else {
+            panic!("nested function");
+        };
+        assert!(!unused.body.is_materialized());
+        assert_eq!(encode(&body), bytes);
+    }
+
+    #[test]
+    fn deferred_validation_matches_eager_decoder_on_corrupt_inputs() {
+        let bytes = crate::compile_snapshot(
+            r#"
+            async function outer(a = 3, ...rest) {
+              const {x = 1, ...tail} = {x: a};
+              function* g() { yield* [1, 2n, /x/u, ...rest]; }
+              class C { #x = 2; get x() { return this.#x; } static { this.y = 4; } }
+              try { for (let k in tail) { if (k) break; } }
+              catch (error) { throw error; } finally { a += 1; }
+              return tag`head${await a}tail`;
+            }
+            (function boot() { function unused() { return 3; } return 1; })();
+        "#,
+        )
+        .unwrap();
+        let mut damaged = bytes.clone();
+        for index in 0..bytes.len() {
+            for mask in [1, 0x20, 0x80, 0xff] {
+                damaged[index] = bytes[index] ^ mask;
+                let lazy = decode(&damaged);
+                let original = eager(&damaged);
+                assert_eq!(lazy.is_ok(), original.is_ok(), "byte {index}, mask {mask}");
+                if let (Ok(lazy), Ok(original)) = (lazy, original) {
+                    // Force every deferred body and compare all decoded fields.
+                    assert_eq!(
+                        encode(&lazy),
+                        encode(&original),
+                        "byte {index}, mask {mask}"
+                    );
+                }
+            }
+            damaged[index] = bytes[index];
+        }
+    }
 
     #[test]
     fn every_lexer_operator_can_be_reinterned() {
-        for &op in super::KEYWORDS.iter().chain(super::PUNCTUATORS) {
-            assert_eq!(super::intern_op(op).unwrap(), op);
+        for &op in crate::token::KEYWORDS
+            .iter()
+            .chain(crate::token::PUNCTUATORS)
+        {
+            assert_eq!(*super::intern_op(op).unwrap(), op);
         }
-        for invalid in ["", "unknownKeyword", "@@@@"] {
+        for invalid in ["", "unknownKeyword", "@@@@", "+x", ">>>==", "é", "in "] {
             assert!(super::intern_op(invalid).is_err());
         }
     }
@@ -1553,6 +1968,11 @@ mod tests {
         let blob = crate::compile_snapshot(src).unwrap_or_else(|e| panic!("compile {src:?}: {e}"));
         let ast = decode(&blob).unwrap_or_else(|e| panic!("decode {src:?}: {e}"));
         assert_eq!(blob, encode(&ast), "re-encode differs for: {src}");
+        assert_eq!(
+            blob,
+            encode(&eager(&blob).unwrap()),
+            "eager decode differs for: {src}"
+        );
     }
 
     #[test]
@@ -1604,7 +2024,14 @@ mod tests {
         let mut huge = Writer::new(None);
         huge.uv(MAGIC as u64);
         huge.uv(VERSION as u64);
+        let offset_position = huge.buf.len();
+        huge.bytes(&0u64.to_le_bytes());
         huge.uv(u64::MAX);
+        let table_start = huge.buf.len();
+        huge.uv(0);
+        huge.buf[offset_position..offset_position + 8]
+            .copy_from_slice(&(table_start as u64).to_le_bytes());
+        assert!(super::decode_header(&huge.buf, None).is_ok());
         assert!(decode(&huge.buf).is_err());
         let mut nested = Stmt::Empty;
         for _ in 0..160 {
@@ -1632,7 +2059,7 @@ mod tests {
                     // The enclosing expression statement also consumes one depth level.
                     let mut expression = crate::ast::Expr::Num(1.0);
                     for _ in 2..depth {
-                        expression = crate::ast::Expr::Paren(Box::new(expression));
+                        expression = crate::ast::Expr::Paren(crate::ast::P::new(expression));
                     }
                     let bytes = encode(&[Stmt::Expr(expression)]);
                     assert_eq!(decode(&bytes).is_ok(), depth == 128, "expressions: {depth}");

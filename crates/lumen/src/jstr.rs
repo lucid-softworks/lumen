@@ -105,7 +105,15 @@ pub fn from_units(units: &[u16]) -> String {
 
 /// The single-unit string for one code unit.
 pub fn unit_str(unit: u16) -> String {
-    from_units(&[unit])
+    unit_char(unit).encode_utf8(&mut [0; 4]).to_owned()
+}
+
+fn unit_char(unit: u16) -> char {
+    if (0xD800..=0xDFFF).contains(&unit) {
+        smuggle(unit)
+    } else {
+        char::from_u32(unit as u32).unwrap()
+    }
 }
 
 thread_local! {
@@ -121,7 +129,7 @@ pub fn unit_lstr(unit: u16) -> crate::lstr::LStr {
     if unit < 128 {
         ASCII_UNITS.with(|units| units[unit as usize].clone())
     } else {
-        unit_str(unit).into()
+        unit_char(unit).into()
     }
 }
 
@@ -301,4 +309,20 @@ pub fn from_code_points(cps: &[u32]) -> String {
         }
     }
     from_units(&units)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn single_unit_strings_preserve_every_utf16_code_unit() {
+        for unit in 0..=u16::MAX {
+            let expected = super::from_units(&[unit]);
+            let owned = super::unit_str(unit);
+            let shared = super::unit_lstr(unit);
+            assert_eq!(owned, expected, "unit {unit:04x}");
+            assert_eq!(shared.as_str(), expected, "unit {unit:04x}");
+            assert_eq!(super::units(&shared), [unit], "unit {unit:04x}");
+            assert_eq!(super::unit_len(&shared), 1, "unit {unit:04x}");
+        }
+    }
 }

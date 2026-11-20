@@ -9,10 +9,17 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+# Optional Linux release allocator. Default builds keep the std-only allocator.
+mimalloc = ["dep:mimalloc"]
+
 [dependencies]
 lumen-host = { path = "../lumen-host" }
 lumen-repl = { path = "../lumen-repl" }
 lumen-runtime = { path = "../lumen-runtime" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+mimalloc = { version = "=0.1.52", default-features = false, optional = true }
 
 [lints]
 workspace = true

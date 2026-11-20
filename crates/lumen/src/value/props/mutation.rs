@@ -87,9 +87,11 @@ impl Props {
         self.shape = shape;
     }
 
-    pub(crate) fn insert(&mut self, key: impl Into<Rc<str>>, prop: Property) {
-        let key = key.into();
-        if let (Some(n), Some(packed)) = (canonical_index(&key), self.elems.packed_ref()) {
+    pub(crate) fn insert(&mut self, key: impl AsRef<str> + Into<Rc<str>>, prop: Property) {
+        // Updates retain the entry's existing key. Delay owning a borrowed name until a new
+        // entry actually needs it (iterator state and array metadata are updated frequently).
+        let name = key.as_ref();
+        if let (Some(n), Some(packed)) = (canonical_index(name), self.elems.packed_ref()) {
             let n = n as usize;
             if n < packed.len() {
                 self.note_structural();
@@ -105,12 +107,12 @@ impl Props {
             }
             self.has_far.set(true);
         }
-        if let Some(i) = self.find(&key) {
+        if let Some(i) = self.find(name) {
             self.entries[i].1 = prop;
             if self.mirror_flags & MIRROR_OK != 0
-                && key.as_bytes().first().is_some_and(|b| b.is_ascii_digit())
+                && name.as_bytes().first().is_some_and(|b| b.is_ascii_digit())
             {
-                match canonical_index(&key) {
+                match canonical_index(name) {
                     Some(n) if (n as usize) < self.elems.mirror_len() => {
                         // Replacing an existing entry: position n already had the element.
                         self.mirror_sync(n as usize, i, false)
@@ -121,6 +123,7 @@ impl Props {
                 }
             }
         } else {
+            let key = key.into();
             self.note_structural();
             let slot = self.entries.len();
             if let Some(index) = self.elems.index_mut() {

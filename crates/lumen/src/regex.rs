@@ -689,8 +689,22 @@ fn has_named_group(pattern: &str) -> bool {
     false
 }
 
+struct CompiledPattern {
+    prog: Vec<Inst>,
+    nmarks: usize,
+    ngroups: usize,
+    names: Vec<(String, usize)>,
+    unicode: bool,
+}
+
 impl Regex {
-    pub fn new(pattern: &str, flags: &str) -> Result<Regex, String> {
+    /// Check a literal's early errors without constructing the runtime search tables.
+    /// Lowering is still required: it also checks the engine's repetition limits.
+    pub(crate) fn validate(pattern: &str, flags: &str) -> Result<(), String> {
+        Self::compile_pattern(pattern, flags).map(|_| ())
+    }
+
+    fn compile_pattern(pattern: &str, flags: &str) -> Result<CompiledPattern, String> {
         let mut seen = String::new();
         for f in flags.chars() {
             if !"dgimsuvy".contains(f) {
@@ -749,6 +763,23 @@ impl Regex {
         compile(&ast, &mut prog, &mut nmarks)?;
         prog.push(Inst::Save(1));
         prog.push(Inst::Match);
+        Ok(CompiledPattern {
+            prog,
+            nmarks,
+            ngroups: p.ngroups,
+            names: p.names,
+            unicode,
+        })
+    }
+
+    pub fn new(pattern: &str, flags: &str) -> Result<Regex, String> {
+        let CompiledPattern {
+            prog,
+            nmarks,
+            ngroups,
+            names,
+            unicode,
+        } = Self::compile_pattern(pattern, flags)?;
         // The `flags` accessor returns flags in canonical order.
         let canonical: String = "dgimsuvy".chars().filter(|c| flags.contains(*c)).collect();
         let first = first_filter(&prog, flags.contains('m'));
@@ -763,7 +794,7 @@ impl Regex {
         } else {
             None
         };
-        let literal_ascii = if !flags.contains('i') && p.ngroups == 0 {
+        let literal_ascii = if !flags.contains('i') && ngroups == 0 {
             let chars = if prog.len() >= 4
                 && matches!(prog.first(), Some(Inst::Save(0)))
                 && matches!(prog.get(prog.len() - 2), Some(Inst::Save(1)))
@@ -792,7 +823,7 @@ impl Regex {
             literal_ascii,
             first_lut: None,
             prog,
-            ngroups: p.ngroups,
+            ngroups,
             source: if pattern.is_empty() {
                 "(?:)".into()
             } else {
@@ -804,7 +835,7 @@ impl Regex {
             multiline: flags.contains('m'),
             dotall: flags.contains('s'),
             sticky: flags.contains('y'),
-            names: p.names,
+            names,
         };
         let lut = if let FirstFilter::Atoms(atoms) = &re.first {
             let mut lut = Box::new([false; 256]);
@@ -3332,6 +3363,41 @@ fn class_set_to_node(mut set: ClassSet) -> Node {
 
 #[cfg(test)]
 mod internal_engine_diagnostics {
+    #[test]
+    fn unused_literals_still_report_all_early_errors() {
+        for literal in [
+            "/(/",
+            "/[z-a]/",
+            "/x/gg",
+            "/x/uv",
+            "/x/z",
+            "/\\2/u",
+            "/(?<a>x)\\k<b>/u",
+            "/(?<a>x)(?<a>y)/u",
+            "/(?:ab){1001}/",
+        ] {
+            let source = format!("function unused() {{ return {literal}; }}");
+            assert!(
+                crate::parser::parse_script(&source, false).is_err(),
+                "{literal}"
+            );
+        }
+        for literal in [
+            "/a{1001}/",
+            "/(?:ab){2,4}/",
+            "/(?<a>x)\\k<a>/u",
+            "/[a-z]/gi",
+            "/(?<a>x)|(?<a>y)/u",
+            "/[\\p{ASCII}&&\\p{Letter}]/v",
+        ] {
+            let source = format!("function unused() {{ return {literal}; }}");
+            assert!(
+                crate::parser::parse_script(&source, false).is_ok(),
+                "{literal}"
+            );
+        }
+    }
+
     #[test]
     fn escaped_open_bracket_patterns_compile() {
         for pattern in [r"\s*([+>~\s])\s*([a-zA-Z#.*:\[])", r"^[\s[]?shapgvba"] {

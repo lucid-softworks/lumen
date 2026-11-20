@@ -2416,3 +2416,35 @@ fn posix_normalize_and_join_match_node_vectors() {
     );
     assert_eq!(out.lines(), ["ok"]);
 }
+
+#[test]
+fn posix_resolve_and_dirname_match_node_vectors() {
+    let (mut rt, out, _) = test_runtime();
+    eval_ok(&mut rt, concat!(
+        "const cases=", include_str!("fixtures/path-resolve-dirname.json"), r#";
+        const p=require('node:path').posix, assert=require('node:assert').strict;
+        const cwd=process.cwd;
+        process.cwd=()=>cases.cwd;
+        for(const [input,expected] of cases.dirname) assert.equal(p.dirname(input),expected,JSON.stringify(input));
+        for(const [input,expected] of cases.resolve) assert.equal(p.resolve(...input),expected,JSON.stringify(input));
+        assert.equal(p.resolve(),cases.cwd);
+        assert.equal(p.resolve.name,'resolve');
+        assert.equal(p.dirname.name,'dirname');
+        process.cwd=()=>'/fixture//work/';
+        assert.equal(p.resolve(),'/fixture//work/');
+        assert.equal(p.resolve('.'),'/fixture//work/');
+        process.cwd=()=>cases.cwd;
+        for(const value of [undefined,null,false,1,{},[],Symbol('x')]) {
+            assert.throws(()=>p.dirname(value),{name:'TypeError',code:'ERR_INVALID_ARG_TYPE'});
+            assert.throws(()=>p.resolve('/a',value),{name:'TypeError',code:'ERR_INVALID_ARG_TYPE'});
+            assert.equal(p.resolve(value,'/a'),'/a');
+        }
+        process.cwd=()=>{throw 'cwd';};
+        assert.equal(p.resolve('/a'),'/a');
+        let thrown; try { p.resolve('relative'); } catch(e) { thrown=e; }
+        assert.equal(thrown,'cwd');
+        process.cwd=cwd;
+        console.log('ok');
+    "#));
+    assert_eq!(out.lines(), ["ok"]);
+}

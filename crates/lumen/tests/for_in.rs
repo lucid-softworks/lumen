@@ -93,3 +93,51 @@ fn no_array_iterator_protocol_and_exceptions_propagate() {
     "#,
     );
 }
+
+#[test]
+fn var_and_existing_heads_preserve_bindings_and_loop_control() {
+    check(
+        r#"
+        function declared(o) {
+            let s=''; var k='initial';
+            for(var k in o) { if(k==='a') continue; s+=k; if(k==='b') break; }
+            return s+':'+k;
+        }
+        function existing(o) { let k='initial', s=''; for(k in o) s+=k; return s+':'+k; }
+        function captured(o) { let k='initial'; const read=()=>k; for(k in o) {} return read(); }
+        function shared(o) { const out=[]; for(var k in o) out.push(()=>k); return out.map(f=>f()).join(','); }
+        function nested(o) { let k, out=''; outer: for(let i=0;i<2;i++) {
+            for(k in o) { if(k==='a') continue; out+=k; continue outer; }
+        } return out+':'+k; }
+        for(let i=0;i<100;i++) {
+            assert(declared({a:1,b:2,c:3})==='b:b' && declared({})===':initial');
+            assert(existing({a:1,b:2})==='ab:b' && existing({})===':initial');
+            assert(captured({a:1,b:2})==='b' && captured({})==='initial');
+            assert(shared({a:1,b:2})==='b,b' && nested({a:1,b:2,c:3})==='bb:b');
+        }
+    "#,
+    );
+}
+
+#[test]
+fn existing_head_tdz_const_and_global_setters() {
+    check(
+        r#"
+        function tdz(o) { for(k in o) {} let k='initialized'; return k; }
+        function constant(o) { const k='initial'; for(k in o) {} return k; }
+        function strictFree(o) { 'use strict'; for(missingEnumerationName in o) {} }
+        let writes='';
+        Object.defineProperty(globalThis,'enumeratedKey',{configurable:true,set(v){writes+=v;}});
+        function globalSetter(o) { for(enumeratedKey in o) {} }
+        for(let i=0;i<100;i++) {
+            try { tdz({a:1}); assert(false); } catch(e) { assert(e instanceof ReferenceError); }
+            try { constant({a:1}); assert(false); } catch(e) { assert(e instanceof TypeError); }
+            try { strictFree({a:1}); assert(false); } catch(e) { assert(e instanceof ReferenceError); }
+            assert(tdz({})==='initialized' && constant({})==='initial');
+            strictFree({});
+            writes=''; globalSetter({a:1,b:2}); assert(writes==='ab');
+        }
+        delete globalThis.enumeratedKey;
+    "#,
+    );
+}

@@ -55,20 +55,30 @@
     30
   ];
 
-  const root = [null, null, -1];
-  for (let symbol = 0; symbol < CODES.length; symbol++) {
-    let node = root;
-    const code = CODES[symbol], length = LENGTHS[symbol];
-    for (let shift = length - 1; shift >= 0; shift--) {
-      const bit = Math.floor(code / Math.pow(2, shift)) & 1;
-      if (!node[bit]) node[bit] = [null, null, -1];
-      node = node[bit];
+  // Most programs never decode HTTP/2 headers. Build the trie once, on demand.
+  let decodeRoot;
+  function getDecodeRoot() {
+    if (decodeRoot) return decodeRoot;
+    const root = [null, null, -1];
+    for (let symbol = 0; symbol < CODES.length; symbol++) {
+      let node = root;
+      const code = CODES[symbol], length = LENGTHS[symbol];
+      for (let shift = length - 1; shift >= 0; shift--) {
+        // Codes are at most 30 bits. Do not consult mutable Math methods now
+        // that initialization can happen after user code has run.
+        const bit = (code >>> shift) & 1;
+        if (!node[bit]) node[bit] = [null, null, -1];
+        node = node[bit];
+      }
+      node[2] = symbol;
     }
-    node[2] = symbol;
+    decodeRoot = root;
+    return root;
   }
 
   function decode(input) {
     const bytes = Buffer.from(input), output = [];
+    const root = getDecodeRoot();
     let node = root, pendingBits = 0, pendingOnes = true;
     for (const byte of bytes) {
       for (let shift = 7; shift >= 0; shift--) {

@@ -82,3 +82,43 @@ fn frames_and_hpack_round_trip_and_reject_invalid_input() {
         ]
     );
 }
+
+#[test]
+fn huffman_decoder_recovers_after_invalid_first_input() {
+    let mut runtime = Runtime::new();
+    let source = r#"
+        const huffman = globalThis.__lumenHpackHuffman;
+        // EOS, excessive padding, and zero padding must all be rejected.
+        // Lazy initialization must also survive user changes to the global Math object.
+        const originalFloor = Math.floor, originalPow = Math.pow;
+        Math.floor = Math.pow = () => { throw new Error("modified Math called"); };
+        try {
+          for (const hex of ["ffffffff", "ff", "00"]) {
+            let rejected = false;
+            try { huffman.decode(Buffer.from(hex, "hex")); }
+            catch (error) { rejected = error.code === "ERR_HTTP2_COMPRESSION_ERROR"; }
+            if (!rejected) throw new Error("accepted invalid Huffman input " + hex);
+          }
+        } finally {
+          Math.floor = originalFloor;
+          Math.pow = originalPow;
+        }
+        // RFC 7541 C.4 examples, repeated after failures and an empty string.
+        for (let repeat = 0; repeat < 2; repeat++) {
+          for (const [hex, expected] of [
+            ["", ""],
+            ["f1e3c2e5f23a6ba0ab90f4ff", "www.example.com"],
+            ["a8eb10649cbf", "no-cache"],
+            ["25a849e95ba97d7f", "custom-key"],
+            ["25a849e95bb8e8b4bf", "custom-value"]
+          ]) {
+            if (huffman.decode(Buffer.from(hex, "hex")).toString() !== expected) {
+              throw new Error("incorrect Huffman decode " + hex);
+            }
+          }
+        }
+    "#;
+    if let Completion::Throw { name, message } = runtime.eval(source).expect("source parses") {
+        panic!("uncaught {name}: {message}");
+    }
+}
