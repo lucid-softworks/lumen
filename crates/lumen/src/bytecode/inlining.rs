@@ -4,6 +4,7 @@ use super::{
     InlinePlanEntry, InlineTarget, InlineWay, Op,
 };
 use crate::ast::{Function, HoistOp, Pattern};
+use crate::fasthash::FastSet;
 use std::rc::Rc;
 
 impl Compiler {
@@ -176,7 +177,7 @@ impl Compiler {
             self.emit(Op::ResetSlots(start, count));
             k += count as usize;
         }
-        let empty = std::collections::HashSet::new();
+        let empty = FastSet::default();
         self.declare_body_lexicals(&f.body, &empty)?;
         for stmt in &f.body {
             self.stmt(stmt)?;

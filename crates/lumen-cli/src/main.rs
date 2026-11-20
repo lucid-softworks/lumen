@@ -16,9 +16,18 @@ use lumen_runtime::Runtime;
 
 // Match the engine CLI's bounded small-allocation cache. Runtime startup and module
 // parsing otherwise pay system malloc/free costs for every short-lived AST/object.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(all(target_os = "linux", feature = "mimalloc"))
+))]
 #[global_allocator]
 static GLOBAL_ALLOC: lumen_host::ClassAlloc = lumen_host::ClassAlloc;
+
+// This is confined to the opt-in Linux CLI build; engine and runtime crates keep
+// using their embedder's allocator and have no third-party Rust dependencies.
+#[cfg(all(target_os = "linux", feature = "mimalloc"))]
+#[global_allocator]
+static GLOBAL_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() {
     let mut tier = None;
@@ -90,6 +99,7 @@ fn main() {
         );
         let stdin = std::io::stdin();
         Repl::new(runtime).run(&mut stdin.lock(), &mut std::io::stdout());
+        return;
     } else {
         let mut src = String::new();
         if std::io::stdin().read_to_string(&mut src).is_err() {
@@ -97,6 +107,11 @@ fn main() {
         }
         run_source(&mut runtime, &src);
     }
+    // All runtime resources and worker threads are cleaned up before final process exit.
+    // Cached free allocation blocks can then be reclaimed with the process address space.
+    drop(runtime);
+    #[cfg(not(target_arch = "wasm32"))]
+    lumen_host::ClassAlloc::exit(0);
 }
 
 /// Evaluate + loop to quiescence; uncaught top-level throws exit 1 (console output already

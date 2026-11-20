@@ -70,6 +70,8 @@ pub fn extension() -> Extension {
                     "getCompileCacheDir" (0) => op_get_compile_cache_dir,
                     "pathNormalizePosix" (1) => path_posix::op_normalize,
                     "pathJoinPosix" (0) => path_posix::op_join,
+                    "pathResolvePosix" (0) => path_posix::op_resolve,
+                    "pathDirnamePosix" (1) => path_posix::op_dirname,
                     "bufferDecodeBase64" (1) => buffer::op_decode_base64,
                     "drainMicrotasks" (0) => op_drain_microtasks,
                     "transformJsx" (1) => op_transform_jsx,

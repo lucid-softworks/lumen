@@ -1,0 +1,55 @@
+{
+  "measuredCratesTree": "3d657d187015fc65ccb8207f8e7ae142b38d504e",
+  "baselineMain": "567395a19a8ebaaae85511dffcbf4488df187294",
+  "engine": {
+    "passed": 848,
+    "failed": 0
+  },
+  "runtime": {
+    "passed": 169,
+    "failed": 2,
+    "ignored": 1,
+    "terminatedTests": 1,
+    "allPassed": false
+  },
+  "commands": [
+    "CARGO_PROFILE_TEST_OPT_LEVEL=1 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -p lumen -p lumen-runtime",
+    "CARGO_PROFILE_TEST_OPT_LEVEL=1 CARGO_PROFILE_TEST_DEBUG=0 cargo test --locked -p lumen-runtime --no-fail-fast"
+  ],
+  "existingFailures": [
+    {
+      "test": "client_multiplexes_requests_against_node_server",
+      "candidate": "Only empty body lines; response assertions fail.",
+      "main": "running 1 test\ntest client_multiplexes_requests_against_node_server ... FAILED\n\nfailures:\n\n---- client_multiplexes_requests_against_node_server stdout ----\n\nthread 'client_multiplexes_requests_against_node_server' (309314) panicked at crates/lumen-runtime/tests/http2_client.rs:95:5:\n[\"body \", \"body \"]\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    client_multiplexes_requests_against_node_server\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s\n\nerror: test failed, to rerun pass `-p lumen-runtime --test http2_client`\n"
+    },
+    {
+      "test": "server_handles_multiplexed_node_requests",
+      "candidate": "Hung for over 60 seconds and was terminated.",
+      "main": {
+        "status": null,
+        "signal": "SIGTERM",
+        "error": "ETIMEDOUT",
+        "stdout": "\nrunning 1 test\n",
+        "stderr": ""
+      }
+    },
+    {
+      "test": "dgram_loopback_echo_with_rinfo",
+      "candidate": "Server receive sometimes precedes send completion callback; assertion requires opposite order.",
+      "main": {
+        "round": 1,
+        "status": 101,
+        "stdout": "\nrunning 16 tests\ntest net_address_math_still_real ... ok\ntest net_loopback_echo_and_half_close ... ok\ntest net_end_reply_pattern_and_events_order ... ok\ntest net_std_client_against_lumen_server ... ok\ntest net_unix_path_client_writes_to_std_peer ... ok\ntest net_econnrefused_and_eaddrinuse ... ok\ntest net_allow_half_open_keeps_write_side ... ok\ntest net_unref_does_not_hold_the_loop ... ok\ntest net_lumen_client_against_std_server ... ok\ntest net_binary_integrity_64k ... ok\ntest net_unix_path_accept_and_cleanup ... ok\ntest dgram_against_std_udp_socket ... ok\ntest dgram_udp6_and_eaddrinuse ... ok\ntest dgram_errors_and_option_paths ... ok\ntest dgram_loopback_echo_with_rinfo ... FAILED\ntest dgram_connected_mode_and_offsets ... ok\n\nfailures:\n\n---- dgram_loopback_echo_with_rinfo stdout ----\n\nthread 'dgram_loopback_echo_with_rinfo' (316889) panicked at crates/lumen-runtime/tests/net_dgram.rs:454:5:\nassertion `left == right` failed\n  left: [\"listening: 127.0.0.1 IPv4 number\", \"server got: ping IPv4 true\", \"sent: true 4\", \"client got: pong:ping\"]\n right: [\"listening: 127.0.0.1 IPv4 number\", \"sent: true 4\", \"server got: ping IPv4 true\", \"client got: pong:ping\"]\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    dgram_loopback_echo_with_rinfo\n\ntest result: FAILED. 15 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s\n\n",
+        "stderr": ""
+      }
+    }
+  ],
+  "scriptTests": {
+    "passed": [
+      "run-ares6",
+      "run-octane",
+      "run-web-tooling"
+    ]
+  },
+  "workflowValidation": "actionlint passed for profiled-cli, nightly and release workflows"
+}

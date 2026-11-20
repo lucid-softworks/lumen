@@ -27,13 +27,15 @@ impl Interp {
         obj.borrow_mut().exotic = Exotic::Array;
         {
             let mut b = obj.borrow_mut();
-            for v in items {
-                b.props.push_dense(Property::plain(v));
-            }
+            // Install metadata before elements: a missing named lookup on a large dense
+            // map would otherwise build a redundant string-key index.
             b.props.insert(
                 "length",
                 Property::data(Value::Num(len as f64), true, false, false),
             );
+            for v in items {
+                b.props.push_dense(Property::plain(v));
+            }
         }
         Value::Obj(obj)
     }
@@ -59,14 +61,14 @@ impl Interp {
             b.props.mark_array();
             b.props.reserve_dense_exact(len, numeric);
             b.exotic = Exotic::Array;
-            for k in 0..len {
-                b.props
-                    .push_dense(Property::plain(unsafe { items.add(k).read() }));
-            }
             b.props.insert(
                 "length",
                 Property::data(Value::Num(len as f64), true, false, false),
             );
+            for k in 0..len {
+                b.props
+                    .push_dense(Property::plain(unsafe { items.add(k).read() }));
+            }
         }
         Value::Obj(obj)
     }
@@ -89,6 +91,53 @@ mod tests {
     }
 
     #[test]
+    fn large_builtin_string_arrays_preserve_reflection_mutation_and_gc() {
+        for tier in [Tier::Interp, Tier::Bytecode, Tier::Jit] {
+            let mut engine = Engine::new();
+            engine.set_tier(tier);
+            engine.set_tier_threshold(0);
+            for len in [33, 65, 257, 4096] {
+                let array = engine.interp.make_array(
+                    (0..len)
+                        .map(|n| Value::from_string(n.to_string()))
+                        .collect(),
+                );
+                crate::value::set_data(&engine.interp.global, "a", array);
+                eval(
+                    &mut engine,
+                    &format!(
+                        r#"
+                    function assert(v){{if(!v)throw new Error('large builtin array');}}
+                    assert(Array.isArray(a)&&Object.getPrototypeOf(a)===Array.prototype);
+                    assert(a.length==={len});
+                    var keys=Object.keys(a), names=Object.getOwnPropertyNames(a);
+                    assert(keys.length==={len}&&names.length==={len}+1&&names[{len}]==='length');
+                    for(var j=0;j<{len};j++){{
+                        assert(keys[j]===String(j)&&a[j]===String(j));
+                        var p=Object.getOwnPropertyDescriptor(a,String(j));
+                        assert(p.value===String(j)&&p.writable&&p.enumerable&&p.configurable);
+                    }}
+                    var child={{value:7}};child.parent=a;a[1]=child;a.note=child;
+                    child=null;$262.gc();assert(a[1]===a.note&&a[1].parent===a);
+                    var gets=0;Object.defineProperty(a,'2',{{get:function(){{gets++;return a.note;}},configurable:true}});
+                    assert(a[2]===a.note&&gets===1);
+                    delete a[3];assert(!Object.prototype.hasOwnProperty.call(a,'3'));
+                    a[{len}+10000]='far';assert(a.length==={len}+10001);
+                    delete a[{len}+10000];a.length={len};
+                    a.push(a.note);assert(a[{len}]===a.note);
+                    Object.defineProperty(a,String({len}-1),{{configurable:false}});
+                    assert(!Reflect.set(a,'length',1)&&a.length==={len});
+                    assert(a[1]===a.note&&a[{len}]===undefined);
+                    Object.freeze(a);assert(!Reflect.set(a,'0','changed'));
+                    $262.gc();assert(a[1]===a.note&&a[2]===a.note);
+                "#
+                    ),
+                );
+            }
+        }
+    }
+
+    #[test]
     fn builtin_array_boundaries_preserve_reflection_growth_and_gc_edges() {
         for tier in [Tier::Interp, Tier::Bytecode, Tier::Jit] {
             let mut engine = Engine::new();
@@ -98,7 +147,7 @@ mod tests {
                 &mut engine,
                 "function assert(v){if(!v)throw new Error('builtin array');}",
             );
-            for len in [0, 1, 2, 10, 11, 32, 33] {
+            for len in [0, 1, 2, 10, 11, 32, 33, 128, 4096] {
                 super::COMPACT_ARRAYS.with(|n| n.set(0));
                 let value = engine
                     .interp
@@ -115,6 +164,7 @@ mod tests {
                         r#"
                     assert(Array.isArray(a)&&Object.getPrototypeOf(a)===Array.prototype);
                     assert(a.length==={len}&&Object.keys(a).length==={len});
+                    assert(Object.getOwnPropertyNames(a)[{len}]==='length');
                     var d=Object.getOwnPropertyDescriptor(a,'length');
                     assert(d.value==={len}&&d.writable&&!d.enumerable&&!d.configurable);
                     for(var j=0;j<{len};j++){{
@@ -124,7 +174,7 @@ mod tests {
                     var child={{value:7}};a.push(child);a.note=child;child=null;$262.gc();
                     assert(a[{len}]===a.note&&a.note.value===7);
                     while(a.length<40)a.push(a.note);
-                    assert(a[39]===a.note);
+                    assert(a[Math.max(39,{len})]===a.note);
                     delete a[0];assert(!Object.prototype.hasOwnProperty.call(a,'0'));
                     var gets=0;Object.defineProperty(a,'0',{{get:function(){{gets++;return a.note;}},configurable:true}});
                     assert(a[0]===a.note&&gets===1);

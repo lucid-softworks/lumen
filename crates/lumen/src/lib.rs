@@ -209,7 +209,7 @@ impl Engine {
     /// original source; the resulting AST is otherwise identical to a parsed one, so execution
     /// is byte-for-byte the same.
     pub fn eval_snapshot(&mut self, bytes: &[u8], strict: bool) -> Result<Completion, ParseError> {
-        let body = snapshot::decode(bytes).map_err(|message| ParseError {
+        let body = snapshot::decode_eager(bytes).map_err(|message| ParseError {
             message,
             line: 0,
             at_eof: false,

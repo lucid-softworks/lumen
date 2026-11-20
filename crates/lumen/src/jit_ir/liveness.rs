@@ -147,6 +147,7 @@ fn effect(op: &Op) -> (u128, u128) {
         | MakeRegExp(..)
         | MakeArray(_)
         | MakeObject(..)
+        | DefineLiteralData(_)
         | Throw
         | Return
         | ReturnUndef => (0, 0),

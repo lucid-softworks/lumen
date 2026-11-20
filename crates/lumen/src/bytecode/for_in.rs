@@ -1,5 +1,5 @@
-//! Compiled for-in with uncaptured lexical heads and shared oracle enumeration.
-use super::{Bail, CResult, Compiler, LoopCtx, Op};
+//! Compiled for-in with identifier heads and shared oracle enumeration.
+use super::{Bail, CResult, Compiler, Home, LoopCtx, Op};
 use crate::ast::{DeclKind, Expr, Stmt};
 use crate::interpreter::{Abrupt, Interp};
 use crate::value::Value;
@@ -7,13 +7,16 @@ use crate::value::Value;
 impl Compiler {
     pub(super) fn for_in_statement(
         &mut self,
-        kind: DeclKind,
+        kind: Option<DeclKind>,
         name: &str,
         right: &Expr,
         body: &Stmt,
     ) -> CResult {
         // Captured loop bindings require a fresh environment each iteration.
-        if self.env_names.contains_key(name) && !self.homed_lets.contains(name) {
+        if matches!(kind, Some(DeclKind::Let | DeclKind::Const))
+            && self.env_names.contains_key(name)
+            && !self.homed_lets.contains(name)
+        {
             return Err(Bail);
         }
         let labels = std::mem::take(&mut self.pending_labels);
@@ -25,16 +28,27 @@ impl Compiler {
 
     fn for_in_scope(
         &mut self,
-        kind: DeclKind,
+        kind: Option<DeclKind>,
         name: &str,
         right: &Expr,
         body: &Stmt,
         labels: Vec<String>,
     ) -> CResult {
-        let binding = self.fresh_slot(name);
-        self.scope_bind(name, binding, kind == DeclKind::Const);
-        self.tdz_slots.insert(binding);
-        self.emit(Op::Tdz(binding)); // Head binding shadows outer names while RHS evaluates.
+        let lexical = matches!(kind, Some(DeclKind::Let | DeclKind::Const));
+        let binding = if lexical {
+            let slot = self.fresh_slot(name);
+            self.scope_bind(name, slot, kind == Some(DeclKind::Const));
+            self.tdz_slots.insert(slot);
+            self.emit(Op::Tdz(slot)); // Head binding shadows outer names while RHS evaluates.
+            Some(Home::Slot(slot, false))
+        } else {
+            // A var head assigns its already-hoisted binding; a bare name resolves through
+            // the enclosing scopes. Neither introduces a loop-local shadow of that binding.
+            match self.home(name) {
+                Some(Home::Slot(_, true) | Home::Env(true)) => return Err(Bail),
+                home => home,
+            }
+        };
         self.expr(right)?;
         let base = self.fresh_slot("%for-in-base%");
         let keys = self.fresh_slot("%for-in-keys%");
@@ -49,7 +63,24 @@ impl Compiler {
         let head = self.ops.len();
         self.emit(Op::ForInStepL(base, keys, cursor));
         let exit = self.emit(Op::JumpIfFalse(0));
-        self.emit(Op::StoreLocal(binding));
+        match binding {
+            Some(Home::Slot(slot, _)) => {
+                if !lexical && self.tdz_slots.contains(&slot) {
+                    // Assignment must reject an uninitialized existing lexical binding.
+                    self.emit(Op::LoadLocal(slot));
+                    self.emit(Op::Pop);
+                }
+                self.emit(Op::StoreLocal(slot));
+            }
+            Some(Home::Env(_)) => {
+                let name = self.name_idx(name);
+                self.emit(Op::StoreCap(name));
+            }
+            None => {
+                let name = self.name_idx(name);
+                self.emit_store_name(name);
+            }
+        }
         self.loops.push(LoopCtx {
             labels,
             entry_try_depth: self.try_depth,
@@ -111,6 +142,27 @@ pub(super) fn step(
 mod tests {
     use crate::ast::Stmt;
     use crate::bytecode::{compile, Op};
+
+    #[test]
+    fn var_and_existing_identifier_heads_compile() {
+        for source in [
+            "function f(obj) { let s=''; for(var k in obj) s+=k; return s+k; }",
+            "function f(obj) { let k='', s=''; for(k in obj) s+=k; return s+k; }",
+            "function f(obj) { for(globalKey in obj) {} return globalKey; }",
+            "function f(obj) { let k=''; const get=()=>k; for(k in obj) {} return get(); }",
+        ] {
+            let body = crate::parser::parse_script(source, false)
+                .unwrap_or_else(|e| panic!("{}", e.message));
+            let Stmt::FuncDecl(f) = &body[0] else {
+                panic!("function expected")
+            };
+            let chunk = compile(f).unwrap_or_else(|| panic!("should compile: {source}"));
+            assert!(chunk
+                .jit_ops()
+                .iter()
+                .any(|op| matches!(op, Op::ForInStepL(..))));
+        }
+    }
 
     #[test]
     fn lexical_enumeration_compiles_without_iterator_protocol() {

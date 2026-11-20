@@ -310,37 +310,30 @@ impl Binding {
     }
 }
 
-thread_local! {
-    /// Every Scope created on this thread, weakly — the cycle collector's scope snapshot
-    /// (mirrors `value::GC_REGISTRY` for objects).
-    static SCOPE_REGISTRY: RefCell<Vec<std::rc::Weak<RefCell<Scope>>>> =
-        const { RefCell::new(Vec::new()) };
-}
-
 fn register_scope(e: &Env) {
-    SCOPE_REGISTRY.with(|r| r.borrow_mut().push(Rc::downgrade(e)));
+    crate::value::with_scope_registry(|r| r.borrow_mut().push(Rc::downgrade(e)));
 }
 
-/// Registered scope entries (live + not-yet-purged dead weaks) on this thread.
+/// Registered scope entries (live + not-yet-purged dead weaks) in the active heap.
 fn scope_registry_len() -> usize {
-    SCOPE_REGISTRY.with(|r| r.borrow().len())
+    crate::value::with_scope_registry(|r| r.borrow().len())
 }
 
 /// Purge dead weak entries, returning the live count. A dead `Weak` still pins its `RcBox`
 /// allocation, so an interpreter that churns through scopes without allocating many objects
 /// (which is what arms the main GC) must prune on scope volume too — see `gc_check`.
 fn scope_registry_prune() -> usize {
-    SCOPE_REGISTRY.with(|r| {
+    crate::value::with_scope_registry(|r| {
         let mut reg = r.borrow_mut();
         reg.retain(|w| w.strong_count() > 0);
         reg.len()
     })
 }
 
-/// The live scopes on this thread (purging dead weak entries as it goes).
+/// The live scopes in the active heap (purging dead weak entries as it goes).
 fn scope_snapshot_into(live: &mut Vec<Env>) {
     live.clear();
-    SCOPE_REGISTRY.with(|r| {
+    crate::value::with_scope_registry(|r| {
         let mut reg = r.borrow_mut();
         live.reserve(reg.len());
         reg.retain(|w| match w.upgrade() {
@@ -3160,8 +3153,8 @@ impl Interp {
         // Fill: prove the whole chain compatible with creating an own property. An inherited
         // writable data property is compatible too: OrdinarySet creates on the receiver in that
         // case. Accessors and non-writable data still reject. Each visited hop is marked as a
-        // live prototype so any later structural/descriptor change bumps the epoch; proto swaps
-        // and defineProperty bump it globally.
+        // live prototype so any later structural/descriptor change bumps the epoch; prototype
+        // swaps invalidate all proofs because they can change which objects are visited.
         let recv_shape = b.props.shape();
         let mut cur = b.proto.clone();
         {
@@ -6874,7 +6867,19 @@ impl Interp {
         // EvalDeclarationInstantiation conflict). For an ordinary async function this abrupt
         // completion rejects the returned promise rather than throwing synchronously; every other
         // kind of function (including async *generators*) throws synchronously.
-        let bind_result = self.bind_params(&func.params, args, &scope);
+        // The VM initializes parameters itself. Binding them here as well would evaluate default
+        // expressions twice (and give captured defaults a different object). Keep closures under
+        // `with` on the tree-walker, just as the synchronous compiled path does.
+        let async_chunk = if func.is_async && !func.is_generator && !scope.borrow().under_with {
+            self.async_vm_chunk(func)
+        } else {
+            None
+        };
+        let bind_result = if async_chunk.is_some() {
+            Ok(())
+        } else {
+            self.bind_params(&func.params, args, &scope)
+        };
 
         // With parameter expressions, the body runs in a fresh variable environment below the
         // parameter scope; a `var` sharing a parameter's name starts with that parameter's value.
@@ -6903,7 +6908,7 @@ impl Interp {
                 self.reject_promise(&promise, reason);
                 return Ok(promise);
             }
-            let r = self.run_async(func, &body, param_seed, args);
+            let r = self.run_async(func, &body, param_seed, args, async_chunk);
             self.strict = saved_strict;
             self.new_target = saved_new_target;
             self.in_field_init_code = saved_field_init;
@@ -6932,13 +6937,7 @@ impl Interp {
         }
 
         // Hoist `var`/function declarations into the function scope before executing the body.
-        // ("arguments" joins the blocked names: an Annex B block function of that name would
-        // clash with the arguments object, so it is not var-hoisted.)
-        let mut param_names = param_bound_names(&func.params);
-        if !func.is_arrow {
-            param_names.push("arguments".to_string());
-        }
-        self.hoist_fn_body(func, &body, &param_names);
+        self.hoist_fn_body(func, &body);
         if let Some(ps) = &param_seed {
             self.seed_param_vars(ps, &body);
         }
@@ -7047,11 +7046,7 @@ impl Interp {
             // (it can leak back to `true` across a `yield`/`await` resume) so a return here can't be
             // parked as a pending tail call that nothing runs. See the note in `run_async`.
             let saved_tco = std::mem::replace(&mut i.tco_ok, false);
-            let mut pn = param_bound_names(&func.params);
-            if !func.is_arrow {
-                pn.push("arguments".to_string());
-            }
-            i.hoist(&func.body, &scope, &pn);
+            i.hoist_fn_body(&func, &scope);
             if let Some(ps) = &param_seed {
                 i.seed_param_vars(ps, &scope);
             }
@@ -7108,23 +7103,16 @@ impl Interp {
         Ok(obj)
     }
 
-    /// Start an async function: spawn its coroutine, return a promise that settles when the body
-    /// finishes. Each `await` parks the coroutine; a microtask resumes it once the awaited value
-    /// settles.
-    /// The compiled chunk for an async function if it should run on the bytecode VM: the bytecode
-    /// tier is on and the body has been called past the tier threshold and fits the VM subset.
-    /// Mirrors the sync-call tiering in `call_inner`.
+    /// Compile async bodies on their first call when the bytecode tier is enabled. Unlike a
+    /// synchronous interpreted call, the async fallback needs an OS-thread coroutine and channel
+    /// handoffs at each await; even a one-shot body benefits from VM suspension. Unsupported bodies
+    /// cache the failed compilation and continue through the tree-walker fallback.
     fn async_vm_chunk(&self, func: &Rc<Function>) -> Option<Rc<crate::bytecode::Chunk>> {
         if matches!(self.tier, crate::bytecode::Tier::Interp) {
             return None;
         }
         if func.code.get().is_none() {
-            let n = func.calls.get().saturating_add(1);
-            func.calls.set(n);
-            // Loop-bearing bodies compile on first call, like the sync path.
-            if n > self.tier_threshold || func.scan_flags() & crate::ast::SCAN_HAS_LOOP != 0 {
-                let _ = func.code.set(crate::bytecode::compile(func));
-            }
+            let _ = func.code.set(crate::bytecode::compile(func));
         }
         match func.code2.get().or_else(|| func.code.get()) {
             Some(Some(chunk)) => Some(chunk.clone()),
@@ -7138,11 +7126,12 @@ impl Interp {
         scope: &Env,
         param_seed: Option<Env>,
         args: &[Value],
+        chunk: Option<Rc<crate::bytecode::Chunk>>,
     ) -> Result<Value, Abrupt> {
         // Fast path: an async body that compiles runs on the bytecode VM, suspending at each `await`
         // without an OS-thread coroutine (see `bytecode::VmCoro`). Params seed straight into slots
         // from `args`; the activation scope is only the root for free-name resolution.
-        let coro = if let Some(chunk) = self.async_vm_chunk(func) {
+        let coro = if let Some(chunk) = chunk {
             let this_val = if chunk.uses_this() {
                 self.get_var("this", scope)?
             } else {
@@ -7195,11 +7184,7 @@ impl Interp {
             // off before *each* statement rather than just once — a `return` reads `tco_ok` at its
             // very start, so this makes the body's own returns take the ordinary path.
             let saved_tco = std::mem::replace(&mut i.tco_ok, false);
-            let mut pn = param_bound_names(&func.params);
-            if !func.is_arrow {
-                pn.push("arguments".to_string());
-            }
-            i.hoist(&func.body, &scope, &pn);
+            i.hoist_fn_body(&func, &scope);
             if let Some(ps) = &param_seed {
                 i.seed_param_vars(ps, &scope);
             }
@@ -7419,15 +7404,11 @@ impl Interp {
 
     /// A `{ value, done }` iterator-result object.
     pub(crate) fn iter_result_obj(&mut self, value: Value, done: bool) -> Value {
-        let o = self.new_object();
-        {
-            let mut b = o.borrow_mut();
-            b.props
-                .insert("value", Property::data(value, true, true, true));
-            b.props
-                .insert("done", Property::data(Value::Bool(done), true, true, true));
-        }
-        Value::Obj(o)
+        Value::Obj(Object::new_with_parts(
+            Some(self.object_proto.clone()),
+            Props::iterator_result(value, done),
+            Exotic::None,
+        ))
     }
 
     fn make_async_gen_reaction(&mut self, key: usize, r: &Value, fulfil: bool) -> Value {
@@ -7968,26 +7949,29 @@ impl Interp {
 
     /// [`Self::hoist`] for a function body, with the hoisting plan cached on the [`Function`]
     /// (the body and parameter names never change, so the plan is computed once per function).
-    pub(crate) fn hoist_fn_body(
-        &mut self,
-        func: &Rc<Function>,
-        scope: &Env,
-        param_blocked: &[String],
-    ) {
+    pub(crate) fn hoist_fn_body(&mut self, func: &Rc<Function>, scope: &Env) {
         let strict = self.strict;
-        let cached = func.hoist.get_or_init(|| {
-            (
-                strict,
-                Rc::new(collect_hoist_ops(&func.body, strict, param_blocked)),
-            )
-        });
+        let make_plan = || {
+            // These names only affect sloppy Annex B promotion. Derive them once with the
+            // plan, not on every activation that replays it. "arguments" blocks promotion
+            // in ordinary functions, while arrows inherit their enclosing binding.
+            let mut blocked = Vec::new();
+            if !strict {
+                blocked = param_bound_names(&func.params);
+                if !func.is_arrow {
+                    blocked.push("arguments".to_string());
+                }
+            }
+            collect_hoist_ops(&func.body, strict, &blocked)
+        };
+        let cached = func.hoist.get_or_init(|| (strict, Rc::new(make_plan())));
         if cached.0 == strict {
             let ops = cached.1.clone();
             self.apply_hoist_ops(&ops, scope);
         } else {
             // Strictness differs from the cached computation (shouldn't happen — a function's
             // strictness is fixed at parse) — fall back to an uncached walk.
-            let ops = collect_hoist_ops(&func.body, strict, param_blocked);
+            let ops = make_plan();
             self.apply_hoist_ops(&ops, scope);
         }
     }
@@ -8182,7 +8166,7 @@ fn collect_hoist_stmt(stmt: &Stmt, out: &mut Vec<HoistOp>) {
             for s in block {
                 collect_hoist_stmt(s, out);
             }
-            if let Some((_, h)) = handler {
+            if let Some((_, h)) = handler.as_deref() {
                 for s in h {
                     collect_hoist_stmt(s, out);
                 }
@@ -8318,7 +8302,7 @@ fn collect_annexb_funcs(
                 }
                 blocked.truncate(blocked.len() - pushed);
             }
-            if let Some((param, h)) = handler {
+            if let Some((param, h)) = handler.as_deref() {
                 // A destructuring catch parameter blocks same-named function hoisting out of
                 // the handler; a simple `catch (f)` does not (the B.3.5 legacy var exemption).
                 let mut added = block_lexical_names(h);

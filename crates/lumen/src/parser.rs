@@ -2,7 +2,7 @@
 //! tree. Any failure is a [`ParseError`], which the engine reports as a SyntaxError (parse phase).
 
 use crate::ast::*;
-use crate::lexer::tokenize;
+use crate::lexer::tokenize_for_parser;
 use crate::token::{Tok, Token, TplPart, KEYWORDS};
 use std::rc::Rc;
 
@@ -29,13 +29,16 @@ pub fn parse_script_eval(
     allow_super: bool,
     private_names: &[String],
 ) -> Result<Vec<Stmt>, ParseError> {
-    let tokens = tokenize(src).map_err(|e| ParseError {
+    #[cfg(target_pointer_width = "64")]
+    let _allocation_scope = AllocationScope::for_source(src.len());
+    let (tokens, has_private_names) = tokenize_for_parser(src, true).map_err(|e| ParseError {
         message: e.message,
         line: e.line,
         at_eof: e.at_eof,
     })?;
     let mut p = Parser {
         toks: tokens,
+        has_private_names,
         pos: 0,
         source: SourceText::new(src),
         strict,
@@ -72,16 +75,18 @@ pub fn parse_script_eval(
     let strict_prologue = p.has_use_strict_prologue();
     p.strict = p.strict || strict_prologue;
     let body = p.parse_stmts_until_eof()?;
-    // A direct eval sees the private names visible where it was called.
-    let mut st: Vec<Vec<String>> = Vec::new();
-    if !private_names.is_empty() {
-        st.push(private_names.to_vec());
+    if p.has_private_names {
+        // A direct eval sees the private names visible where it was called.
+        let mut st = PrivateNames::default();
+        if !private_names.is_empty() {
+            st.scopes.push(private_names.to_vec());
+        }
+        pn_stmts(&body, &mut st).map_err(|message| ParseError {
+            at_eof: false,
+            message,
+            line: 0,
+        })?;
     }
-    pn_stmts(&body, &mut st).map_err(|message| ParseError {
-        at_eof: false,
-        message,
-        line: 0,
-    })?;
     // A super call is never valid in script/global code (only a derived constructor, or a direct
     // eval inside one, may contain it).
     if !allow_super {
@@ -99,13 +104,16 @@ pub fn parse_script_eval(
 /// Parse a module (always strict; `import`/`export` are allowed only here). Modules permit top-level
 /// `await`, so `await` is treated as a keyword at the module's top level.
 pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
-    let tokens = crate::lexer::tokenize_goal(src, false).map_err(|e| ParseError {
+    #[cfg(target_pointer_width = "64")]
+    let _allocation_scope = AllocationScope::for_source(src.len());
+    let (tokens, has_private_names) = tokenize_for_parser(src, false).map_err(|e| ParseError {
         at_eof: e.at_eof,
         message: e.message,
         line: e.line,
     })?;
     let mut p = Parser {
         toks: tokens,
+        has_private_names,
         pos: 0,
         source: SourceText::new(src),
         strict: true,
@@ -141,11 +149,13 @@ pub fn parse_module(src: &str) -> Result<Vec<Stmt>, ParseError> {
     };
     let body = p.parse_stmts_until_eof()?;
     validate_module(&body)?;
-    validate_private_names(&body).map_err(|message| ParseError {
-        at_eof: false,
-        message,
-        line: 0,
-    })?;
+    if p.has_private_names {
+        validate_private_names(&body).map_err(|message| ParseError {
+            at_eof: false,
+            message,
+            line: 0,
+        })?;
+    }
     Ok(body)
 }
 
@@ -238,32 +248,57 @@ fn validate_module(body: &[Stmt]) -> Result<(), ParseError> {
 
 /// A function body's top-level lexically-declared name may not also be a formal parameter.
 fn params_body_lexical_clash(params: &[Param], body: &[Stmt]) -> Option<String> {
-    let mut lexical = Vec::new();
-    let mut vars = Vec::new();
-    for stmt in body {
-        collect_top_decl(stmt, &mut lexical, &mut vars);
+    if params.is_empty() {
+        return None;
     }
-    // A body-top-level function declaration is var-scoped inside a *function body* (unlike module
-    // top level): it may legally share a parameter's name.
-    lexical.retain(|l| {
-        !body
-            .iter()
-            .any(|s| matches!(s, Stmt::FuncDecl(f) if f.name.as_deref() == Some(l.as_str())))
-    });
+    let mut lexical = Vec::new();
+    for stmt in body {
+        match stmt {
+            Stmt::VarDecl { kind, decls } if *kind != DeclKind::Var => {
+                for (pat, _) in decls {
+                    pattern_names(pat, &mut lexical);
+                }
+            }
+            Stmt::ClassDecl(class) => lexical.extend(class.name.clone()),
+            _ => {}
+        }
+    }
     if lexical.is_empty() {
         return None;
     }
     let pnames = param_names(params);
-    lexical.into_iter().find(|l| pnames.iter().any(|p| p == l))
+    if pnames.is_empty() {
+        return None;
+    }
+    // A body-top-level function declaration is var-scoped inside a *function body* (unlike module
+    // top level): it may legally share a parameter's name. Do not collect those function names
+    // only to search the body again for each one. Preserve the existing exclusion for a lexical
+    // candidate with a same-named function, but search only after finding a parameter conflict.
+    lexical.into_iter().find(|l| {
+        pnames.contains(l)
+            && !body
+                .iter()
+                .any(|s| matches!(s, Stmt::FuncDecl(f) if f.name.as_deref() == Some(l.as_str())))
+    })
 }
 
 fn first_duplicate(names: &[String]) -> Option<String> {
-    let mut seen = Vec::new();
-    for n in names {
-        if seen.contains(n) {
-            return Some(n.clone());
+    // Most modules bind only a few names. Avoid allocating for those, but don't let a large
+    // generated module compare every binding with every earlier one (quadratic in its size).
+    if names.len() <= 16 {
+        for (index, name) in names.iter().enumerate() {
+            if names[..index].contains(name) {
+                return Some(name.clone());
+            }
         }
-        seen.push(n.clone());
+    } else {
+        let mut seen =
+            crate::fasthash::FastSet::with_capacity_and_hasher(names.len(), Default::default());
+        for name in names {
+            if !seen.insert(name.as_str()) {
+                return Some(name.clone());
+            }
+        }
     }
     None
 }
@@ -308,38 +343,27 @@ fn collect_top_decl(stmt: &Stmt, lexical: &mut Vec<String>, vars: &mut Vec<Strin
 /// overflow the native stack on pathologically nested input (test262 has deeply-nested fixtures).
 const MAX_PARSE_DEPTH: u32 = 1200;
 
-/// Token offsets count Unicode scalar values. Preserve the original UTF-8 bytes so
-/// function source extraction can copy a slice instead of re-encoding every character.
-/// ASCII needs no offset table at all.
+/// Token offsets are UTF-8 byte offsets, so source text remains borrowed without an offset table.
 struct SourceText<'a> {
     text: &'a str,
-    char_offsets: Option<Vec<usize>>,
+    shared: std::cell::OnceCell<SharedSource>,
 }
-
 impl<'a> SourceText<'a> {
     fn new(text: &'a str) -> Self {
         Self {
             text,
-            char_offsets: (!text.is_ascii()).then(|| {
-                text.char_indices()
-                    .map(|(offset, _)| offset)
-                    .chain(std::iter::once(text.len()))
-                    .collect()
-            }),
+            shared: std::cell::OnceCell::new(),
         }
     }
-
     fn slice(&self, start: usize, end: usize) -> Option<&str> {
-        let (start, end) = match &self.char_offsets {
-            Some(offsets) => (*offsets.get(start)?, *offsets.get(end)?),
-            None => (start, end),
-        };
         self.text.get(start..end)
     }
 }
 
 struct Parser<'a> {
-    toks: Vec<Token>,
+    toks: Vec<Token<'a>>,
+    /// Includes private identifiers discovered while parsing template holes or re-lexed division.
+    has_private_names: bool,
     pos: usize,
     source: SourceText<'a>,
     strict: bool,
@@ -423,7 +447,7 @@ struct DeclScope {
     fn_boundary: bool,
 }
 
-impl Parser<'_> {
+impl<'a> Parser<'a> {
     fn cur_start(&self) -> u32 {
         self.toks.get(self.pos).map(|t| t.start).unwrap_or(0)
     }
@@ -434,14 +458,17 @@ impl Parser<'_> {
             self.toks[self.pos - 1].end
         }
     }
-    /// The source text between two char offsets (a function's `toString` view).
-    fn src_slice(&self, start: u32, end: u32) -> Option<Rc<str>> {
-        self.source
-            .slice(start as usize, end as usize)
-            .map(Rc::from)
+    /// The source text between two byte offsets (a function's `toString` view).
+    fn src_slice(&self, start: u32, end: u32) -> Option<FunctionSource> {
+        self.source.slice(start as usize, end as usize)?;
+        let shared = self
+            .source
+            .shared
+            .get_or_init(|| SharedSource::text(self.source.text.to_owned()));
+        Some(shared.validated_range(start as usize, end as usize))
     }
 
-    fn cur(&self) -> &Tok {
+    fn cur(&self) -> &Tok<'a> {
         &self.toks[self.pos].kind
     }
     fn line(&self) -> u32 {
@@ -457,7 +484,7 @@ impl Parser<'_> {
     fn at_eof(&self) -> bool {
         matches!(self.cur(), Tok::Eof)
     }
-    fn advance(&mut self) -> Tok {
+    fn advance(&mut self) -> Tok<'a> {
         // Parsing only moves forward; lookahead inspects unconsumed tokens. Move owned
         // identifier/string/template data into the AST instead of cloning it here.
         // Keep token offsets and flags intact for previous-token source bookkeeping.
@@ -500,7 +527,7 @@ impl Parser<'_> {
     }
     /// True for a contextual keyword (`let`, `of`, `async`, ...) carried as an `Ident`.
     fn is_ident_word(&self, w: &str) -> bool {
-        matches!(self.cur(), Tok::Ident(x) if x == w)
+        self.cur().ident() == Some(w)
     }
     fn eat_punct(&mut self, p: &str) -> bool {
         if self.is_punct(p) {
@@ -715,7 +742,7 @@ impl Parser<'_> {
         self.top_level = false;
         let in_case = std::mem::take(&mut self.in_case_clause);
         let single_stmt = std::mem::take(&mut self.single_stmt);
-        match self.cur().clone() {
+        match self.cur() {
             Tok::Punct("{") => {
                 self.advance();
                 let body = self.parse_block_body()?;
@@ -730,19 +757,18 @@ impl Parser<'_> {
             // In a single-statement (substatement) body only `let [` commits to a declaration —
             // ExpressionStatement's lookahead restriction is `let [` alone, so a bare `let` there
             // is an identifier reference (with ASI before a newline-separated binding name).
-            Tok::Ident(w)
-                if w == "let"
-                    && !self.cur_escaped()
-                    && self.starts_let_decl()
-                    && (!single_stmt || matches!(self.peek_kind(1), Tok::Punct("["))) =>
+            kind if kind.ident() == Some("let")
+                && !self.cur_escaped()
+                && self.starts_let_decl()
+                && (!single_stmt || matches!(self.peek_kind(1), Tok::Punct("["))) =>
             {
                 self.parse_var_decl(DeclKind::Let)
             }
-            Tok::Ident(w) if w == "using" && self.starts_using_decl() => {
+            kind if kind.ident() == Some("using") && self.starts_using_decl() => {
                 self.check_using_context(at_top, in_case)?;
                 self.parse_var_decl(DeclKind::Using)
             }
-            Tok::Ident(w) if w == "await" && self.in_async && self.starts_await_using() => {
+            kind if kind.ident() == Some("await") && self.in_async && self.starts_await_using() => {
                 self.check_using_context(at_top, in_case)?;
                 self.parse_var_decl(DeclKind::AwaitUsing)
             }
@@ -758,15 +784,14 @@ impl Parser<'_> {
                 Ok(Stmt::FuncDecl(Rc::new(f)))
             }
             // `async function f(){}` declaration (async is a contextual keyword).
-            Tok::Ident(w)
-                if w == "async"
-                    && !self.cur_escaped()
-                    && matches!(self.peek_kind(1), Tok::Keyword("function"))
-                    && !self
-                        .toks
-                        .get(self.pos + 1)
-                        .map(|t| t.nl_before)
-                        .unwrap_or(true) =>
+            kind if kind.ident() == Some("async")
+                && !self.cur_escaped()
+                && matches!(self.peek_kind(1), Tok::Keyword("function"))
+                && !self
+                    .toks
+                    .get(self.pos + 1)
+                    .map(|t| t.nl_before)
+                    .unwrap_or(true) =>
             {
                 let start = self.cur_start();
                 self.advance();
@@ -876,14 +901,17 @@ impl Parser<'_> {
             }
             // Labeled statement: `ident :` with the ident not being a known expression start that
             // would otherwise consume the colon.
-            Tok::Ident(name) if matches!(self.peek_kind(1), Tok::Punct(":")) => {
+            kind if kind.ident().is_some() && matches!(self.peek_kind(1), Tok::Punct(":")) => {
                 // Collect the whole label chain, so an Annex B labelled FunctionDeclaration is
                 // recognized through any number of labels.
-                let _ = &name;
                 let mut chain: Vec<String> = Vec::new();
                 loop {
                     let n = match self.cur() {
-                        Tok::Ident(n) if matches!(self.peek_kind(1), Tok::Punct(":")) => n.clone(),
+                        kind if kind.ident().is_some()
+                            && matches!(self.peek_kind(1), Tok::Punct(":")) =>
+                        {
+                            kind.ident().unwrap().to_owned()
+                        }
                         _ => break,
                     };
                     if let Err(e) = self.check_label_name(&n) {
@@ -942,7 +970,7 @@ impl Parser<'_> {
                 for label in chain.into_iter().rev() {
                     stmt = Stmt::Labeled {
                         label,
-                        body: Box::new(stmt),
+                        body: P::new(stmt),
                     };
                 }
                 Ok(stmt)
@@ -955,18 +983,18 @@ impl Parser<'_> {
         }
     }
 
-    fn peek_kind(&self, ahead: usize) -> Tok {
+    fn peek_kind(&self, ahead: usize) -> &Tok<'a> {
         self.toks
             .get(self.pos + ahead)
-            .map(|t| t.kind.clone())
-            .unwrap_or(Tok::Eof)
+            .map(|t| &t.kind)
+            .unwrap_or(&Tok::Eof)
     }
 
     /// After `let`, decide whether this is a `let` declaration (vs `let` used as an identifier).
     fn starts_let_decl(&self) -> bool {
         matches!(
             self.peek_kind(1),
-            Tok::Ident(_) | Tok::Punct("[") | Tok::Punct("{")
+            Tok::Ident(_) | Tok::OwnedIdent(_) | Tok::Punct("[") | Tok::Punct("{")
         )
     }
     /// Whether token `pos + ahead` is preceded by a line terminator.
@@ -979,12 +1007,12 @@ impl Parser<'_> {
     /// `using x` is a declaration when an identifier follows on the same line (no `[no LT]` break);
     /// otherwise `using` is just an identifier reference.
     fn starts_using_decl(&self) -> bool {
-        matches!(self.peek_kind(1), Tok::Ident(_)) && !self.nl_at(1)
+        matches!(self.peek_kind(1), Tok::Ident(_) | Tok::OwnedIdent(_)) && !self.nl_at(1)
     }
     /// `await using x` (async context only): `using` then a binding identifier, all on one line.
     fn starts_await_using(&self) -> bool {
-        matches!(self.peek_kind(1), Tok::Ident(w) if w == "using")
-            && matches!(self.peek_kind(2), Tok::Ident(_))
+        (self.peek_kind(1).ident() == Some("using"))
+            && matches!(self.peek_kind(2), Tok::Ident(_) | Tok::OwnedIdent(_))
             && !self.nl_at(1)
             && !self.nl_at(2)
     }
@@ -1077,8 +1105,9 @@ impl Parser<'_> {
     }
 
     fn parse_binding_ident_name(&mut self) -> Result<String, ParseError> {
-        match self.cur().clone() {
-            Tok::Ident(name) => {
+        match self.cur() {
+            kind @ (Tok::Ident(_) | Tok::OwnedIdent(_)) => {
+                let name = kind.ident().unwrap();
                 // A private name is never a binding identifier (`var #a` / `function f(#a)`).
                 if name.starts_with('#') {
                     return self.err("private names cannot be used as binding identifiers");
@@ -1096,8 +1125,8 @@ impl Parser<'_> {
                 {
                     return self.err(format!("'{name}' cannot be used as a binding here"));
                 }
-                self.advance();
-                Ok(name)
+                let name = self.advance().into_ident().expect("identifier token");
+                Ok(name.into_owned())
             }
             _ => self.err("expected binding identifier"),
         }
@@ -1192,9 +1221,9 @@ impl Parser<'_> {
         self.expect_punct("(")?;
         let test = self.parse_expr()?;
         self.expect_punct(")")?;
-        let cons = Box::new(self.parse_substatement(true)?);
+        let cons = P::new(self.parse_substatement(true)?);
         let alt = if self.eat_kw("else") {
-            Some(Box::new(self.parse_substatement(true)?))
+            Some(P::new(self.parse_substatement(true)?))
         } else {
             None
         };
@@ -1247,7 +1276,7 @@ impl Parser<'_> {
         self.expect_punct("(")?;
         let test = self.parse_expr()?;
         self.expect_punct(")")?;
-        let body = Box::new(self.parse_loop_body()?);
+        let body = P::new(self.parse_loop_body()?);
         Ok(Stmt::While { test, body })
     }
 
@@ -1259,13 +1288,13 @@ impl Parser<'_> {
         self.expect_punct("(")?;
         let obj = self.parse_expr()?;
         self.expect_punct(")")?;
-        let body = Box::new(self.parse_substatement(false)?);
+        let body = P::new(self.parse_substatement(false)?);
         Ok(Stmt::With { obj, body })
     }
 
     fn parse_do_while(&mut self) -> Result<Stmt, ParseError> {
         self.advance();
-        let body = Box::new(self.parse_loop_body()?);
+        let body = P::new(self.parse_loop_body()?);
         if !self.eat_kw("while") {
             return self.err("expected 'while' after do-body");
         }
@@ -1320,7 +1349,7 @@ impl Parser<'_> {
             Some(DeclKind::Let)
         } else if self.is_ident_word("using")
             && self.starts_using_decl()
-            && (!matches!(self.peek_kind(1), Tok::Ident(w) if w == "of")
+            && (!(self.peek_kind(1).ident() == Some("of"))
                 || matches!(self.peek_kind(2), Tok::Punct("=")))
         {
             // `for (using of = ...)` declares a resource named `of`; any other `for (using of`
@@ -1367,10 +1396,10 @@ impl Parser<'_> {
                     self.parse_expr_allow_in()?
                 };
                 self.expect_punct(")")?;
-                let body = Box::new(self.parse_loop_body()?);
+                let body = P::new(self.parse_loop_body()?);
                 return Ok(Stmt::ForInOf {
                     decl: Some(kind),
-                    left: first,
+                    left: P::new(first),
                     right,
                     of,
                     is_await,
@@ -1400,7 +1429,7 @@ impl Parser<'_> {
                 self.advance();
                 let right = self.parse_expr_allow_in()?;
                 self.expect_punct(")")?;
-                let body = Box::new(self.parse_loop_body()?);
+                let body = P::new(self.parse_loop_body()?);
                 let (pat, init) = decls.pop().unwrap();
                 return Ok(Stmt::Block(vec![
                     Stmt::VarDecl {
@@ -1409,7 +1438,7 @@ impl Parser<'_> {
                     },
                     Stmt::ForInOf {
                         decl: Some(DeclKind::Var),
-                        left: pat,
+                        left: P::new(pat),
                         right,
                         of: false,
                         is_await,
@@ -1457,7 +1486,7 @@ impl Parser<'_> {
                     }
                 }
             }
-            return self.finish_c_for(Some(Box::new(ForInit::VarDecl { kind, decls })));
+            return self.finish_c_for(Some(P::new(ForInit::VarDecl { kind, decls })));
         }
 
         // No declaration: either empty init or an expression init.
@@ -1467,8 +1496,7 @@ impl Parser<'_> {
         let proto_mark = self.proto_dups.len();
         // A head starting with the unescaped, unparenthesized token `async` can't be a plain
         // for-of LHS (ambiguity with an async arrow head); note it before parsing.
-        let bare_async_head =
-            matches!(self.cur(), Tok::Ident(w) if *w == "async") && !self.cur_escaped();
+        let bare_async_head = (self.cur().ident() == Some("async")) && !self.cur_escaped();
         let init_expr = self.parse_expr_no_in()?;
         if self.is_kw("in") || (self.is_ident_word("of") && !self.cur_escaped()) {
             let of = self.is_ident_word("of") && !self.cur_escaped();
@@ -1479,7 +1507,7 @@ impl Parser<'_> {
                 self.parse_expr_allow_in()?
             };
             self.expect_punct(")")?;
-            let body = Box::new(self.parse_loop_body()?);
+            let body = P::new(self.parse_loop_body()?);
             // `for (async of ...)` is ambiguous with an async arrow head: a bare, unescaped
             // `async` LHS in a plain for-of is a SyntaxError (parenthesize or escape it;
             // for-await has no ambiguity).
@@ -1509,13 +1537,13 @@ impl Parser<'_> {
                     // Reinterpreted as a pattern: forgive deferred literal-only errors
                     // (duplicate __proto__, CoverInitializedName).
                     self.proto_dups.truncate(proto_mark);
-                    Pattern::Member(Box::new(init_expr.clone()))
+                    Pattern::Member(P::new(init_expr.clone()))
                 }
                 _ => match expr_to_pattern(&init_expr) {
                     Some(p) => p,
                     // Annex B: a sloppy CallExpression head parses; assignment throws at runtime.
                     None if !self.strict && matches!(init_expr, Expr::Call { .. }) => {
-                        Pattern::Member(Box::new(init_expr.clone()))
+                        Pattern::Member(P::new(init_expr.clone()))
                     }
                     None => {
                         return Err(ParseError {
@@ -1531,7 +1559,7 @@ impl Parser<'_> {
             }
             return Ok(Stmt::ForInOf {
                 decl: None,
-                left,
+                left: P::new(left),
                 right,
                 of,
                 is_await,
@@ -1539,10 +1567,10 @@ impl Parser<'_> {
             });
         }
         self.expect_punct(";")?;
-        self.finish_c_for(Some(Box::new(ForInit::Expr(init_expr))))
+        self.finish_c_for(Some(P::new(ForInit::Expr(init_expr))))
     }
 
-    fn finish_c_for(&mut self, init: Option<Box<ForInit>>) -> Result<Stmt, ParseError> {
+    fn finish_c_for(&mut self, init: Option<P<ForInit>>) -> Result<Stmt, ParseError> {
         let test = if self.is_punct(";") {
             None
         } else {
@@ -1555,11 +1583,11 @@ impl Parser<'_> {
             Some(self.parse_expr()?)
         };
         self.expect_punct(")")?;
-        let body = Box::new(self.parse_loop_body()?);
+        let body = P::new(self.parse_loop_body()?);
         Ok(Stmt::For {
             init,
-            test,
-            update,
+            test: test.map(P::new),
+            update: update.map(P::new),
             body,
         })
     }
@@ -1573,7 +1601,7 @@ impl Parser<'_> {
                     return self.err("module export name must be well-formed Unicode");
                 }
                 self.advance();
-                Ok(s)
+                Ok(s.to_string())
             }
             _ => self.parse_property_name_ident(),
         }
@@ -1623,7 +1651,7 @@ impl Parser<'_> {
             let key = match self.cur().clone() {
                 Tok::Str(s) => {
                     self.advance();
-                    s
+                    s.to_string()
                 }
                 _ => self.parse_property_name_ident()?,
             };
@@ -1635,7 +1663,7 @@ impl Parser<'_> {
             match self.cur().clone() {
                 Tok::Str(v) => {
                     if key == "type" {
-                        attr_type = Some(v.clone());
+                        attr_type = Some(v.to_string());
                     }
                     self.advance();
                 }
@@ -1683,8 +1711,8 @@ impl Parser<'_> {
         // instead a *default* import named `source` (lookahead: `from` + a specifier string).
         if self.is_ident_word("source")
             && !self.cur_escaped()
-            && matches!(self.peek_kind(1), Tok::Ident(_))
-            && !(matches!(self.peek_kind(1), Tok::Ident(w) if w == "from")
+            && matches!(self.peek_kind(1), Tok::Ident(_) | Tok::OwnedIdent(_))
+            && !((self.peek_kind(1).ident() == Some("from"))
                 && matches!(self.peek_kind(2), Tok::Str(_)))
         {
             self.advance(); // source
@@ -1717,7 +1745,7 @@ impl Parser<'_> {
             }));
         }
         // Default binding.
-        if matches!(self.cur(), Tok::Ident(_)) {
+        if matches!(self.cur(), Tok::Ident(_) | Tok::OwnedIdent(_)) {
             specs.push(ImportSpec::Default(self.parse_binding_ident_name()?));
             if !self.eat_punct(",") {
                 need_from = true;
@@ -1790,7 +1818,7 @@ impl Parser<'_> {
                 self.consume_semicolon()?;
                 Stmt::Expr(e)
             };
-            return Ok(Stmt::ExportDefault(Box::new(stmt)));
+            return Ok(Stmt::ExportDefault(P::new(stmt)));
         }
         // export * [as ns] from "spec"
         if self.eat_punct("*") {
@@ -1858,7 +1886,7 @@ impl Parser<'_> {
         }
         // export const/let/var/function/class …
         let decl = self.parse_stmt()?;
-        Ok(Stmt::ExportDecl(Box::new(decl)))
+        Ok(Stmt::ExportDecl(P::new(decl)))
     }
 
     fn parse_try(&mut self) -> Result<Stmt, ParseError> {
@@ -1895,7 +1923,7 @@ impl Parser<'_> {
                         .err_semantic(format!("Identifier '{name}' has already been declared"));
                 }
             }
-            Some((param, body))
+            Some(P::new((param, body)))
         } else {
             None
         };
@@ -1998,15 +2026,16 @@ impl Parser<'_> {
     /// If the current token is a regex literal, re-lex its text as `/`-division followed by the
     /// pattern/flags source (used after `yield`/`await` in identifier position — see caller).
     fn split_regex_as_division(&mut self) {
-        let Tok::Regex { body, flags } = self.cur().clone() else {
+        let Tok::Regex(regex) = self.cur() else {
             return;
         };
         let tok = &self.toks[self.pos];
         let (line, start, end) = (tok.line, tok.start, tok.end);
-        let rest = format!("{body}/{flags}");
-        let Ok(mut relexed) = crate::lexer::tokenize(&rest) else {
+        let rest = format!("{}/{}", regex.body, regex.flags);
+        let Ok((mut relexed, has_private_names)) = tokenize_for_parser(&rest, true) else {
             return;
         };
+        self.has_private_names |= has_private_names;
         // Drop the sub-lex's EOF token — splicing it mid-stream would truncate the program.
         relexed.retain(|t| !matches!(t.kind, Tok::Eof));
         for t in &mut relexed {
@@ -2025,7 +2054,7 @@ impl Parser<'_> {
             escaped: false,
             lone_surrogate: false,
         }];
-        spliced.extend(relexed);
+        spliced.extend(relexed.into_iter().map(Token::into_owned));
         self.toks.splice(self.pos..self.pos + 1, spliced);
     }
 
@@ -2033,9 +2062,9 @@ impl Parser<'_> {
         if self.nl_before() {
             return None;
         }
-        if let Tok::Ident(name) = self.cur().clone() {
+        if let Some(name) = self.cur().clone().into_ident() {
             self.advance();
-            Some(name)
+            Some(name.into_owned())
         } else {
             None
         }
@@ -2114,11 +2143,11 @@ impl Parser<'_> {
         let left_paren = self.last_paren;
         if let Tok::Punct(op) = self.cur() {
             let op = *op;
-            if is_assign_op(op) {
+            if let Some(operator) = assignment_op(op) {
                 // `undefined` is an ordinary identifier as an assignment target: the write fails
                 // at runtime (strict TypeError on the non-writable global), not at parse.
                 if matches!(left, Expr::Undefined) {
-                    left = Expr::Ident("undefined".to_string());
+                    left = Expr::Ident("undefined".into());
                 }
                 self.advance();
                 let mut value = self.parse_assign()?;
@@ -2172,9 +2201,9 @@ impl Parser<'_> {
                     }
                 }
                 return Ok(Expr::Assign {
-                    op,
-                    target: Box::new(left),
-                    value: Box::new(value),
+                    op: operator,
+                    target: P::new(left),
+                    value: P::new(value),
                 });
             }
         }
@@ -2197,7 +2226,7 @@ impl Parser<'_> {
         let arg = if no_arg {
             None
         } else {
-            Some(Box::new(self.parse_assign()?))
+            Some(P::new(self.parse_assign()?))
         };
         Ok(Expr::Yield { delegate, arg })
     }
@@ -2211,9 +2240,9 @@ impl Parser<'_> {
             self.expect_punct(":")?;
             let alt = self.parse_assign()?;
             Ok(Expr::Cond {
-                test: Box::new(test),
-                cons: Box::new(cons),
-                alt: Box::new(alt),
+                test: P::new(test),
+                cons: P::new(cons),
+                alt: P::new(alt),
             })
         } else {
             Ok(test)
@@ -2228,12 +2257,12 @@ impl Parser<'_> {
                 break;
             }
             // ShortCircuitExpression: `??` cannot mix with `&&`/`||` without parentheses.
-            if op == "??"
+            if *op == "??"
                 && !left_paren
                 && matches!(
                     &left,
                     Expr::Logical {
-                        op: "&&" | "||",
+                        op: &"&&" | &"||",
                         ..
                     }
                 )
@@ -2243,12 +2272,12 @@ impl Parser<'_> {
             self.advance();
             let next_min = if right_assoc { prec } else { prec + 1 };
             let right = self.parse_binary(next_min)?;
-            if op == "??"
+            if *op == "??"
                 && !self.last_paren
                 && matches!(
                     &right,
                     Expr::Logical {
-                        op: "&&" | "||",
+                        op: &"&&" | &"||",
                         ..
                     }
                 )
@@ -2260,10 +2289,10 @@ impl Parser<'_> {
             left = if logical {
                 Expr::Logical {
                     op,
-                    left: Box::new(left),
-                    right: Box::new(right),
+                    left: P::new(left),
+                    right: P::new(right),
                 }
-            } else if op == "in" {
+            } else if *op == "in" {
                 // `#field in obj` is the ergonomic brand check, not a normal `in`; the RHS
                 // itself may not be a bare private name (`#f in #f in x` is a SyntaxError).
                 if matches!(&right, Expr::Ident(r) if r.starts_with('#')) {
@@ -2272,22 +2301,22 @@ impl Parser<'_> {
                 if let Expr::Ident(n) = &left {
                     if n.starts_with('#') {
                         left = Expr::PrivateIn {
-                            name: n.clone(),
-                            obj: Box::new(right),
+                            name: n.as_str().into(),
+                            obj: P::new(right),
                         };
                         continue;
                     }
                 }
                 Expr::Binary {
                     op,
-                    left: Box::new(left),
-                    right: Box::new(right),
+                    left: P::new(left),
+                    right: P::new(right),
                 }
             } else {
                 Expr::Binary {
                     op,
-                    left: Box::new(left),
-                    right: Box::new(right),
+                    left: P::new(left),
+                    right: P::new(right),
                 }
             };
         }
@@ -2295,7 +2324,7 @@ impl Parser<'_> {
     }
 
     /// Returns (operator, precedence, right-associative, is-logical) for the current token.
-    fn binary_op(&self) -> Option<(&'static str, u8, bool, bool)> {
+    fn binary_op(&self) -> Option<(Operator, u8, bool, bool)> {
         let op = match self.cur() {
             Tok::Punct(p) => *p,
             Tok::Keyword("instanceof") => "instanceof",
@@ -2304,22 +2333,35 @@ impl Parser<'_> {
             Tok::Keyword("in") => "in",
             _ => return None,
         };
-        let (prec, right, logical) = match op {
-            "??" => (1, false, true),
-            "||" => (2, false, true),
-            "&&" => (3, false, true),
-            "|" => (4, false, false),
-            "^" => (5, false, false),
-            "&" => (6, false, false),
-            "==" | "!=" | "===" | "!==" => (7, false, false),
-            "<" | ">" | "<=" | ">=" | "instanceof" | "in" => (8, false, false),
-            "<<" | ">>" | ">>>" => (9, false, false),
-            "+" | "-" => (10, false, false),
-            "*" | "/" | "%" => (11, false, false),
-            "**" => (12, true, false),
+        let (operator, prec, right, logical) = match op {
+            "??" => (&"??", 1, false, true),
+            "||" => (&"||", 2, false, true),
+            "&&" => (&"&&", 3, false, true),
+            "|" => (&"|", 4, false, false),
+            "^" => (&"^", 5, false, false),
+            "&" => (&"&", 6, false, false),
+            "==" => (&"==", 7, false, false),
+            "!=" => (&"!=", 7, false, false),
+            "===" => (&"===", 7, false, false),
+            "!==" => (&"!==", 7, false, false),
+            "<" => (&"<", 8, false, false),
+            ">" => (&">", 8, false, false),
+            "<=" => (&"<=", 8, false, false),
+            ">=" => (&">=", 8, false, false),
+            "instanceof" => (&"instanceof", 8, false, false),
+            "in" => (&"in", 8, false, false),
+            "<<" => (&"<<", 9, false, false),
+            ">>" => (&">>", 9, false, false),
+            ">>>" => (&">>>", 9, false, false),
+            "+" => (&"+", 10, false, false),
+            "-" => (&"-", 10, false, false),
+            "*" => (&"*", 11, false, false),
+            "/" => (&"/", 11, false, false),
+            "%" => (&"%", 11, false, false),
+            "**" => (&"**", 12, true, false),
             _ => return None,
         };
-        Some((op, prec, right, logical))
+        Some((operator, prec, right, logical))
     }
 
     /// Depth-guarded entry point. Every expression flows through `parse_unary` (each operand of a
@@ -2356,11 +2398,16 @@ impl Parser<'_> {
                 return self
                     .err("an await expression cannot be the base of '**' (use parentheses)");
             }
-            return Ok(Expr::Await(Box::new(arg)));
+            return Ok(Expr::Await(P::new(arg)));
         }
         let op = match self.cur() {
-            Tok::Punct(p @ ("+" | "-" | "!" | "~")) => Some(*p),
-            Tok::Keyword(k @ ("typeof" | "void" | "delete")) => Some(*k),
+            Tok::Punct("+") => Some(&"+"),
+            Tok::Punct("-") => Some(&"-"),
+            Tok::Punct("!") => Some(&"!"),
+            Tok::Punct("~") => Some(&"~"),
+            Tok::Keyword("typeof") => Some(&"typeof"),
+            Tok::Keyword("void") => Some(&"void"),
+            Tok::Keyword("delete") => Some(&"delete"),
             _ => None,
         };
         if let Some(op) = op {
@@ -2368,15 +2415,15 @@ impl Parser<'_> {
             let mut arg = self.parse_unary()?;
             // `undefined` is an ordinary identifier reference as a delete operand (the global
             // property is non-configurable, so the delete evaluates to false).
-            if op == "delete" && matches!(arg, Expr::Undefined) {
-                arg = Expr::Ident("undefined".to_string());
+            if *op == "delete" && matches!(arg, Expr::Undefined) {
+                arg = Expr::Ident("undefined".into());
             }
             // Deleting a bare variable reference is a SyntaxError in strict mode.
-            if op == "delete" && self.strict && matches!(arg, Expr::Ident(_)) {
+            if *op == "delete" && self.strict && matches!(arg, Expr::Ident(_)) {
                 return self.err("delete of an unqualified identifier in strict mode");
             }
             // Deleting a private member (`delete obj.#x`) is always a SyntaxError.
-            if op == "delete" && deletes_private_member(&arg) {
+            if *op == "delete" && deletes_private_member(&arg) {
                 return self.err("private fields cannot be deleted");
             }
             // A UnaryExpression cannot be an exponentiation base: `-x ** 2` is a SyntaxError.
@@ -2385,19 +2432,19 @@ impl Parser<'_> {
             }
             return Ok(Expr::Unary {
                 op,
-                arg: Box::new(arg),
+                arg: P::new(arg),
             });
         }
         // Prefix ++/--
         if self.is_punct("++") || self.is_punct("--") {
-            let op = if self.is_punct("++") { "++" } else { "--" };
+            let op = if self.is_punct("++") { &"++" } else { &"--" };
             self.advance();
             let arg = self.parse_unary()?;
             self.check_strict_update_target(&arg)?;
             return Ok(Expr::Update {
                 op,
                 prefix: true,
-                arg: Box::new(arg),
+                arg: P::new(arg),
             });
         }
         self.parse_postfix()
@@ -2423,13 +2470,13 @@ impl Parser<'_> {
     fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
         let expr = self.parse_lhs()?;
         if !self.nl_before() && (self.is_punct("++") || self.is_punct("--")) {
-            let op = if self.is_punct("++") { "++" } else { "--" };
+            let op = if self.is_punct("++") { &"++" } else { &"--" };
             self.advance();
             self.check_strict_update_target(&expr)?;
             return Ok(Expr::Update {
                 op,
                 prefix: false,
-                arg: Box::new(expr),
+                arg: P::new(expr),
             });
         }
         Ok(expr)
@@ -2442,8 +2489,8 @@ impl Parser<'_> {
             if self.is_punct("(") {
                 let args = self.parse_args()?;
                 expr = Expr::Call {
-                    callee: Box::new(expr),
-                    args,
+                    callee: P::new(expr),
+                    args: args.into_boxed_slice(),
                     optional: false,
                 };
             } else if self.eat_punct(".") {
@@ -2453,47 +2500,49 @@ impl Parser<'_> {
                     return self.err("cannot access a private member through 'super'");
                 }
                 expr = Expr::Member {
-                    obj: Box::new(expr),
-                    prop: name,
+                    obj: P::new(expr),
+                    prop: name.into_boxed_str(),
                     optional: false,
                 };
             } else if self.eat_punct("[") {
                 let index = self.parse_expr_allow_in()?;
                 self.expect_punct("]")?;
                 expr = Expr::Index {
-                    obj: Box::new(expr),
-                    index: Box::new(index),
+                    obj: P::new(expr),
+                    index: P::new(index),
                     optional: false,
                 };
-            } else if let Tok::Template(parts) = self.cur().clone() {
+            } else if matches!(self.cur(), Tok::Template(_)) {
                 if had_optional {
                     return self.err("tagged template cannot appear in an optional chain");
                 }
                 // A template immediately after an expression is a tagged template.
-                self.advance();
-                expr = self.build_tagged_template(expr, parts)?;
+                let Tok::Template(parts) = self.advance() else {
+                    unreachable!()
+                };
+                expr = self.build_tagged_template(expr, parts.into_vec())?;
             } else if self.eat_punct("?.") {
                 had_optional = true;
                 if self.is_punct("(") {
                     let args = self.parse_args()?;
                     expr = Expr::Call {
-                        callee: Box::new(expr),
-                        args,
+                        callee: P::new(expr),
+                        args: args.into_boxed_slice(),
                         optional: true,
                     };
                 } else if self.eat_punct("[") {
                     let index = self.parse_expr_allow_in()?;
                     self.expect_punct("]")?;
                     expr = Expr::Index {
-                        obj: Box::new(expr),
-                        index: Box::new(index),
+                        obj: P::new(expr),
+                        index: P::new(index),
                         optional: true,
                     };
                 } else {
                     let name = self.parse_property_name_ident()?;
                     expr = Expr::Member {
-                        obj: Box::new(expr),
-                        prop: name,
+                        obj: P::new(expr),
+                        prop: name.into_boxed_str(),
                         optional: true,
                     };
                 }
@@ -2503,7 +2552,7 @@ impl Parser<'_> {
         }
         // Wrap a chain that used `?.` so the whole thing short-circuits to undefined on a nullish link.
         if had_optional {
-            expr = Expr::OptionalChain(Box::new(expr));
+            expr = Expr::OptionalChain(P::new(expr));
         }
         Ok(expr)
     }
@@ -2558,8 +2607,8 @@ impl Parser<'_> {
                     return self.err("an optional chain cannot follow 'new' without arguments");
                 }
                 Expr::New {
-                    callee: Box::new(callee),
-                    args,
+                    callee: P::new(callee),
+                    args: args.into_boxed_slice(),
                 }
             }
         } else {
@@ -2573,21 +2622,23 @@ impl Parser<'_> {
                     return self.err("cannot access a private member through 'super'");
                 }
                 base = Expr::Member {
-                    obj: Box::new(base),
-                    prop: name,
+                    obj: P::new(base),
+                    prop: name.into_boxed_str(),
                     optional: false,
                 };
-            } else if let Tok::Template(parts) = self.cur().clone() {
+            } else if matches!(self.cur(), Tok::Template(_)) {
                 // A tagged template is itself a MemberExpression: `new tag\`t\`` invokes the
                 // tag and constructs its result.
-                self.advance();
-                base = self.build_tagged_template(base, parts)?;
+                let Tok::Template(parts) = self.advance() else {
+                    unreachable!()
+                };
+                base = self.build_tagged_template(base, parts.into_vec())?;
             } else if self.eat_punct("[") {
                 let index = self.parse_expr_allow_in()?;
                 self.expect_punct("]")?;
                 base = Expr::Index {
-                    obj: Box::new(base),
-                    index: Box::new(index),
+                    obj: P::new(base),
+                    index: P::new(index),
                     optional: false,
                 };
             } else {
@@ -2619,12 +2670,13 @@ impl Parser<'_> {
 
     /// A property name after `.`: any identifier or keyword is allowed (`x.if` is legal).
     fn parse_property_name_ident(&mut self) -> Result<String, ParseError> {
-        match self.cur().clone() {
-            Tok::Ident(name) => {
-                self.advance();
-                Ok(name)
+        match self.cur() {
+            Tok::Ident(_) | Tok::OwnedIdent(_) => {
+                let name = self.advance().into_ident().expect("identifier token");
+                Ok(name.into_owned())
             }
             Tok::Keyword(k) => {
+                let k = *k;
                 self.advance();
                 Ok(k.to_string())
             }
@@ -2638,39 +2690,50 @@ impl Parser<'_> {
         if self.strict && self.toks[self.pos].legacy_octal {
             return self.err("legacy octal literals are not allowed in strict mode");
         }
-        match self.cur().clone() {
-            Tok::Ident(n) if n == "arguments" && self.no_arguments_refs => {
+        match self.cur() {
+            kind if kind.ident() == Some("arguments") && self.no_arguments_refs => {
                 self.err("'arguments' is not allowed in a class static block")
             }
             Tok::Num(n) => {
+                let n = *n;
                 self.advance();
                 Ok(Expr::Num(n))
             }
-            Tok::BigInt(n) => {
-                self.advance();
+            Tok::BigInt(_) => {
+                let Tok::BigInt(n) = self.advance() else {
+                    unreachable!()
+                };
                 Ok(Expr::BigInt(n))
             }
-            Tok::Str(s) => {
-                self.advance();
-                Ok(Expr::Str(Rc::from(s.as_str())))
+            Tok::Str(_) => {
+                let Tok::Str(s) = self.advance() else {
+                    unreachable!()
+                };
+                Ok(Expr::Str(s))
             }
-            Tok::Template(parts) => {
-                self.advance();
-                self.build_template(parts)
+            Tok::Template(_) => {
+                let Tok::Template(parts) = self.advance() else {
+                    unreachable!()
+                };
+                self.build_template(parts.into_vec())
             }
-            Tok::Regex { body, flags } => {
-                self.advance();
+            Tok::Regex(_) => {
+                let Tok::Regex(regex) = self.advance() else {
+                    unreachable!()
+                };
+                let crate::token::RegexToken { body, flags } = *regex;
                 // A regex literal is validated when parsed: an invalid pattern/flags is an early
                 // (parse-phase) SyntaxError, not a runtime one.
-                if let Err(msg) = crate::regex::Regex::new(&body, &flags) {
+                if let Err(msg) = crate::regex::Regex::validate(&body, &flags) {
                     return self.err(msg);
                 }
                 Ok(Expr::Regex {
-                    body: Rc::from(body.as_str()),
-                    flags: Rc::from(flags.as_str()),
+                    body: body.into(),
+                    flags: flags.into(),
                 })
             }
             Tok::Keyword(k @ ("true" | "false" | "null")) => {
+                let k = *k;
                 // A keyword spelled with `\u` escapes is never the keyword (nor a usable
                 // identifier, since the name is reserved).
                 if self.cur_escaped() {
@@ -2726,9 +2789,9 @@ impl Parser<'_> {
                 self.advance();
                 if self.eat_punct(".") {
                     let phase = match self.cur() {
-                        Tok::Ident(w) if w == "source" => ImportPhase::Source,
-                        Tok::Ident(w) if w == "defer" => ImportPhase::Defer,
-                        Tok::Ident(w) if w == "meta" => {
+                        kind if kind.ident() == Some("source") => ImportPhase::Source,
+                        kind if kind.ident() == Some("defer") => ImportPhase::Defer,
+                        kind if kind.ident() == Some("meta") => {
                             if self.cur_escaped() {
                                 return self.err("'import.meta' must not contain escape sequences");
                             }
@@ -2746,21 +2809,20 @@ impl Parser<'_> {
                     self.advance(); // 'source' / 'defer'
                     let (spec, options) = self.parse_import_call_args()?;
                     Ok(Expr::ImportCall {
-                        spec: Box::new(spec),
+                        spec: P::new(spec),
                         phase,
-                        options: options.map(Box::new),
+                        options: options.map(P::new),
                     })
                 } else {
                     let (spec, options) = self.parse_import_call_args()?;
                     Ok(Expr::ImportCall {
-                        spec: Box::new(spec),
+                        spec: P::new(spec),
                         phase: ImportPhase::Evaluation,
-                        options: options.map(Box::new),
+                        options: options.map(P::new),
                     })
                 }
             }
-            Tok::Ident(name)
-                if name == "async"
+            kind if kind.ident() == Some("async")
                     && !self.cur_escaped()
                     && matches!(self.peek_kind(1), Tok::Keyword("function"))
                     // No line terminator is allowed between `async` and `function`.
@@ -2775,8 +2837,8 @@ impl Parser<'_> {
                 let f = self.parse_function(true, true, start)?;
                 Ok(Expr::Func(Rc::new(f)))
             }
-            Tok::Ident(name) => {
-                self.advance();
+            Tok::Ident(_) | Tok::OwnedIdent(_) => {
+                let name = self.advance().into_ident().expect("identifier token");
                 // A strict-mode future-reserved word (yield, let, static, implements, …) cannot be
                 // used as an identifier reference — but eval/arguments are only restricted as
                 // assignment/binding targets, so they remain valid references.
@@ -2794,12 +2856,12 @@ impl Parser<'_> {
                 // The lexer assumes a `/` after `yield`/`await` starts a regex (they are usually
                 // keywords). When they are plain identifiers, that `/` is division: split the
                 // mis-lexed regex token back into `/` + re-lexed remainder.
-                if matches!(name.as_str(), "yield" | "await") {
+                if matches!(name.as_ref(), "yield" | "await") {
                     self.split_regex_as_division();
                 }
-                match name.as_str() {
+                match name.as_ref() {
                     "undefined" => Ok(Expr::Undefined),
-                    _ => Ok(Expr::Ident(name)),
+                    _ => Ok(Expr::Ident(name.into())),
                 }
             }
             Tok::Punct("(") => {
@@ -2839,22 +2901,22 @@ impl Parser<'_> {
         for part in parts {
             let piece = match part {
                 TplPart::Str { cooked, .. } => match cooked {
-                    Some(c) => Expr::Str(Rc::from(c.as_str())),
+                    Some(c) => Expr::Str(c.into()),
                     // An invalid escape is only legal in a *tagged* template.
                     None => {
                         return self.err("invalid escape sequence in template literal");
                     }
                 },
                 TplPart::Sub(src) => {
-                    let tokens = crate::lexer::tokenize_goal(&src, !self.module).map_err(|e| {
-                        ParseError {
+                    let (tokens, has_private_names) = tokenize_for_parser(&src, !self.module)
+                        .map_err(|e| ParseError {
                             at_eof: false,
                             message: e.message,
                             line: e.line,
-                        }
-                    })?;
+                        })?;
                     let mut sub = Parser {
                         toks: tokens,
+                        has_private_names,
                         pos: 0,
                         source: SourceText::new(&src),
                         strict: self.strict,
@@ -2890,20 +2952,21 @@ impl Parser<'_> {
                     };
                     // A substitution is ToString'd (string hint), not concatenated raw.
                     let e = sub.parse_expr()?;
+                    self.has_private_names |= sub.has_private_names;
                     self.proto_dups.append(&mut sub.proto_dups);
-                    Expr::ToStr(Box::new(e))
+                    Expr::ToStr(P::new(e))
                 }
             };
             expr = Some(match expr {
                 None => piece,
                 Some(left) => Expr::Binary {
-                    op: "+",
-                    left: Box::new(left),
-                    right: Box::new(piece),
+                    op: &"+",
+                    left: P::new(left),
+                    right: P::new(piece),
                 },
             });
         }
-        Ok(expr.unwrap_or(Expr::Str(Rc::from(""))))
+        Ok(expr.unwrap_or_else(|| Expr::Str("".into())))
     }
 
     fn build_tagged_template(
@@ -2917,15 +2980,15 @@ impl Parser<'_> {
             match part {
                 TplPart::Str { cooked, raw } => quasis.push((cooked, raw)),
                 TplPart::Sub(src) => {
-                    let tokens = crate::lexer::tokenize_goal(&src, !self.module).map_err(|e| {
-                        ParseError {
+                    let (tokens, has_private_names) = tokenize_for_parser(&src, !self.module)
+                        .map_err(|e| ParseError {
                             at_eof: false,
                             message: e.message,
                             line: e.line,
-                        }
-                    })?;
+                        })?;
                     let mut sub = Parser {
                         toks: tokens,
+                        has_private_names,
                         pos: 0,
                         source: SourceText::new(&src),
                         strict: self.strict,
@@ -2960,15 +3023,18 @@ impl Parser<'_> {
                         in_static_block: false,
                     };
                     let e = sub.parse_expr()?;
+                    self.has_private_names |= sub.has_private_names;
                     self.proto_dups.append(&mut sub.proto_dups);
                     subs.push(e);
                 }
             }
         }
         Ok(Expr::TaggedTemplate {
-            tag: Box::new(tag),
-            quasis,
-            subs,
+            tag: P::new(tag),
+            parts: Box::new(TemplateParts {
+                quasis,
+                subs: subs.into_boxed_slice(),
+            }),
         })
     }
 
@@ -3129,7 +3195,7 @@ impl Parser<'_> {
                 match &key {
                     PropKey::Ident(name) => {
                         self.check_shorthand_ident(name)?;
-                        let ident = Expr::Ident(name.clone());
+                        let ident = Expr::Ident(name.as_str().into());
                         let value = if self.eat_punct("=") {
                             // CoverInitializedName: only valid when the literal is reinterpreted
                             // as a destructuring pattern; as a plain literal it is a SyntaxError
@@ -3141,9 +3207,9 @@ impl Parser<'_> {
                             });
                             let default = self.parse_assign()?;
                             let value = Expr::Assign {
-                                op: "=",
-                                target: Box::new(ident),
-                                value: Box::new(default),
+                                op: &"=",
+                                target: P::new(ident),
+                                value: P::new(default),
                             };
                             props.push(PropDef::Cover { key, value });
                             if !self.eat_punct(",") {
@@ -3168,27 +3234,31 @@ impl Parser<'_> {
     }
 
     fn parse_prop_key(&mut self) -> Result<PropKey, ParseError> {
-        match self.cur().clone() {
-            Tok::Ident(name) => {
-                self.advance();
-                Ok(PropKey::Ident(name))
+        match self.cur() {
+            Tok::Ident(_) | Tok::OwnedIdent(_) => {
+                let name = self.advance().into_ident().expect("identifier token");
+                Ok(PropKey::Ident(name.into_owned()))
             }
             Tok::Keyword(k) => {
+                let k = *k;
                 self.advance();
                 Ok(PropKey::Ident(k.to_string()))
             }
             Tok::Str(s) => {
+                let key = Rc::from(s.as_str());
                 self.advance();
-                Ok(PropKey::Str(Rc::from(s.as_str())))
+                Ok(PropKey::Str(key))
             }
             Tok::Num(n) => {
+                let n = *n;
                 self.advance();
                 Ok(PropKey::Num(n))
             }
             // A BigInt literal property key (`{1n: x}`) uses its integer string as the key.
             Tok::BigInt(n) => {
+                let key = Rc::from(n.to_string().as_str());
                 self.advance();
-                Ok(PropKey::Str(Rc::from(n.to_string().as_str())))
+                Ok(PropKey::Str(key))
             }
             Tok::Punct("[") => {
                 self.advance();
@@ -3212,7 +3282,7 @@ impl Parser<'_> {
     ) -> Result<Function, ParseError> {
         self.eat_kw("function");
         let is_generator = self.eat_punct("*");
-        let name = if let Tok::Ident(n) = self.cur().clone() {
+        let name = if let Some(n) = self.cur().ident() {
             // A private name is never a function name.
             if n.starts_with('#') {
                 return self.err("private names cannot be used as binding identifiers");
@@ -3226,8 +3296,8 @@ impl Parser<'_> {
             {
                 return self.err(format!("'{n}' cannot be used as a function name here"));
             }
-            self.advance();
-            Some(n)
+            let n = self.advance().into_ident().expect("identifier token");
+            Some(n.into_owned())
         } else {
             None
         };
@@ -3292,7 +3362,7 @@ impl Parser<'_> {
             fn_maps: std::cell::OnceCell::new(),
             name,
             params,
-            body,
+            body: body.into(),
             is_arrow: false,
             is_strict: strict,
             expr_body: false,
@@ -3332,9 +3402,9 @@ impl Parser<'_> {
             return Ok(e);
         }
         let name = match self.cur().clone() {
-            Tok::Ident(n) => {
+            kind @ (Tok::Ident(_) | Tok::OwnedIdent(_)) => {
                 self.advance();
-                n
+                kind.into_ident().unwrap().into_owned()
             }
             Tok::Keyword(k) => {
                 self.advance();
@@ -3342,20 +3412,20 @@ impl Parser<'_> {
             }
             _ => return self.err("expected a decorator expression after '@'"),
         };
-        let mut expr = Expr::Ident(name);
+        let mut expr = Expr::Ident(name.into());
         while self.eat_punct(".") {
             let prop = self.parse_property_name_ident()?;
             expr = Expr::Member {
-                obj: Box::new(expr),
-                prop,
+                obj: P::new(expr),
+                prop: prop.into_boxed_str(),
                 optional: false,
             };
         }
         if self.is_punct("(") {
             let args = self.parse_args()?;
             expr = Expr::Call {
-                callee: Box::new(expr),
-                args,
+                callee: P::new(expr),
+                args: args.into_boxed_slice(),
                 optional: false,
             };
         }
@@ -3366,7 +3436,7 @@ impl Parser<'_> {
         let class_start = self.cur_start();
         let decorators = self.parse_decorators()?;
         self.eat_kw("class");
-        let name = if let Tok::Ident(n) = self.cur().clone() {
+        let name = if let Some(n) = self.cur().clone().into_ident() {
             self.advance();
             // A class definition is always strict, so its name can't be a reserved word;
             // `await` is additionally reserved in modules, async bodies and static blocks.
@@ -3376,7 +3446,7 @@ impl Parser<'_> {
             if n == "await" && (self.module || self.in_async || self.in_static_block) {
                 return self.err("'await' cannot be used as a class name here");
             }
-            Some(n)
+            Some(n.into_owned())
         } else {
             None
         };
@@ -3388,7 +3458,7 @@ impl Parser<'_> {
             if sc.is_err() {
                 self.strict = saved;
             }
-            Some(Box::new(sc?))
+            Some(P::new(sc?))
         } else {
             None
         };
@@ -3486,7 +3556,7 @@ impl Parser<'_> {
                 fn_maps: std::cell::OnceCell::new(),
                 name: None,
                 params: Vec::new(),
-                body,
+                body: body.into(),
                 is_arrow: false,
                 is_strict: true,
                 expr_body: false,
@@ -3663,7 +3733,7 @@ impl Parser<'_> {
             fn_maps: std::cell::OnceCell::new(),
             name: None,
             params,
-            body,
+            body: body.into(),
             is_arrow: false,
             is_strict: is_strict || self.strict,
             expr_body: false,
@@ -3797,14 +3867,18 @@ impl Parser<'_> {
                 .get(self.pos + 1)
                 .map(|t| t.nl_before)
                 .unwrap_or(true)
-            && matches!(self.peek_kind(1), Tok::Ident(_) | Tok::Punct("("));
+            && matches!(
+                self.peek_kind(1),
+                Tok::Ident(_) | Tok::OwnedIdent(_) | Tok::Punct("(")
+            );
         let base = if async_arrow { 1 } else { 0 };
 
         // `ident => ...`
-        if let Tok::Ident(name) = self.peek_kind(base) {
+        if let Some(name) = self.peek_kind(base).ident() {
             if matches!(self.peek_kind(base + 1), Tok::Punct("=>"))
                 && !self.toks[self.pos + base + 1].nl_before
             {
+                let name = name.to_owned();
                 for _ in 0..=base {
                     self.advance(); // (async) ident
                 }
@@ -3896,7 +3970,7 @@ impl Parser<'_> {
                 fn_maps: std::cell::OnceCell::new(),
                 name: None,
                 params,
-                body,
+                body: body.into(),
                 is_arrow: true,
                 is_strict: is_strict || self.strict,
                 expr_body: false,
@@ -3921,7 +3995,7 @@ impl Parser<'_> {
                 fn_maps: std::cell::OnceCell::new(),
                 name: None,
                 params,
-                body: vec![Stmt::Return(Some(expr))],
+                body: vec![Stmt::Return(Some(expr))].into(),
                 is_arrow: true,
                 is_strict: self.strict,
                 expr_body: true,
@@ -3959,25 +4033,26 @@ impl Parser<'_> {
     }
 }
 
-fn is_assign_op(op: &str) -> bool {
-    matches!(
-        op,
-        "=" | "+="
-            | "-="
-            | "*="
-            | "/="
-            | "%="
-            | "**="
-            | "<<="
-            | ">>="
-            | ">>>="
-            | "&="
-            | "|="
-            | "^="
-            | "&&="
-            | "||="
-            | "??="
-    )
+fn assignment_op(op: &str) -> Option<Operator> {
+    match op {
+        "=" => Some(&"="),
+        "+=" => Some(&"+="),
+        "-=" => Some(&"-="),
+        "*=" => Some(&"*="),
+        "/=" => Some(&"/="),
+        "%=" => Some(&"%="),
+        "**=" => Some(&"**="),
+        "<<=" => Some(&"<<="),
+        ">>=" => Some(&">>="),
+        ">>>=" => Some(&">>>="),
+        "&=" => Some(&"&="),
+        "|=" => Some(&"|="),
+        "^=" => Some(&"^="),
+        "&&=" => Some(&"&&="),
+        "||=" => Some(&"||="),
+        "??=" => Some(&"??="),
+        _ => None,
+    }
 }
 
 fn is_valid_assign_target(e: &Expr) -> bool {
@@ -4013,11 +4088,11 @@ fn valid_assignment_pattern(e: &Expr) -> bool {
                 // A rest element must be last (the parser's Seq wrapper marks one followed
                 // by a comma) and can't carry a default.
                 idx == elems.len() - 1
-                    && !matches!(t, Expr::Seq(_) | Expr::Assign { op: "=", .. })
+                    && !matches!(t, Expr::Seq(_) | Expr::Assign { op: &"=", .. })
                     && target_ok(t)
             }
             ArrayElem::Item(Expr::Assign {
-                op: "=", target, ..
+                op: &"=", target, ..
             }) => target_ok(target),
             ArrayElem::Item(t) => target_ok(t),
         }),
@@ -4026,7 +4101,7 @@ fn valid_assignment_pattern(e: &Expr) -> bool {
             | PropDef::Cover { value, .. }
             | PropDef::Proto(value) => match value {
                 Expr::Assign {
-                    op: "=", target, ..
+                    op: &"=", target, ..
                 } => target_ok(target),
                 v => target_ok(v),
             },
@@ -4048,26 +4123,26 @@ fn pattern_strict_banned(e: &Expr) -> bool {
             ArrayElem::Hole => false,
             ArrayElem::Spread(t) => pattern_strict_banned(t),
             ArrayElem::Item(Expr::Assign {
-                op: "=", target, ..
+                op: &"=", target, ..
             }) => pattern_strict_banned(target),
             ArrayElem::Item(t) => pattern_strict_banned(t),
         }),
         Expr::Object(props) => props.iter().any(|p| match p {
             PropDef::KeyValue {
                 value: Expr::Assign {
-                    op: "=", target, ..
+                    op: &"=", target, ..
                 },
                 ..
             }
             | PropDef::Cover {
                 value: Expr::Assign {
-                    op: "=", target, ..
+                    op: &"=", target, ..
                 },
                 ..
             } => pattern_strict_banned(target),
             PropDef::KeyValue { value, .. } => pattern_strict_banned(value),
             PropDef::Proto(Expr::Assign {
-                op: "=", target, ..
+                op: &"=", target, ..
             }) => pattern_strict_banned(target),
             PropDef::Proto(v) => pattern_strict_banned(v),
             PropDef::Spread(t) => pattern_strict_banned(t),
@@ -4099,7 +4174,7 @@ fn pattern_has_stray_cover(e: &Expr) -> bool {
             ArrayElem::Hole => false,
             ArrayElem::Spread(t) => target(t),
             ArrayElem::Item(Expr::Assign {
-                op: "=",
+                op: &"=",
                 target: t,
                 value,
             }) => target(t) || generic(value),
@@ -4109,7 +4184,7 @@ fn pattern_has_stray_cover(e: &Expr) -> bool {
             PropDef::KeyValue {
                 value:
                     Expr::Assign {
-                        op: "=",
+                        op: &"=",
                         target: t,
                         value,
                     },
@@ -4118,14 +4193,14 @@ fn pattern_has_stray_cover(e: &Expr) -> bool {
             | PropDef::Cover {
                 value:
                     Expr::Assign {
-                        op: "=",
+                        op: &"=",
                         target: t,
                         value,
                     },
                 ..
             }
             | PropDef::Proto(Expr::Assign {
-                op: "=",
+                op: &"=",
                 target: t,
                 value,
             }) => target(t) || generic(value),
@@ -4150,31 +4225,31 @@ fn is_valid_assign_pattern(e: &Expr) -> bool {
             ArrayElem::Hole => true,
             ArrayElem::Spread(t) => {
                 idx == elems.len() - 1
-                    && !matches!(t, Expr::Assign { op: "=", .. })
+                    && !matches!(t, Expr::Assign { op: &"=", .. })
                     && is_valid_assign_pattern(t)
             }
             ArrayElem::Item(Expr::Assign {
-                op: "=", target, ..
+                op: &"=", target, ..
             }) => is_valid_assign_pattern(target),
             ArrayElem::Item(t) => is_valid_assign_pattern(t),
         }),
         Expr::Object(props) => props.iter().enumerate().all(|(idx, p)| match p {
             PropDef::KeyValue {
                 value: Expr::Assign {
-                    op: "=", target, ..
+                    op: &"=", target, ..
                 },
                 ..
             }
             | PropDef::Cover {
                 value: Expr::Assign {
-                    op: "=", target, ..
+                    op: &"=", target, ..
                 },
                 ..
             } => is_valid_assign_pattern(target),
             PropDef::KeyValue { value, .. } => is_valid_assign_pattern(value),
             // `__proto__: t` as a pattern is a plain keyed target (`t` may itself carry a default).
             PropDef::Proto(Expr::Assign {
-                op: "=", target, ..
+                op: &"=", target, ..
             }) => is_valid_assign_pattern(target),
             PropDef::Proto(value) => is_valid_assign_pattern(value),
             // Rest must be last and its target must not be a nested pattern.
@@ -4290,16 +4365,65 @@ fn validate_class(members: &[ClassMember]) -> Result<(), String> {
 /// Every referenced private name (`obj.#x`, `#x in obj`) must be declared in the class it appears in
 /// or an enclosing one. Walks the AST with a stack of each class's declared private names; entering a
 /// class pushes its names (so forward references within the class resolve) and leaving pops them.
+#[derive(Default)]
+struct PrivateNames {
+    scopes: Vec<Vec<String>>,
+    // Index each source once, so deeply nested function ranges do not repeatedly scan
+    // the same bytes. Hashes in strings/comments are conservative false positives.
+    // Dense hash-containing sources fall back to walking, bounding this optimization's
+    // extra storage instead of allocating one usize for every byte of a large comment.
+    markers: crate::fasthash::FastMap<(u8, usize), Option<Vec<usize>>>,
+}
+
+impl PrivateNames {
+    fn function_may_reference_private(&mut self, function: &Function) -> bool {
+        let Some(source) = &function.source else {
+            return true;
+        };
+        let (start, end) = source.offsets();
+        let markers = self.markers.entry(source.root_key()).or_insert_with(|| {
+            let root = source.root();
+            // Token source offsets are u32. Do not use a possibly narrowed range
+            // as proof for an input larger than that representation.
+            if root.len() > u32::MAX as usize {
+                return None;
+            }
+            let markers: Vec<_> = root
+                .bytes()
+                .enumerate()
+                .filter_map(|(offset, byte)| (byte == b'#').then_some(offset))
+                .take(4097)
+                .collect();
+            (markers.len() <= 4096).then_some(markers)
+        });
+        let Some(markers) = markers else {
+            return true;
+        };
+        let index = markers.partition_point(|offset| *offset < start);
+        markers.get(index).is_some_and(|offset| *offset < end)
+    }
+}
+
+fn pn_function(function: &Function, st: &mut PrivateNames) -> Result<(), String> {
+    // A valid private identifier always starts with a literal '#', including an
+    // escaped name. Source-less synthetic functions retain the complete walk.
+    if st.function_may_reference_private(function) {
+        pn_params(&function.params, st)?;
+        pn_stmts(&function.body, st)?;
+    }
+    Ok(())
+}
+
 fn validate_private_names(stmts: &[Stmt]) -> Result<(), String> {
-    let mut st: Vec<Vec<String>> = Vec::new();
+    let mut st = PrivateNames::default();
     pn_stmts(stmts, &mut st)
 }
 
-fn pn_declared(st: &[Vec<String>], name: &str) -> bool {
-    st.iter().any(|s| s.iter().any(|n| n == name))
+fn pn_declared(st: &PrivateNames, name: &str) -> bool {
+    st.scopes.iter().any(|s| s.iter().any(|n| n == name))
 }
 
-fn pn_class(class: &Class, st: &mut Vec<Vec<String>>) -> Result<(), String> {
+fn pn_class(class: &Class, st: &mut PrivateNames) -> Result<(), String> {
     if let Some(s) = &class.superclass {
         pn_expr(s, st)?;
     }
@@ -4311,24 +4435,23 @@ fn pn_class(class: &Class, st: &mut Vec<Vec<String>>) -> Result<(), String> {
             _ => None,
         })
         .collect();
-    st.push(names);
+    st.scopes.push(names);
     for m in &class.members {
         if let PropKey::Computed(e) = &m.key {
             pn_expr(e, st)?;
         }
         if let Some(f) = &m.func {
-            pn_params(&f.params, st)?;
-            pn_stmts(&f.body, st)?;
+            pn_function(f, st)?;
         }
         if let Some(v) = &m.value {
             pn_expr(v, st)?;
         }
     }
-    st.pop();
+    st.scopes.pop();
     Ok(())
 }
 
-fn pn_params(params: &[Param], st: &mut Vec<Vec<String>>) -> Result<(), String> {
+fn pn_params(params: &[Param], st: &mut PrivateNames) -> Result<(), String> {
     for p in params {
         pn_pattern(&p.pattern, st)?;
         if let Some(d) = &p.default {
@@ -4338,7 +4461,7 @@ fn pn_params(params: &[Param], st: &mut Vec<Vec<String>>) -> Result<(), String> 
     Ok(())
 }
 
-fn pn_pattern(pat: &Pattern, st: &mut Vec<Vec<String>>) -> Result<(), String> {
+fn pn_pattern(pat: &Pattern, st: &mut PrivateNames) -> Result<(), String> {
     match pat {
         Pattern::Array(elems) => {
             for e in elems {
@@ -4368,14 +4491,14 @@ fn pn_pattern(pat: &Pattern, st: &mut Vec<Vec<String>>) -> Result<(), String> {
     Ok(())
 }
 
-fn pn_stmts(stmts: &[Stmt], st: &mut Vec<Vec<String>>) -> Result<(), String> {
+fn pn_stmts(stmts: &[Stmt], st: &mut PrivateNames) -> Result<(), String> {
     for s in stmts {
         pn_stmt(s, st)?;
     }
     Ok(())
 }
 
-fn pn_stmt(stmt: &Stmt, st: &mut Vec<Vec<String>>) -> Result<(), String> {
+fn pn_stmt(stmt: &Stmt, st: &mut PrivateNames) -> Result<(), String> {
     match stmt {
         Stmt::Expr(e) | Stmt::Throw(e) => pn_expr(e, st)?,
         Stmt::VarDecl { decls, .. } => {
@@ -4387,8 +4510,7 @@ fn pn_stmt(stmt: &Stmt, st: &mut Vec<Vec<String>>) -> Result<(), String> {
             }
         }
         Stmt::FuncDecl(f) => {
-            pn_params(&f.params, st)?;
-            pn_stmts(&f.body, st)?;
+            pn_function(f, st)?;
         }
         Stmt::Return(Some(e)) => pn_expr(e, st)?,
         Stmt::If { test, cons, alt } => {
@@ -4443,7 +4565,7 @@ fn pn_stmt(stmt: &Stmt, st: &mut Vec<Vec<String>>) -> Result<(), String> {
             finalizer,
         } => {
             pn_stmts(block, st)?;
-            if let Some((param, body)) = handler {
+            if let Some((param, body)) = handler.as_deref() {
                 if let Some(p) = param {
                     pn_pattern(p, st)?;
                 }
@@ -4474,7 +4596,7 @@ fn pn_stmt(stmt: &Stmt, st: &mut Vec<Vec<String>>) -> Result<(), String> {
     Ok(())
 }
 
-fn pn_args(args: &[ArrayElem], st: &mut Vec<Vec<String>>) -> Result<(), String> {
+fn pn_args(args: &[ArrayElem], st: &mut PrivateNames) -> Result<(), String> {
     for a in args {
         match a {
             ArrayElem::Item(e) | ArrayElem::Spread(e) => pn_expr(e, st)?,
@@ -4484,7 +4606,7 @@ fn pn_args(args: &[ArrayElem], st: &mut Vec<Vec<String>>) -> Result<(), String> 
     Ok(())
 }
 
-fn pn_expr(expr: &Expr, st: &mut Vec<Vec<String>>) -> Result<(), String> {
+fn pn_expr(expr: &Expr, st: &mut PrivateNames) -> Result<(), String> {
     match expr {
         // A bare private name is only grammatical as `#x in obj` (parsed as PrivateIn); anywhere
         // else — `#x`, `!#x`, `1 + #x` — it is a SyntaxError.
@@ -4515,13 +4637,13 @@ fn pn_expr(expr: &Expr, st: &mut Vec<Vec<String>>) -> Result<(), String> {
         }
         Expr::Class(c) => pn_class(c, st)?,
         Expr::Func(f) => {
-            pn_params(&f.params, st)?;
-            pn_stmts(&f.body, st)?;
+            pn_function(f, st)?;
         }
         Expr::Unary { arg, .. }
         | Expr::Update { arg, .. }
         | Expr::Await(arg)
-        | Expr::OptionalChain(arg) => pn_expr(arg, st)?,
+        | Expr::OptionalChain(arg)
+        | Expr::ToStr(arg) => pn_expr(arg, st)?,
         Expr::Binary { left, right, .. } | Expr::Logical { left, right, .. } => {
             pn_expr(left, st)?;
             pn_expr(right, st)?;
@@ -4559,8 +4681,7 @@ fn pn_expr(expr: &Expr, st: &mut Vec<Vec<String>>) -> Result<(), String> {
                         if let PropKey::Computed(e) = key {
                             pn_expr(e, st)?;
                         }
-                        pn_params(&func.params, st)?;
-                        pn_stmts(&func.body, st)?;
+                        pn_function(func, st)?;
                     }
                     PropDef::Spread(e) | PropDef::Proto(e) => pn_expr(e, st)?,
                 }
@@ -4572,9 +4693,9 @@ fn pn_expr(expr: &Expr, st: &mut Vec<Vec<String>>) -> Result<(), String> {
             }
         }
         Expr::Yield { arg: Some(a), .. } => pn_expr(a, st)?,
-        Expr::TaggedTemplate { tag, subs, .. } => {
+        Expr::TaggedTemplate { tag, parts } => {
             pn_expr(tag, st)?;
-            for s in subs {
+            for s in parts.subs.iter() {
                 pn_expr(s, st)?;
             }
         }
@@ -4698,7 +4819,7 @@ fn expr_to_pattern(e: &Expr) -> Option<Pattern> {
     match e {
         // A bare private name is never an assignment target.
         Expr::Ident(name) if name.starts_with('#') => None,
-        Expr::Ident(name) => Some(Pattern::Ident(name.clone())),
+        Expr::Ident(name) => Some(Pattern::Ident(name.as_str().to_owned())),
         Expr::Array(elems) => {
             let mut out = Vec::new();
             for (idx, el) in elems.iter().enumerate() {
@@ -4706,13 +4827,13 @@ fn expr_to_pattern(e: &Expr) -> Option<Pattern> {
                     ArrayElem::Hole => out.push(ArrayPatElem::Hole),
                     ArrayElem::Spread(t) => {
                         // A rest element must be last and can't carry a default.
-                        if idx != elems.len() - 1 || matches!(t, Expr::Assign { op: "=", .. }) {
+                        if idx != elems.len() - 1 || matches!(t, Expr::Assign { op: &"=", .. }) {
                             return None;
                         }
                         out.push(ArrayPatElem::Rest(expr_to_pattern(t)?));
                     }
                     ArrayElem::Item(Expr::Assign {
-                        op: "=",
+                        op: &"=",
                         target,
                         value,
                     }) => out.push(ArrayPatElem::Elem {
@@ -4737,7 +4858,7 @@ fn expr_to_pattern(e: &Expr) -> Option<Pattern> {
                     PropDef::KeyValue { key, value } | PropDef::Cover { key, value } => {
                         let (value, default) = match value {
                             Expr::Assign {
-                                op: "=",
+                                op: &"=",
                                 target,
                                 value: d,
                             } => (expr_to_pattern(target)?, Some((**d).clone())),
@@ -4753,7 +4874,7 @@ fn expr_to_pattern(e: &Expr) -> Option<Pattern> {
                     PropDef::Proto(value) => {
                         let (value, default) = match value {
                             Expr::Assign {
-                                op: "=",
+                                op: &"=",
                                 target,
                                 value: d,
                             } => (expr_to_pattern(target)?, Some((**d).clone())),
@@ -4765,7 +4886,7 @@ fn expr_to_pattern(e: &Expr) -> Option<Pattern> {
                             default,
                         });
                     }
-                    PropDef::Spread(Expr::Ident(name)) => pat.rest = Some(name.clone()),
+                    PropDef::Spread(Expr::Ident(name)) => pat.rest = Some(name.as_str().to_owned()),
                     _ => return None,
                 }
             }
@@ -4777,7 +4898,257 @@ fn expr_to_pattern(e: &Expr) -> Option<Pattern> {
         }
         | Expr::Index {
             optional: false, ..
-        } => Some(Pattern::Member(Box::new(e.clone()))),
+        } => Some(Pattern::Member(P::new(e.clone()))),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod source_text_tests {
+    use super::SourceText;
+
+    #[test]
+    fn byte_offsets_preserve_every_unicode_source_slice() {
+        for text in [
+            "",
+            "ascii only",
+            "λ/a💡zé",
+            "💡💡💡",
+            "/* λ */ function f(){return '💡';}",
+        ] {
+            let source = SourceText::new(text);
+            let chars: Vec<_> = text.chars().collect();
+            let offsets: Vec<_> = text
+                .char_indices()
+                .map(|(i, _)| i)
+                .chain(std::iter::once(text.len()))
+                .collect();
+            for start in 0..=chars.len() {
+                for end in start..=chars.len() {
+                    let expected: String = chars[start..end].iter().collect();
+                    assert_eq!(
+                        source.slice(offsets[start], offsets[end]),
+                        Some(expected.as_str())
+                    );
+                }
+            }
+            assert_eq!(source.slice(text.len() + 1, text.len() + 1), None);
+            assert_eq!(source.slice(usize::MAX, usize::MAX), None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod private_name_early_error_tests {
+    use super::{parse_module, parse_script, parse_script_eval};
+
+    #[test]
+    fn private_validation_preserves_errors_across_function_source_ranges() {
+        let prefix = "function plain(){return '💡';} class Sentinel { #x; } ";
+        for tail in [
+            "function unused(a = object.#missing) {}",
+            "const unused = (a = object.#missing) => a;",
+            "const unused = () => () => object.#missing;",
+            "const unused = { method() { return object.#missing; } };",
+            "const unused = { get value() { return object.#missing; } };",
+            "const unused = { set value(a) { object.#missing = a; } };",
+            "const unused = { [object.#missing]() {} };",
+            "class Unused { static { object.#missing; } }",
+            "const unused = `${()=>1}${()=>object.#missing}`;",
+            "function unused(){return `${()=>1}${()=>object.#missing}`;}",
+        ] {
+            let source = format!("{prefix}{tail}");
+            for result in [parse_script(&source, false), parse_module(&source)] {
+                let Err(error) = result else {
+                    panic!("accepted private name in unused code: {source}");
+                };
+                assert!(error.message.contains("not declared"), "{}", error.message);
+            }
+        }
+        let nested = format!(
+            "{}return object.#missing;{}",
+            "function nested(){".repeat(16),
+            "}".repeat(16)
+        );
+        assert!(parse_script(&nested, false)
+            .err()
+            .is_some_and(|error| error.message.contains("not declared")));
+        let dense = format!(
+            "class Sentinel {{ #x; }} function plain(){{return '{}';}} function unused(){{return object.#missing;}}",
+            "#".repeat(5000)
+        );
+        assert!(parse_script(&dense, false)
+            .err()
+            .is_some_and(|error| error.message.contains("not declared")));
+        assert!(parse_script_eval(
+            "function plain(){return '💡';} function allowed(){return object.#x;}",
+            false,
+            false,
+            false,
+            &["#x".into()]
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn unused_functions_still_reject_private_names_in_every_lexical_context() {
+        for source in [
+            "function unused(){ return object.#missing; }",
+            "function unused(){ return #missing in object; }",
+            "function unused(){ return #missing; }",
+            r"function unused(){ return object.#\u006dissing; }",
+            "function unused(){ return `${object.#missing}`; }",
+            "function unused(){ return `outer${`inner${object.#missing}`}`; }",
+            "function unused(){ return String.raw`${object.#missing}`; }",
+            "function unused(){ return String.raw`${`inner${#missing in object}`}`; }",
+            "function unused(value = `${object.#missing}`) {}",
+            "class Outer { method() { return class Inner { method() { return object.#missing; } }; } }",
+        ] {
+            for result in [parse_script(source, false), parse_module(source)] {
+                let Err(error) = result else { panic!("accepted invalid private name: {source}") };
+                assert!(error.message.to_lowercase().contains("private"), "{source}: {}", error.message);
+            }
+        }
+        // Here the lexer initially treats the slashes after yield/await as a regexp.
+        for name in ["yield", "await"] {
+            let source = format!(
+                "var {name} = 10; function unused() {{ return {name} / object.#missing / 2; }}"
+            );
+            let Err(error) = parse_script(&source, false) else {
+                panic!("accepted re-lexed private name: {source}")
+            };
+            assert!(
+                error.message.contains("not declared"),
+                "{source}: {}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn declared_names_and_non_identifier_hashes_remain_valid() {
+        for source in [
+            "/* #notPrivate */ function f() { return '#notPrivate' + /#notPrivate/.source; }",
+            "function f() { return String.raw`#notPrivate${`#alsoNotPrivate`}`; }",
+            "class Outer { #x; method(o) { return `${o.#x}`; } }",
+            r"class Outer { #x; method(o) { return o.#\u0078; } }",
+            "class Outer { #x; method(o) { return class Inner { method() { return String.raw`${`${o.#x}`}`; } }; } }",
+            "class Outer { method(o) { return #x in o; } #x; }",
+        ] {
+            for result in [parse_script(source, false), parse_module(source)] {
+                if let Err(error) = result { panic!("{source}: {}", error.message); }
+            }
+        }
+        for source in [
+            "object.#x",
+            "`${object.#x}`",
+            "String.raw`${`${object.#x}`}`",
+            "#x in object",
+        ] {
+            assert!(
+                parse_script_eval(source, false, false, false, &["#x".into()]).is_ok(),
+                "{source}"
+            );
+            assert!(
+                parse_script_eval(source, false, false, false, &["#other".into()]).is_err(),
+                "{source}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod module_name_validation_tests {
+    use super::parse_module;
+
+    #[test]
+    fn large_modules_keep_export_and_binding_early_errors() {
+        let declarations = (0..300)
+            .map(|n| format!("function binding{n}() {{}}\n"))
+            .collect::<String>();
+        let exports = (0..300)
+            .map(|n| format!("export {{ binding{n} }};\n"))
+            .collect::<String>();
+        let valid = format!("{declarations}{exports}");
+        if let Err(error) = parse_module(&valid) {
+            panic!("{}", error.message);
+        }
+        for (source, expected) in [
+            (
+                format!("{valid} export {{ binding1 }}; export {{ binding0 }};"),
+                "duplicate export name 'binding1'",
+            ),
+            (
+                format!("{declarations} function binding1() {{}} function binding0() {{}}"),
+                "Identifier 'binding1' has already been declared",
+            ),
+            (
+                format!("{valid} export {{ missing }};"),
+                "export 'missing' is not declared in the module",
+            ),
+        ] {
+            let Err(error) = parse_module(&source) else {
+                panic!("accepted invalid module");
+            };
+            assert_eq!(error.message, expected);
+        }
+        // Small modules use a different lookup strategy and must report the same first conflict.
+        for source in [
+            "let x; export {x}; export {x};",
+            "function x() {} function x() {}",
+        ] {
+            assert!(parse_module(source).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod parameter_body_validation_tests {
+    use super::{parse_module, parse_script};
+
+    #[test]
+    fn lexical_conflicts_keep_binding_rules_and_error_order() {
+        for source in [
+            "function f(a) { var a; function a() {} }",
+            "function f(a) { { let a; } class other {} }",
+            "function f([]) { let a; } function g({}) { const b = 1; }",
+            "const f = (a) => { var a; function a() {} };",
+            "class C { method(a) { var a; } set value(a) { { let a; } } }",
+        ] {
+            assert!(parse_script(source, false).is_ok(), "{source}");
+            assert!(parse_module(source).is_ok(), "{source}");
+        }
+        for source in [
+            "function f(a, b) { let b; let a; }",
+            "function f({a, b}) { class b {} let a; }",
+            "function f(a, ...b) { const b = 1; let a; }",
+            "async function f(a, b = 1) { let b; let a; }",
+            "function* f(a, b) { let b; let a; }",
+            "const f = (a, b) => { let b; let a; };",
+            "class C { method(a, b) { let b; let a; } }",
+        ] {
+            for result in [parse_script(source, false), parse_module(source)] {
+                let error = result.expect_err(source);
+                assert_eq!(
+                    error.message, "Identifier 'b' has already been declared",
+                    "{source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn many_function_declarations_can_share_a_parameter_name() {
+        let declarations = (0..600)
+            .map(|n| format!("function name{n}() {{}}\n"))
+            .collect::<String>();
+        for params in ["", "name0", "[]", "{}"] {
+            let source = format!("function outer({params}) {{ {declarations} let other; }}");
+            assert!(parse_script(&source, false).is_ok(), "{params}");
+            assert!(parse_module(&source).is_ok(), "{params}");
+        }
+        let source = format!("function outer(conflict) {{ {declarations} let conflict; }}");
+        assert!(parse_script(&source, false).is_err());
+        assert!(parse_module(&source).is_err());
     }
 }

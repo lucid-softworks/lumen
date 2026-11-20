@@ -5,16 +5,21 @@
 //! can then be ported without duplicating runtime semantics or compromising deoptimization.
 
 use super::{
-    sys, JitCode, COND_PEEK_TRUTHY, COND_POP_TRUTHY, H_ADD_STRINGS, H_CALL, H_COND, H_EXEC,
-    H_GET_PROP, H_INLINE_CLOSURE, H_NEW, H_POP_HANDLER, H_PUSH_HANDLER, H_RETURN, H_SET_PROP,
-    H_UNWIND,
+    sys, JitCode, COND_PEEK_TRUTHY, COND_POP_TRUTHY, H_ADD_STRINGS, H_CALL, H_CALL_HIT, H_COND,
+    H_EXEC, H_GET_PROP, H_INLINE_CLOSURE, H_NEW, H_POP_HANDLER, H_PUSH_HANDLER, H_RETURN,
+    H_SET_PROP, H_UNWIND,
 };
 use crate::bytecode::{Chunk, Op, UpdKind};
+use std::{cell::RefCell, rc::Rc};
 
 #[derive(Clone, Copy)]
 enum PropRecv {
     This,
     Slot(u16),
+    StackMethod {
+        string_proto: Option<i32>,
+        array: bool,
+    },
 }
 
 struct Asm {
@@ -269,6 +274,28 @@ impl Asm {
         self.bytes(&[0x48, 0x85, 0xd2]); // test rdx, rdx (throw flag)
         self.jcc(0x85, unwind); // jne
     }
+    /// Call a SpFlag helper with its packed pc/way argument already in r10d.
+    fn helper_spflag_r10(&mut self, helper: usize, unwind: usize) {
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.bytes(&[0x4c, 0x89, 0xe7, 0x44, 0x89, 0xd6, 0x4c, 0x89, 0xea]);
+            self.bytes(&[0x41, 0xff, 0x96]);
+            self.bytes(&((helper * 8) as i32).to_le_bytes());
+        }
+        #[cfg(target_os = "windows")]
+        {
+            self.bytes(&[0x48, 0x83, 0xec, 0x30]); // shadow area and SpFlag result
+            self.bytes(&[0x48, 0x8d, 0x4c, 0x24, 0x20]); // rcx=&result
+            self.bytes(&[0x4c, 0x89, 0xe2, 0x45, 0x89, 0xd0]); // rdx=ctx; r8d=packed pc
+            self.bytes(&[0x4d, 0x89, 0xe9, 0x41, 0xff, 0x96]); // r9=sp; call helper
+            self.bytes(&((helper * 8) as i32).to_le_bytes());
+            self.bytes(&[
+                0x48, 0x8b, 0x44, 0x24, 0x20, 0x48, 0x8b, 0x54, 0x24, 0x28, 0x48, 0x83, 0xc4, 0x30,
+            ]);
+        }
+        self.bytes(&[0x49, 0x89, 0xc5, 0x48, 0x85, 0xd2]);
+        self.jcc(0x85, unwind);
+    }
     fn finish(mut self) -> Vec<u8> {
         for (at, label) in self.patches {
             let target = self.labels[label].expect("unbound x64 JIT label");
@@ -280,59 +307,8 @@ impl Asm {
     }
 }
 
-/// Compact monomorphic property load. Every cached structural fact is rechecked against
-/// the live object graph; a miss reaches H_GET_PROP before stack or refcount state changes.
-fn emit_prop_value(
-    a: &mut Asm,
-    layout: &crate::value::JitLayout,
-    st: crate::bytecode::IcState,
-    recv: PropRecv,
-    slow: usize,
-) -> bool {
-    if !layout.valid
-        || st.depth > 2
-        || (st.depth == 2 && st.mid_ok & 1 == 0)
-        || layout.entry_size.checked_mul(st.slot as usize).is_none()
-    {
-        return false;
-    }
-    let Ok(rcv) = i32::try_from(layout.obj_from_rc) else {
-        return false;
-    };
-    let Ok(exotic) = i32::try_from(layout.obj_exotic) else {
-        return false;
-    };
-    let Ok(plain) = i32::try_from(layout.obj_ic_plain) else {
-        return false;
-    };
-    let Ok(shape) = i32::try_from(layout.obj_props + layout.props_shape) else {
-        return false;
-    };
-    let Ok(proto) = i32::try_from(layout.obj_proto) else {
-        return false;
-    };
-    let Ok(entries) = i32::try_from(layout.obj_props + layout.props_entries + layout.vec_ptr_off)
-    else {
-        return false;
-    };
-    let Ok(entries_len) =
-        i32::try_from(layout.obj_props + layout.props_entries + layout.vec_len_off)
-    else {
-        return false;
-    };
-    let Ok(strong) = i32::try_from(layout.rc_strong_off) else {
-        return false;
-    };
-    let Some(entry_base) = layout.entry_size.checked_mul(st.slot as usize) else {
-        return false;
-    };
-    let Ok(value_off) = i32::try_from(entry_base + layout.entry_value) else {
-        return false;
-    };
-    let Ok(accessor_off) = i32::try_from(entry_base + layout.entry_accessor) else {
-        return false;
-    };
-
+// Load a receiver without changing any stack value or reference count.
+fn emit_prop_receiver(a: &mut Asm, recv: PropRecv, slow: usize) {
     match recv {
         PropRecv::This => {
             // rax=ctx.this_raw; receiver must be Value::Obj; r10=stored Rc pointer.
@@ -349,57 +325,32 @@ fn emit_prop_value(
             a.bytes(&[0x4d, 0x8b, 0x97]);
             a.bytes(&(off + 8).to_le_bytes());
         }
-    }
-
-    let guard_object = |a: &mut Asm, expected: u32, slow: usize| {
-        // r11 = Object body for the stored Rc in r10.
-        a.bytes(&[0x4d, 0x89, 0xd3, 0x49, 0x81, 0xc3]);
-        a.bytes(&rcv.to_le_bytes());
-        a.bytes(&[0x41, 0x80, 0xbb]);
-        a.bytes(&exotic.to_le_bytes());
-        a.bytes(&[layout.exotic_none_tag]);
-        a.jcc(0x85, slow);
-        a.bytes(&[0x41, 0x80, 0xbb]);
-        a.bytes(&plain.to_le_bytes());
-        a.bytes(&[0]);
-        a.jcc(0x84, slow);
-        a.bytes(&[0x41, 0x81, 0xbb]);
-        a.bytes(&shape.to_le_bytes());
-        a.bytes(&expected.to_le_bytes());
-        a.jcc(0x85, slow);
-    };
-    guard_object(a, st.recv_shape, slow);
-    if st.depth >= 1 {
-        a.bytes(&[0x4d, 0x8b, 0x93]); // r10=[r11+proto]
-        a.bytes(&proto.to_le_bytes());
-        a.bytes(&[0x4d, 0x85, 0xd2]);
-        a.jcc(0x84, slow);
-        guard_object(
-            a,
-            if st.depth == 1 {
-                st.holder_shape
+        PropRecv::StackMethod { string_proto, .. } => {
+            let object = a.label();
+            let ready = a.label();
+            a.cmp_byte_r13(-16, 8); // Value::Obj at the top of the operand stack.
+            if let Some(proto) = string_proto {
+                a.jcc(0x84, object);
+                a.cmp_byte_r13(-16, 6); // Value::Str: use the active realm's prototype.
+                a.jcc(0x85, slow);
+                a.bytes(&[0x4d, 0x8b, 0x54, 0x24, 0x48]); // r10=[r12+72], ctx.interp
+                a.bytes(&[0x4d, 0x8b, 0x92]); // r10=[r10+string_proto]
+                a.bytes(&proto.to_le_bytes());
+                a.jmp(ready);
             } else {
-                st.mid_shape
-            },
-            slow,
-        );
+                a.jcc(0x85, slow);
+            }
+            a.bind(object);
+            a.bytes(&[0x4d, 0x8b, 0x95]); // r10=[r13-8], stored receiver Rc pointer
+            a.bytes(&(-8i32).to_le_bytes());
+            a.bind(ready);
+        }
     }
-    if st.depth == 2 {
-        a.bytes(&[0x4d, 0x8b, 0x93]);
-        a.bytes(&proto.to_le_bytes());
-        a.bytes(&[0x4d, 0x85, 0xd2]);
-        a.jcc(0x84, slow);
-        guard_object(a, st.holder_shape, slow);
-    }
+}
 
-    // Recheck the live length before dereferencing a cached entry, even after shape guards.
-    a.bytes(&[0x49, 0x81, 0xbb]); // cmp qword [r11+entries_len],slot
-    a.bytes(&entries_len.to_le_bytes());
-    a.bytes(&st.slot.to_le_bytes());
-    a.jcc(0x86, slow);
-    // rax=entries data; reject a live accessor descriptor, then clone its packed value.
-    a.bytes(&[0x49, 0x8b, 0x83]);
-    a.bytes(&entries.to_le_bytes());
+// rax addresses the property entry (or entries base with baked offsets). All fallible guards
+// precede the refcount increment and stack append, so the slow path sees untouched owners.
+fn emit_cloned_prop(a: &mut Asm, accessor_off: i32, value_off: i32, strong: i32, slow: usize) {
     a.bytes(&[0xf6, 0x80]);
     a.bytes(&accessor_off.to_le_bytes());
     a.bytes(&[crate::value::PROP_ACCESSOR as u8]);
@@ -458,9 +409,399 @@ fn emit_prop_value(
     a.bytes(&[0x48, 0xc1, 0xe2, 16, 0x48, 0xc1, 0xea, 16]); // remove packed tag
     a.inc_strong_rdx(strong);
     a.bind(decoded);
+    // GetMethod keeps the original receiver below the cloned callee. Its existing
+    // stack slot and reference count stay untouched, including on every guard miss.
     a.store_pair_r13(0);
     a.add_sp(16);
+}
+
+/// Compact monomorphic property load. Every cached structural fact is rechecked against
+/// the live object graph; a miss reaches H_GET_PROP before stack or refcount state changes.
+fn emit_prop_value(
+    a: &mut Asm,
+    layout: &crate::value::JitLayout,
+    st: crate::bytecode::IcState,
+    recv: PropRecv,
+    slow: usize,
+) -> bool {
+    if !layout.valid
+        || st.depth > 2
+        || (st.depth == 2 && st.mid_ok & 1 == 0)
+        || layout.entry_size.checked_mul(st.slot as usize).is_none()
+    {
+        return false;
+    }
+    let Ok(rcv) = i32::try_from(layout.obj_from_rc) else {
+        return false;
+    };
+    let Ok(exotic) = i32::try_from(layout.obj_exotic) else {
+        return false;
+    };
+    let Ok(plain) = i32::try_from(layout.obj_ic_plain) else {
+        return false;
+    };
+    let Ok(shape) = i32::try_from(layout.obj_props + layout.props_shape) else {
+        return false;
+    };
+    let Ok(proto) = i32::try_from(layout.obj_proto) else {
+        return false;
+    };
+    let Ok(entries) = i32::try_from(layout.obj_props + layout.props_entries + layout.vec_ptr_off)
+    else {
+        return false;
+    };
+    let Ok(entries_len) =
+        i32::try_from(layout.obj_props + layout.props_entries + layout.vec_len_off)
+    else {
+        return false;
+    };
+    let Ok(strong) = i32::try_from(layout.rc_strong_off) else {
+        return false;
+    };
+    let Some(entry_base) = layout.entry_size.checked_mul(st.slot as usize) else {
+        return false;
+    };
+    let Ok(value_off) = i32::try_from(entry_base + layout.entry_value) else {
+        return false;
+    };
+    let Ok(accessor_off) = i32::try_from(entry_base + layout.entry_accessor) else {
+        return false;
+    };
+
+    emit_prop_receiver(a, recv, slow);
+
+    let guard_object = |a: &mut Asm, expected: u32, receiver: bool, slow: usize| {
+        // r11 = Object body for the stored Rc in r10.
+        a.bytes(&[0x4d, 0x89, 0xd3, 0x49, 0x81, 0xc3]);
+        a.bytes(&rcv.to_le_bytes());
+        a.bytes(&[0x41, 0x80, 0xbb]);
+        a.bytes(&exotic.to_le_bytes());
+        a.bytes(&[layout.exotic_none_tag]);
+        if receiver && matches!(recv, PropRecv::StackMethod { .. }) {
+            let accepted = a.label();
+            a.jcc(0x84, accepted);
+            if let PropRecv::StackMethod {
+                string_proto,
+                array,
+            } = recv
+            {
+                // Array element changes do not move the shape. Accept an array only as a
+                // non-holder for a name that cannot be an element index. String-wrapper
+                // named entries are shape-pinned; length/index reads are excluded at emission.
+                for tag in [
+                    (array && st.depth >= 1).then_some(layout.exotic_array_tag),
+                    string_proto.map(|_| layout.exotic_strwrap_tag),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    a.bytes(&[0x41, 0x80, 0xbb]);
+                    a.bytes(&exotic.to_le_bytes());
+                    a.bytes(&[tag]);
+                    a.jcc(0x84, accepted);
+                }
+            }
+            a.jmp(slow);
+            a.bind(accepted);
+        } else {
+            a.jcc(0x85, slow);
+        }
+        a.bytes(&[0x41, 0x80, 0xbb]);
+        a.bytes(&plain.to_le_bytes());
+        a.bytes(&[0]);
+        a.jcc(0x84, slow);
+        a.bytes(&[0x41, 0x81, 0xbb]);
+        a.bytes(&shape.to_le_bytes());
+        a.bytes(&expected.to_le_bytes());
+        a.jcc(0x85, slow);
+    };
+    guard_object(a, st.recv_shape, true, slow);
+    if st.depth >= 1 {
+        a.bytes(&[0x4d, 0x8b, 0x93]); // r10=[r11+proto]
+        a.bytes(&proto.to_le_bytes());
+        a.bytes(&[0x4d, 0x85, 0xd2]);
+        a.jcc(0x84, slow);
+        guard_object(
+            a,
+            if st.depth == 1 {
+                st.holder_shape
+            } else {
+                st.mid_shape
+            },
+            false,
+            slow,
+        );
+    }
+    if st.depth == 2 {
+        a.bytes(&[0x4d, 0x8b, 0x93]);
+        a.bytes(&proto.to_le_bytes());
+        a.bytes(&[0x4d, 0x85, 0xd2]);
+        a.jcc(0x84, slow);
+        guard_object(a, st.holder_shape, false, slow);
+    }
+
+    // Recheck the live length before dereferencing a cached entry, even after shape guards.
+    a.bytes(&[0x49, 0x81, 0xbb]); // cmp qword [r11+entries_len],slot
+    a.bytes(&entries_len.to_le_bytes());
+    a.bytes(&st.slot.to_le_bytes());
+    a.jcc(0x86, slow);
+    // rax=entries data; reject a live accessor descriptor, then clone its packed value.
+    a.bytes(&[0x49, 0x8b, 0x83]);
+    a.bytes(&entries.to_le_bytes());
+    emit_cloned_prop(a, accessor_off, value_off, strong, slow);
     true
+}
+
+fn prop_probe_offsets(layout: &crate::value::JitLayout) -> Option<[i32; 11]> {
+    if !layout.valid {
+        return None;
+    }
+    let offsets = [
+        layout.obj_from_rc,
+        layout.obj_exotic,
+        layout.obj_ic_plain,
+        layout.obj_props + layout.props_shape,
+        layout.obj_proto,
+        layout.obj_props + layout.props_entries + layout.vec_ptr_off,
+        layout.obj_props + layout.props_entries + layout.vec_len_off,
+        layout.entry_size,
+        layout.entry_accessor,
+        layout.entry_value,
+        layout.rc_strong_off,
+    ];
+
+    let mut result = [0; 11];
+    for (out, input) in result.iter_mut().zip(offsets) {
+        *out = i32::try_from(input).ok()?;
+    }
+    Some(result)
+}
+
+// Each compiled chunk pins the executable probe allocation it calls. The thread-local
+// cache shares code across engines with the same measured layout; replacing the cache never
+// invalidates existing chunks. The probes embed no object, realm, cache or chunk pointers.
+pub(super) struct PropProbes {
+    mem: *mut u8,
+    len: usize,
+    entries: [usize; 4],
+    layout_key: ([i32; 11], [u8; 3]),
+}
+
+thread_local! {
+    static PROP_PROBES: RefCell<Option<Rc<PropProbes>>> = const { RefCell::new(None) };
+}
+
+impl PropProbes {
+    fn for_layout(layout: &crate::value::JitLayout) -> Option<Rc<Self>> {
+        let layout_key = (
+            prop_probe_offsets(layout)?,
+            [
+                layout.exotic_none_tag,
+                layout.exotic_array_tag,
+                layout.exotic_strwrap_tag,
+            ],
+        );
+        PROP_PROBES.with(|cache| {
+            if let Some(probes) = cache
+                .borrow()
+                .as_ref()
+                .filter(|p| p.layout_key == layout_key)
+            {
+                return Some(probes.clone());
+            }
+            let mut a = Asm::new();
+            let mut entries = [0; 4];
+            for (key, entry) in entries.iter_mut().enumerate() {
+                *entry = a.code.len();
+                let recv = if key == 0 {
+                    PropRecv::This
+                } else {
+                    PropRecv::StackMethod {
+                        string_proto: (key & 1 != 0).then_some(0),
+                        array: key & 2 != 0,
+                    }
+                };
+                emit_prop_probe(&mut a, layout, recv);
+            }
+            let code = a.finish();
+            let mem = unsafe { sys::alloc_exec(code.as_ptr(), code.len()) };
+            if mem.is_null() {
+                return None;
+            }
+            let probes = Rc::new(Self {
+                mem,
+                len: code.len(),
+                entries,
+                layout_key,
+            });
+            *cache.borrow_mut() = Some(probes.clone());
+            Some(probes)
+        })
+    }
+}
+
+impl Drop for PropProbes {
+    fn drop(&mut self) {
+        unsafe {
+            sys::free_exec(self.mem, self.len);
+        }
+    }
+}
+
+/// Emit a call to a shared leaf probe pinned by this JitCode. Each site supplies its receiver
+/// and live cache; a failed guard returns to the existing checked property helper.
+fn emit_live_prop_value(
+    a: &mut Asm,
+    probes: Option<&PropProbes>,
+    cache: usize,
+    recv: PropRecv,
+    slow: usize,
+) -> bool {
+    let Some(probes) = probes else {
+        return false;
+    };
+    let key = match recv {
+        PropRecv::StackMethod {
+            string_proto,
+            array,
+        } => usize::from(string_proto.is_some()) | (usize::from(array) << 1),
+        _ => 0,
+    };
+    let target = unsafe { probes.mem.add(probes.entries[key]) };
+    emit_prop_receiver(a, recv, slow);
+    a.bytes(&[0x49, 0xb8]); // r8=cache
+    a.bytes(&(cache as u64).to_le_bytes());
+    a.bytes(&[0x48, 0xb8]); // rax=shared probe entry
+    a.bytes(&(target as u64).to_le_bytes());
+    a.bytes(&[0xff, 0xd0]); // internal leaf call, with no Rust or JS calls inside
+    a.bytes(&[0x85, 0xc0]);
+    a.jcc(0x84, slow);
+    true
+}
+
+// r12-r15 retain the JIT frame registers. Only a successful probe advances r13;
+// rax, rcx, rdx and r8-r11 are scratch. No safepoint or unwind occurs inside this leaf.
+fn emit_prop_probe(a: &mut Asm, layout: &crate::value::JitLayout, recv: PropRecv) {
+    let slow = a.label();
+    use crate::bytecode::{
+        IC_OFF_DEPTH, IC_OFF_HOLDER_SHAPE, IC_OFF_MID_OK, IC_OFF_MID_SHAPE, IC_OFF_RECV_SHAPE,
+        IC_OFF_SLOT,
+    };
+    let [rcv, exotic, plain, shape, proto, entries, entries_len, entry_size, accessor, value, strong] =
+        prop_probe_offsets(layout).expect("validated property probe layout");
+
+    let probe = a.label();
+    let miss = a.label();
+    let done = a.label();
+    // Internal leaf ABI: r8=cache, r10=receiver; preserve its pointer in rdx across misses.
+    // The decoder may overwrite rdx only after the final structural guard.
+    a.bytes(&[0x4c, 0x89, 0xd2]); // rdx=r10
+    a.bytes(&[0xb9]); // ecx=remaining cache ways
+    a.bytes(&(crate::bytecode::PROP_IC_WAYS as u32).to_le_bytes());
+    a.bind(probe);
+    a.bytes(&[0x49, 0x89, 0xd2]); // restore r10=receiver
+    a.bytes(&[0x45, 0x0f, 0xb6, 0x88]);
+    a.bytes(&IC_OFF_DEPTH.to_le_bytes());
+    a.bytes(&[0x41, 0x83, 0xf9, 2]);
+    a.jcc(0x87, miss);
+    let depth_ok = a.label();
+    a.jcc(0x85, depth_ok);
+    a.bytes(&[0x41, 0xf6, 0x80]);
+    a.bytes(&IC_OFF_MID_OK.to_le_bytes());
+    a.bytes(&[1]);
+    a.jcc(0x84, miss);
+    a.bind(depth_ok);
+
+    let guard_object = |a: &mut Asm, cache_shape: u32, receiver: bool| {
+        a.bytes(&[0x4d, 0x89, 0xd3, 0x49, 0x81, 0xc3]); // r11=Object body
+        a.bytes(&rcv.to_le_bytes());
+        a.bytes(&[0x41, 0x80, 0xbb]);
+        a.bytes(&exotic.to_le_bytes());
+        a.bytes(&[layout.exotic_none_tag]);
+        if let (
+            true,
+            PropRecv::StackMethod {
+                string_proto,
+                array,
+            },
+        ) = (receiver, recv)
+        {
+            let accepted = a.label();
+            a.jcc(0x84, accepted);
+            if array {
+                let skip_array = a.label();
+                a.bytes(&[0x45, 0x85, 0xc9]); // test r9d,r9d: array must be a non-holder
+                a.jcc(0x84, skip_array);
+                a.bytes(&[0x41, 0x80, 0xbb]);
+                a.bytes(&exotic.to_le_bytes());
+                a.bytes(&[layout.exotic_array_tag]);
+                a.jcc(0x84, accepted);
+                a.bind(skip_array);
+            }
+            if string_proto.is_some() {
+                a.bytes(&[0x41, 0x80, 0xbb]);
+                a.bytes(&exotic.to_le_bytes());
+                a.bytes(&[layout.exotic_strwrap_tag]);
+                a.jcc(0x84, accepted);
+            }
+            a.jmp(miss);
+            a.bind(accepted);
+        } else {
+            a.jcc(0x85, miss);
+        }
+        a.bytes(&[0x41, 0x80, 0xbb]);
+        a.bytes(&plain.to_le_bytes());
+        a.bytes(&[0]);
+        a.jcc(0x84, miss);
+        a.bytes(&[0x41, 0x8b, 0x80]); // eax=cache shape
+        a.bytes(&cache_shape.to_le_bytes());
+        a.bytes(&[0x41, 0x39, 0x83]); // cmp [r11+shape],eax
+        a.bytes(&shape.to_le_bytes());
+        a.jcc(0x85, miss);
+    };
+    let follow_proto = |a: &mut Asm| {
+        a.bytes(&[0x4d, 0x8b, 0x93]);
+        a.bytes(&proto.to_le_bytes());
+        a.bytes(&[0x4d, 0x85, 0xd2]);
+        a.jcc(0x84, miss);
+    };
+    guard_object(a, IC_OFF_RECV_SHAPE, true);
+    let holder = a.label();
+    let single_hop = a.label();
+    a.bytes(&[0x45, 0x85, 0xc9]);
+    a.jcc(0x84, holder);
+    follow_proto(a);
+    a.bytes(&[0x41, 0x83, 0xf9, 1]);
+    a.jcc(0x84, single_hop);
+    guard_object(a, IC_OFF_MID_SHAPE, false);
+    follow_proto(a);
+    a.bind(single_hop);
+    guard_object(a, IC_OFF_HOLDER_SHAPE, false);
+    a.bind(holder);
+
+    // A live bounds check makes slot*entry_size safe: a real Vec allocation covers that slot.
+    a.bytes(&[0x45, 0x8b, 0x88]); // r9d=slot (zero extended)
+    a.bytes(&IC_OFF_SLOT.to_le_bytes());
+    a.bytes(&[0x4d, 0x39, 0x8b]); // cmp [r11+entries_len],r9
+    a.bytes(&entries_len.to_le_bytes());
+    a.jcc(0x86, miss);
+    a.bytes(&[0x49, 0x8b, 0x83]); // rax=entries
+    a.bytes(&entries.to_le_bytes());
+    a.bytes(&[0x4d, 0x69, 0xc9]); // imul r9,r9,entry_size
+    a.bytes(&entry_size.to_le_bytes());
+    a.bytes(&[0x4c, 0x01, 0xc8]); // rax+=r9
+    emit_cloned_prop(a, accessor, value, strong, slow);
+    a.jmp(done);
+    a.bind(miss);
+    a.bytes(&[0x49, 0x81, 0xc0]); // next cache way
+    a.bytes(&(std::mem::size_of::<crate::bytecode::IcState>() as u32).to_le_bytes());
+    a.bytes(&[0xff, 0xc9]); // dec ecx
+    a.jcc(0x85, probe);
+    a.jmp(slow);
+    a.bind(done);
+    a.bytes(&[0xb8, 1, 0, 0, 0, 0xc3]); // success; return to call site
+    a.bind(slow);
+    a.bytes(&[0x31, 0xc0, 0xc3]); // miss, with stack and owners untouched
 }
 
 /// Read a known numeric dense mirror without boxing the receiver or calling a helper.
@@ -624,10 +965,81 @@ fn emit_set_elem_local_number(
     true
 }
 
+/// Probe the live call-cache ways without consuming any operand. A hit leaves the packed
+/// pc/way argument in r10d. The following helper performs all observable call bookkeeping.
+fn emit_call_probe(
+    a: &mut Asm,
+    chunk: &Chunk,
+    layout: &crate::value::JitLayout,
+    pc: usize,
+    argc: u16,
+    cache: u32,
+    slow: usize,
+) -> bool {
+    use crate::bytecode::{CallIc, CALL_IC_EPOCH, CALL_IC_WAYS};
+    let offsets = [
+        layout.gc_data_off,
+        std::mem::offset_of!(CallIc, callee),
+        std::mem::offset_of!(CallIc, epoch),
+        std::mem::offset_of!(CallIc, global_env),
+        std::mem::size_of::<std::cell::Cell<CallIc>>(),
+        std::mem::offset_of!(super::JitCtx, genv),
+    ];
+    // jit_call_hit reserves the upper pc bits for the way. Dynamic inline frames keep the
+    // existing checked entry, matching the ARM backend's eligibility restriction.
+    if !layout.valid
+        || pc > u16::MAX as usize
+        || chunk.dynamic_inline_location(pc)
+        || offsets.iter().any(|&offset| offset > i32::MAX as usize)
+    {
+        return false;
+    }
+    let [data, callee, epoch, realm, stride, genv] = offsets.map(|v| v as i32);
+    let callee_slot = -(i32::from(argc) + 1) * 16;
+    a.cmp_byte_r13(callee_slot, 8);
+    a.jcc(0x85, slow);
+    a.bytes(&[0x4d, 0x8b, 0x8d]); // r9=stored callee RcBox
+    a.bytes(&(callee_slot + 8).to_le_bytes());
+    a.bytes(&[0x49, 0x81, 0xc1]); // convert to Rc::as_ptr identity
+    a.bytes(&data.to_le_bytes());
+    a.bytes(&[0x49, 0xb8]); // r8=first call-cache way (pinned by the owning Chunk)
+    a.bytes(&(chunk.jit_call_cache_ptr(cache) as u64).to_le_bytes());
+    a.bytes(&[0x48, 0xb8]);
+    a.bytes(&(&CALL_IC_EPOCH as *const _ as u64).to_le_bytes());
+    a.bytes(&[0x44, 0x8b, 0x10]); // r10d=live epoch (aligned atomic load on x64)
+    a.bytes(&[0x4d, 0x8b, 0x9c, 0x24]); // r11=ctx.genv
+    a.bytes(&genv.to_le_bytes());
+    a.bytes(&[0x31, 0xc9]); // ecx=way index
+    let probe = a.label();
+    let next = a.label();
+    let hit = a.label();
+    a.bind(probe);
+    a.bytes(&[0x4d, 0x3b, 0x88]); // callee identity
+    a.bytes(&callee.to_le_bytes());
+    a.jcc(0x85, next);
+    a.bytes(&[0x45, 0x3b, 0x90]); // epoch
+    a.bytes(&epoch.to_le_bytes());
+    a.jcc(0x85, next);
+    a.bytes(&[0x4d, 0x3b, 0x98]); // realm
+    a.bytes(&realm.to_le_bytes());
+    a.jcc(0x84, hit);
+    a.bind(next);
+    a.bytes(&[0x49, 0x81, 0xc0]);
+    a.bytes(&stride.to_le_bytes());
+    a.bytes(&[0xff, 0xc1, 0x81, 0xf9]);
+    a.bytes(&(CALL_IC_WAYS as u32).to_le_bytes());
+    a.jcc(0x82, probe);
+    a.jmp(slow);
+    a.bind(hit);
+    a.bytes(&[0x41, 0x89, 0xca, 0x41, 0xc1, 0xe2, 0x10, 0x41, 0x81, 0xca]);
+    a.bytes(&(pc as u32).to_le_bytes());
+    true
+}
+
 pub(super) fn compile(
     chunk: &Chunk,
     layout: &crate::value::JitLayout,
-    _ilayout: &crate::interpreter::InterpLayout,
+    ilayout: &crate::interpreter::InterpLayout,
 ) -> Option<JitCode> {
     let ops = chunk.jit_ops();
     if ops.is_empty() || ops.len() > u32::MAX as usize || ops.iter().any(|o| matches!(o, Op::Await))
@@ -636,6 +1048,16 @@ pub(super) fn compile(
     }
     let max_stack = crate::jit_ir::Cfg::build(chunk).ok()?.jit_stack_capacity();
     let mut a = Asm::new();
+    let prop_probes = ops
+        .iter()
+        .any(|op| {
+            matches!(
+                op,
+                Op::GetMethod(..) | Op::GetPropThis(..) | Op::GetPropLocal(..)
+            )
+        })
+        .then(|| PropProbes::for_layout(layout))
+        .flatten();
     let pcs: Vec<_> = (0..ops.len()).map(|_| a.label()).collect();
     let unwind = a.label();
     let ret_ok = a.label();
@@ -992,8 +1414,16 @@ pub(super) fn compile(
                 a.helper_spflag(H_EXEC, pc as u32, unwind);
                 a.jmp(unwind);
             }
-            Op::Call(..) | Op::CallWithThis(..) => {
+            Op::Call(argc, cache) | Op::CallWithThis(argc, cache) => {
+                let slow = a.label();
+                let done = a.label();
+                if emit_call_probe(&mut a, chunk, layout, pc, *argc, *cache, slow) {
+                    a.helper_spflag_r10(H_CALL_HIT, unwind);
+                    a.jmp(done);
+                }
+                a.bind(slow);
                 a.helper_spflag(H_CALL, pc as u32, unwind);
+                a.bind(done);
             }
             Op::New(argc, _) => {
                 a.helper_spflag(H_NEW, pc as u32 | ((*argc as u32) << 16), unwind);
@@ -1028,7 +1458,14 @@ pub(super) fn compile(
                 let done = a.label();
                 let emitted = chunk
                     .jit_cache_preferred(*cache)
-                    .is_some_and(|st| emit_prop_value(&mut a, layout, st, PropRecv::This, slow));
+                    .is_some_and(|st| emit_prop_value(&mut a, layout, st, PropRecv::This, slow))
+                    || emit_live_prop_value(
+                        &mut a,
+                        prop_probes.as_deref(),
+                        chunk.jit_cache_ptr(*cache),
+                        PropRecv::This,
+                        slow,
+                    );
                 if emitted {
                     a.jmp(done);
                     a.bind(slow);
@@ -1043,7 +1480,13 @@ pub(super) fn compile(
                 let done = a.label();
                 let emitted = chunk.jit_cache_preferred(*cache).is_some_and(|st| {
                     emit_prop_value(&mut a, layout, st, PropRecv::Slot(*slot), slow)
-                });
+                }) || emit_live_prop_value(
+                    &mut a,
+                    prop_probes.as_deref(),
+                    chunk.jit_cache_ptr(*cache),
+                    PropRecv::Slot(*slot),
+                    slow,
+                );
                 if emitted {
                     a.jmp(done);
                     a.bind(slow);
@@ -1053,7 +1496,39 @@ pub(super) fn compile(
                     a.helper_spflag(H_GET_PROP, pc as u32, unwind);
                 }
             }
-            Op::GetProp(..) | Op::GetMethod(..) => a.helper_spflag(H_GET_PROP, pc as u32, unwind),
+            Op::GetMethod(name, cache) => {
+                let slow = a.label();
+                let done = a.label();
+                let name = chunk.jit_name(*name);
+                let non_index = !name.as_bytes().first().is_some_and(|b| b.is_ascii_digit());
+                let string_proto =
+                    (ilayout.valid && non_index && name != "length" && name != "description")
+                        .then(|| i32::try_from(ilayout.string_proto).ok())
+                        .flatten();
+                let recv = PropRecv::StackMethod {
+                    string_proto,
+                    array: non_index,
+                };
+                let emitted = chunk
+                    .jit_cache_preferred(*cache)
+                    .is_some_and(|st| emit_prop_value(&mut a, layout, st, recv, slow))
+                    || emit_live_prop_value(
+                        &mut a,
+                        prop_probes.as_deref(),
+                        chunk.jit_cache_ptr(*cache),
+                        recv,
+                        slow,
+                    );
+                if emitted {
+                    a.jmp(done);
+                    a.bind(slow);
+                    a.helper_spflag(H_GET_PROP, pc as u32, unwind);
+                    a.bind(done);
+                } else {
+                    a.helper_spflag(H_GET_PROP, pc as u32, unwind);
+                }
+            }
+            Op::GetProp(..) => a.helper_spflag(H_GET_PROP, pc as u32, unwind),
             Op::SetProp(..)
             | Op::SetPropDrop(..)
             | Op::SetPropThisDrop(..)
@@ -1092,6 +1567,7 @@ pub(super) fn compile(
         return None;
     }
     Some(JitCode {
+        _prop_probes: prop_probes,
         mem,
         len,
         pc_offsets,

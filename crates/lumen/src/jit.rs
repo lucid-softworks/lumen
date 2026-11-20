@@ -336,6 +336,12 @@ pub struct JitCode {
     /// Whether any template reads `JitCtx::global_body` (free-name caches): frame setup skips
     /// the realm-global borrow otherwise.
     pub needs_global: bool,
+    /// Pins the shared x64 leaf probes referenced by this code allocation.
+    #[cfg(all(
+        target_arch = "x86_64",
+        any(target_os = "macos", target_os = "linux", target_os = "windows")
+    ))]
+    _prop_probes: Option<std::rc::Rc<x64::PropProbes>>,
 }
 
 impl JitCode {
@@ -10509,6 +10515,7 @@ fn plan_scheduler_handler_queue(
             || check_func.is_generator
             || check_func.is_async
             || check_func.params.len() != 2
+            || check_func.params.iter().any(|p| p.rest)
         {
             return None;
         }
@@ -10835,6 +10842,7 @@ fn plan_scheduler_handler_deliver(
         || check_func.is_generator
         || check_func.is_async
         || check_func.params.len() != 2
+        || check_func.params.iter().any(|p| p.rest)
     {
         return None;
     }
@@ -10935,6 +10943,7 @@ fn plan_scheduler_handler_deliver(
             || add_func.is_generator
             || add_func.is_async
             || add_func.params.len() != 1
+            || add_func.params.iter().any(|p| p.rest)
         {
             continue;
         }
@@ -22139,6 +22148,8 @@ pub fn run(
     this_val: Value,
     args: &[Value],
 ) -> Result<Value, Abrupt> {
+    let params = chunk.prepare_parameters(i, args);
+    let args = params.as_ref();
     let env = chunk.jit_make_run_env(i, env, &this_val, args);
     let (mut slots, mut stack) = i.vm_pool.pop().unwrap_or_default();
     let (n_params, n_slots) = chunk.jit_frame();
@@ -22151,6 +22162,7 @@ pub fn run(
     for &s in chunk.jit_var_force_resets() {
         slots[s as usize] = Value::Undefined;
     }
+    drop(params);
     stack.clear();
     stack.reserve(code.max_stack);
 
@@ -22460,13 +22472,10 @@ pub(crate) unsafe fn run_moved_env(
     frame: (usize, usize),
 ) -> Result<Value, Abrupt> {
     let args_ref = unsafe { std::slice::from_raw_parts(args, argc) };
-    let activation = chunk.jit_make_run_env(i, unsafe { &*definition_env }, &this_val, args_ref);
-    let arguments = chunk.jit_arguments_slot().map(|slot| {
-        (
-            slot as usize,
-            Value::Obj(i.make_compiled_arguments_object(args_ref, &activation)),
-        )
-    });
+    let (activation, materialized) =
+        chunk.jit_prepare_moved_entry(i, unsafe { &*definition_env }, &this_val, args_ref);
+    // Only owned activation/materialized values survive here; the borrowed actual arguments
+    // can now be moved into the frame.
     unsafe {
         run_moved_inner(
             i,
@@ -22477,7 +22486,7 @@ pub(crate) unsafe fn run_moved_env(
             args,
             argc,
             frame,
-            arguments,
+            materialized,
         )
     }
 }
@@ -22501,9 +22510,10 @@ unsafe fn run_moved_inner(
     args: *mut Value,
     argc: usize,
     (n_params, n_slots): (usize, usize),
-    arguments: Option<(usize, Value)>,
+    materialized: Option<(usize, Value)>,
 ) -> Result<Value, Abrupt> {
     let seed = n_params.min(argc);
+    let materialized_slot = materialized.as_ref().map(|(slot, _)| *slot);
     // Frame memory: one fixed-size raw buffer from the freelist ([slots | operand stack]);
     // oversized frames use the legacy pooled-Vec pair. The buffer is a plain allocation (not a
     // bump arena), so parked coroutines holding frames on other threads can't be aliased.
@@ -22534,7 +22544,7 @@ unsafe fn run_moved_inner(
         for k in seed..n_slots {
             *(slots_ptr.add(k) as *mut u8) = 0;
         }
-        if let Some((slot, value)) = arguments {
+        if let Some((slot, value)) = materialized {
             if slot < seed {
                 std::ptr::drop_in_place(slots_ptr.add(slot));
             }
@@ -22542,7 +22552,7 @@ unsafe fn run_moved_inner(
         }
         for &s in chunk.jit_var_force_resets() {
             let s = s as usize;
-            if s < seed {
+            if s < seed || materialized_slot == Some(s) {
                 std::ptr::drop_in_place(slots_ptr.add(s));
                 slots_ptr.add(s).write(Value::Undefined);
             }

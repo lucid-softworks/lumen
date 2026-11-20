@@ -8,8 +8,8 @@ use std::{
 pub(super) const SHAPE_EMPTY: u32 = 0;
 
 /// The property-creation epoch (see [`Props::proto_flag`]): bumped whenever a marked prototype
-/// mutates structurally, any `[[SetPrototypeOf]]` succeeds, or a `defineProperty` rewrites
-/// attributes — every event that could shadow a creation IC's "the chain has no setter /
+/// mutates structurally or changes property attributes, or any `[[SetPrototypeOf]]` succeeds —
+/// every event that could shadow a creation IC's "the chain has no setter /
 /// non-writable / own copy of this name" proof. Process-global and atomic, NOT thread-local:
 /// generator/async bodies run JS on pooled worker threads sharing the same `Interp` (one thread
 /// at a time via channel handoff, which also orders these accesses), so a bump from a worker

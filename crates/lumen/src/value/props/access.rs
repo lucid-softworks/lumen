@@ -24,6 +24,12 @@ impl Props {
                 return None;
             }
         }
+        self.find_entry(key)
+    }
+
+    /// Look in the string-key entry storage after the caller has checked dense indices.
+    #[inline(always)]
+    fn find_entry(&self, key: &str) -> Option<usize> {
         // `length` and `prototype` are the hottest keys in array-heavy / allocation-heavy code
         // (every push/pop/length read; every `new`); their slots are memoized — answer without
         // hashing or scanning.
@@ -84,7 +90,7 @@ impl Props {
                 return None;
             }
         }
-        self.find(key).map(|i| &self.entries[i].1)
+        self.find_entry(key).map(|i| &self.entries[i].1)
     }
 
     /// The memoized own `prototype` slot, for guarded constructor fast paths.

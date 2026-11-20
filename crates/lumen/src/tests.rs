@@ -8241,7 +8241,7 @@ fn bytecode_async_vm() {
     // value is delivered, and `await` still yields a microtask tick (ordering "123", not "132").
     let mut e = Engine::new();
     e.interp.tier = crate::bytecode::Tier::Bytecode;
-    e.interp.tier_threshold = 0; // compile every function so the VM async path is taken
+    e.interp.tier_threshold = u32::MAX; // async bodies compile even before the sync threshold
     let src = r#"
       var out = "";
       async function add(a, b){ return a + await Promise.resolve(b); }
@@ -8261,6 +8261,58 @@ fn bytecode_async_vm() {
         Completion::Throw { name, message } => panic!("threw {name}: {message}"),
     };
     assert_eq!(got, "46|123");
+    let env = e.interp.global_env.clone();
+    let Ok(crate::value::Value::Obj(add)) = e.interp.get_var("add", &env) else {
+        panic!("expected function");
+    };
+    let crate::value::Callable::User(add) = &add.borrow().call else {
+        panic!("expected user function");
+    };
+    assert!(matches!(add.func.code.get(), Some(Some(_))));
+}
+
+#[test]
+fn cold_async_defaults_and_fallbacks() {
+    let src = r#"
+      var count = 0, out = [];
+      function next() { count++; return count; }
+      function fail() { count++; throw 'default'; }
+      async function defaults(a=next(), b=a+1) { return a + b; }
+      async function rejected(a=fail()) { out.push('body'); }
+      async function captured(a={}) { const get = () => a; await 0; return get() === a; }
+      async function argumentsFallback() { return arguments[0] + await 2; }
+      async function patternFallback({x=3}={}) { return x + await 1; }
+      async function thenable() { return await { then(resolve) { resolve(7); } }; }
+      async function caught() { try { return await Promise.reject('caught'); } catch(e) { return e; } }
+      async function finalized() { try { return await 8; } finally { out.push('finally'); } }
+      var scoped;
+      with ({x: 11}) { scoped = async () => { await 0; return x; }; }
+      async function main() {
+        out.push(await defaults(), count);
+        const p = rejected(); out.push('returned');
+        try { await p; } catch(e) { out.push(e, count); }
+        out.push(await captured(), await argumentsFallback(4), await patternFallback());
+        out.push(await thenable(), await caught(), await finalized(), await scoped());
+      }
+      main();
+    "#;
+    for tier in [
+        crate::bytecode::Tier::Interp,
+        crate::bytecode::Tier::Bytecode,
+        crate::bytecode::Tier::Jit,
+    ] {
+        let mut e = Engine::new();
+        e.interp.tier = tier;
+        e.interp.tier_threshold = u32::MAX;
+        assert!(matches!(e.eval(src, false).unwrap(), Completion::Value(_)));
+        let Completion::Value(got) = e.eval("out.join('|')", false).unwrap() else {
+            panic!("unexpected throw on {tier:?}");
+        };
+        assert_eq!(
+            got, "3|1|returned|default|2|true|6|4|finally|7|caught|8|11",
+            "{tier:?}"
+        );
+    }
 }
 
 #[test]

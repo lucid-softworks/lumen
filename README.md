@@ -2,8 +2,10 @@
 
 A from-scratch JavaScript **engine** in Rust — std only, zero dependencies — and a
 **runtime** being built on top of it, the way Node/Deno/Bun wrap a JS engine with an event
-loop and host APIs. Every crate in the workspace is std-only: no `tokio`, `mio`, `libc`,
-`rustyline`, `serde`, or any other third-party dependency, anywhere.
+loop and host APIs. The engine and runtime crates are std-only: no `tokio`, `mio`,
+`libc`, `rustyline`, or `serde`. Default native CLI builds have no third-party dependencies.
+The Linux CLI has an optional `mimalloc` allocator feature for the profiled build
+described below; enabling it adds a native allocator and its Cargo build dependencies.
 
 ## The engine (`crates/lumen`)
 
@@ -40,7 +42,7 @@ of the release binary). Build with `--no-default-features` for a small engine: t
 methods degrade to their locale-independent forms, the way engines built without i18n do. Either
 feature can be enabled independently.
 
-On dependencies and `unsafe`: the workspace stays std-only — the JIT maps executable memory
+On dependencies and `unsafe`: the engine and runtime stay std-only — the JIT maps executable memory
 through raw platform declarations (`mmap`/`mprotect`, macOS `MAP_JIT`, or Windows
 `VirtualAlloc`/`VirtualProtect`) rather than libc. Pages are writable only while code is copied,
 then executable/read-only, and instruction caches are synchronized where required. The
@@ -179,6 +181,34 @@ The engine also ships a minimal standalone shell (the test262 host, no runtime/h
 cargo build --release -p lumen --bin lumen
 ./target/release/lumen file.js [more.js ...]
 ```
+
+For the opt-in profiled Linux x86-64 CLI, install Node and the Rust toolchain's
+LLVM tools, then build into a new output directory:
+
+```sh
+rustup component add llvm-tools-preview
+bash scripts/build-profiled-cli.sh target/profiled-cli
+./target/profiled-cli/lumen-cli file.js [args]
+```
+
+This build enables the CLI's `mimalloc` feature and compiler profile-guided
+optimization. Training uses generated parsing/module workloads, existing engine
+benchmarks, and filesystem/hash operations; it excludes Vite, Rollup, esbuild,
+and the benchmark app. The recipe targets generic x86-64, without host-specific
+CPU instructions. Its logs, training results, and profile stay in the output
+directory. Set `LLVM_PROFDATA` if using a matching LLVM installation outside rustup.
+
+Run this recipe locally to obtain the profiled Linux CLI. Published artifacts
+retain their existing build recipes.
+
+The allocator can use substantially more resident memory, particularly when Linux
+transparent huge pages are available. Performance depends on the workload and
+host memory conditions. Use the default Cargo build above for the std-only
+allocator; `cargo build --release -p lumen-cli --features mimalloc` enables only
+the allocator, without profile-guided optimization.
+
+See the [locked Vite comparison](docs/benchmarks/vite-profiled-2026-11-20/README.md)
+for measured build times, memory costs, validation limits, and reproduction commands.
 
 ## Conformance
 

@@ -5,12 +5,12 @@ use crate::value::{index_key, Property, Value};
 
 impl Props {
     /// Reserve the exact backing storage for a dense array whose initial length is known.
-    /// `entries` needs one additional slot for the array's own `length` property. Small literals
-    /// use the keyless packed representation: it avoids allocating/cloning one decimal string key
-    /// per element, while all indexed/reflection paths already understand packed properties.
+    /// `entries` needs one additional slot for the array's own `length` property. Small arrays
+    /// and nonnumeric arrays use the keyless packed representation: it avoids allocating/cloning
+    /// one decimal string key per element, while indexed/reflection paths understand packed properties.
     /// Larger numeric arrays retain the raw-f64 mirror used by numeric JIT regions.
     pub(crate) fn reserve_dense_exact(&mut self, len: usize, numeric: bool) {
-        if (1..=32).contains(&len) {
+        if len > 0 && (len <= 32 || !numeric) {
             self.entries.reserve_exact(1); // own `length`
             self.elems
                 .set_packed(Some(Box::new(Vec::with_capacity(len))));
@@ -255,17 +255,17 @@ impl Props {
         Some(p.into_value())
     }
 
-    /// Append the next dense element while *building a fresh array in order* (element index ==
-    /// entry slot == dense slot): skips the canonical-index parse and, for small indices, the
-    /// key-string allocation. Only valid on a Props whose entries so far are exactly the dense
-    /// elements 0..len.
+    /// Append the next dense element while building a fresh array in order. Named metadata
+    /// such as `length` may precede the elements: the dense frontier supplies the index key,
+    /// while the entry position supplies its storage slot. Only valid during construction,
+    /// with consecutive elements and no holes or far indices.
     pub(crate) fn push_dense(&mut self, prop: Property) {
         if let Some(packed) = self.elems.packed_mut() {
             packed.push(prop);
             return;
         }
         let slot = self.entries.len();
-        let key = index_key(slot);
+        let key = index_key(self.elems.len());
         if let Some(index) = self.elems.index_mut() {
             index.insert(key.clone(), slot);
         }
@@ -273,5 +273,36 @@ impl Props {
         self.entries.push((key, prop));
         self.elems.push(slot as u32);
         self.mirror_grow(0, slot);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{value::Value, Engine};
+
+    #[test]
+    fn numeric_array_construction_keeps_dense_lookup_and_mirror_without_hash_index() {
+        let engine = Engine::new();
+        for len in [33, 128, 4096] {
+            let Value::Obj(array) = engine
+                .interp
+                .make_array((0..len).map(|n| Value::Num(n as f64)).collect())
+            else {
+                panic!("array object expected");
+            };
+            let array = array.borrow();
+            let props = &array.props;
+            assert!(props.elems.index.get().is_none());
+            assert!(
+                matches!(props.length_property().unwrap().value(), Value::Num(n) if n == len as f64)
+            );
+            for n in 0..len {
+                assert!(
+                    matches!(props.get_index(n).unwrap().value(), Value::Num(v) if v == n as f64)
+                );
+                assert_eq!(props.mirror_get(n), Some(n as f64));
+            }
+            assert!(props.elems.index.get().is_none());
+        }
     }
 }

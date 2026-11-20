@@ -1689,8 +1689,8 @@ pub(crate) fn body_has_tla(body: &[Stmt]) -> bool {
                         crate::ast::ForInit::Expr(e) => expr(e),
                     })
                     .unwrap_or(false)
-                    || test.as_ref().map(expr).unwrap_or(false)
-                    || update.as_ref().map(expr).unwrap_or(false)
+                    || test.as_deref().map(expr).unwrap_or(false)
+                    || update.as_deref().map(expr).unwrap_or(false)
                     || stmt(body)
             }
             Stmt::ForInOf {
@@ -1707,7 +1707,7 @@ pub(crate) fn body_has_tla(body: &[Stmt]) -> bool {
             } => {
                 block.iter().any(stmt)
                     || handler
-                        .as_ref()
+                        .as_deref()
                         .map(|(_, h)| h.iter().any(stmt))
                         .unwrap_or(false)
                     || finalizer

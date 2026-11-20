@@ -202,26 +202,8 @@ fn json_delete_prop(i: &mut Interp, holder: &Value, key: &str) -> Result<(), Val
 /// CreateDataProperty for the JSON reviver: a { value, writable, enumerable, configurable: true }
 /// data property, trap-aware for proxy holders.
 fn json_create_data_prop(i: &mut Interp, holder: &Value, key: &str, v: Value) -> Result<(), Value> {
-    // CreateDataProperty defines a fully-permissive data descriptor via [[DefineOwnProperty]], which
-    // validates against any existing (e.g. non-configurable) property; a false result is not an error.
-    let desc = i.new_object();
-    set_data(&desc, "value", v);
-    set_data(&desc, "writable", Value::Bool(true));
-    set_data(&desc, "enumerable", Value::Bool(true));
-    set_data(&desc, "configurable", Value::Bool(true));
-    if let Some((target, handler)) = proxy_pair(i, holder) {
-        ab(proxy_define_property(
-            i,
-            &target,
-            &handler,
-            key,
-            &Value::Obj(desc),
-        ))?;
-        return Ok(());
-    }
-    if let Value::Obj(o) = holder {
-        ab(define_own_property(i, o, key, &Value::Obj(desc)))?;
-    }
+    // A false [[DefineOwnProperty]] result is ignored by InternalizeJSONProperty.
+    ab(create_data_property(i, holder, key, v))?;
     Ok(())
 }
 

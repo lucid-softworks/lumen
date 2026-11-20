@@ -78,3 +78,69 @@ pub fn op_join(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Val
     }
     Ok(Value::from_string(normalize(&joined)))
 }
+
+pub fn op_resolve(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    // Walk backwards so an absolute argument stops both resolution and validation of earlier
+    // arguments. Keep borrowed segments until the final join instead of repeatedly prepending.
+    let mut parts = Vec::new();
+    let mut absolute = false;
+    for index in (0..args.len()).rev() {
+        let path = path_arg(ctx, args, index, &format!("paths[{index}]"))?;
+        if !path.is_empty() {
+            parts.push(path);
+            if path.starts_with('/') {
+                absolute = true;
+                break;
+            }
+        }
+    }
+    let cwd;
+    if !absolute {
+        // Node observes process.cwd() at call time, including user replacements and throws.
+        let global = ctx.global_this();
+        let process = ctx.member_get(&global, "process")?;
+        let get_cwd = ctx.member_get(&process, "cwd")?;
+        let value = ctx.invoke(get_cwd, process, &[])?;
+        let Value::Str(value) = value else {
+            return Err(ctx.make_error("TypeError", "process.cwd() must return a string"));
+        };
+        #[cfg(windows)]
+        {
+            let posix = value.replace('\\', "/");
+            cwd = posix[posix.find('/').unwrap_or(0)..].to_owned();
+        }
+        #[cfg(not(windows))]
+        {
+            cwd = value.to_string();
+        }
+        if cwd.starts_with('/')
+            && (args.is_empty()
+                || (args.len() == 1
+                    && matches!(&args[0], Value::Str(s) if s.is_empty() || &**s == ".")))
+        {
+            return Ok(Value::str(&cwd));
+        }
+        parts.push(&cwd);
+    }
+    parts.reverse();
+    let normalized = normalize(&parts.join("/"));
+    let resolved = if normalized == "/" {
+        "/"
+    } else {
+        normalized.trim_end_matches('/')
+    };
+    Ok(Value::str(resolved))
+}
+
+pub fn op_dirname(ctx: &mut Ctx, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let path = path_arg(ctx, args, 0, "path")?;
+    let trimmed = path.trim_end_matches('/');
+    let dirname = match trimmed.rfind('/') {
+        Some(0) => "/",
+        Some(1) if path.starts_with('/') => "//",
+        Some(end) => &path[..end],
+        None if path.starts_with('/') => "/",
+        None => ".",
+    };
+    Ok(Value::str(dirname))
+}

@@ -1,5 +1,5 @@
 //! Guarded own-data Array Iterator state; target reads retain existing semantics.
-use super::{ab, map_ptr, set_data};
+use super::{ab, map_ptr};
 use crate::{
     interpreter::Interp,
     value::{Exotic, Property, Value},
@@ -112,10 +112,7 @@ fn next<const FAST: bool>(i: &mut Interp, this: Value, _args: &[Value]) -> Resul
     };
     // An exhausted iterator clears its target so it stays done even if the source later grows.
     if matches!(target, Value::Undefined) {
-        let result = i.new_object();
-        set_data(&result, "value", Value::Undefined);
-        set_data(&result, "done", Value::Bool(true));
-        return Ok(Value::Obj(result));
+        return Ok(i.iter_result_obj(Value::Undefined, true));
     }
     let (idx, kind) = match state {
         Some(state) => state,
@@ -128,27 +125,37 @@ fn next<const FAST: bool>(i: &mut Interp, this: Value, _args: &[Value]) -> Resul
         }
     };
     let len = target_len(i, &target)?;
-    let result = i.new_object();
     if idx >= len {
         ab(i.set_member(&this, "__ai_target", Value::Undefined))?;
-        set_data(&result, "value", Value::Undefined);
-        set_data(&result, "done", Value::Bool(true));
-        return Ok(Value::Obj(result));
+        return Ok(i.iter_result_obj(Value::Undefined, true));
     }
     if FAST {
         write_index(i, &this, (idx + 1) as f64)?;
     } else {
         ab(i.set_member(&this, "__ai_index", Value::Num((idx + 1) as f64)))?;
     }
-    let elem = ab(i.get_member(&target, &idx.to_string()))?;
+    // The pending index write can invoke JS and change the target. Probe only afterward;
+    // an own-data miss always falls through to the existing observable property read.
+    let own = if FAST {
+        match &target {
+            Value::Obj(object) if object.borrow().ic_plain.get() => {
+                i.fast_get_elem(object, idx as f64)
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let elem = match own {
+        Some(value) => value,
+        None => ab(i.get_member(&target, &idx.to_string()))?,
+    };
     let value = match kind {
         1 => Value::Num(idx as f64),
         2 => i.make_array(vec![Value::Num(idx as f64), elem]),
         _ => elem,
     };
-    set_data(&result, "value", value);
-    set_data(&result, "done", Value::Bool(false));
-    Ok(Value::Obj(result))
+    Ok(i.iter_result_obj(value, false))
 }
 
 fn target_len(i: &mut Interp, target: &Value) -> Result<usize, Value> {
@@ -248,6 +255,61 @@ mod tests {
             r=next.call(fake);assert(r.value===8&&lengths===1&&fake.__ai_index===1);
         "#,
             (2, 0, 2),
+        );
+    }
+
+    #[test]
+    fn element_reads_preserve_holes_accessors_and_payloads() {
+        check(
+            r#"
+            var payload={},array=[-0,NaN,payload,undefined],it=array.values();
+            assert(Object.is(it.next().value,-0));assert(Number.isNaN(it.next().value));
+            assert(it.next().value===payload);assert(it.next().value===undefined);
+            var reads=0,proto=Object.create(Array.prototype);
+            Object.defineProperty(proto,'0',{get:function(){reads++;return payload;}});
+            array=new Array(2);Object.setPrototypeOf(array,proto);it=array.values();
+            assert(it.next().value===payload&&reads===1);assert(it.next().value===undefined);
+            array=[1];Object.defineProperty(array,'0',{get:function(){reads++;$262.gc();return payload;}});
+            assert(array.values().next().value===payload&&reads===2);
+            var fake={__ai_target:{0:payload,length:1},__ai_kind:0,__ai_index:0};
+            assert(next.call(fake).value===payload);
+        "#,
+            (8, 8, 0),
+        );
+    }
+
+    #[test]
+    fn element_probe_follows_index_setter_mutations() {
+        check(
+            r#"
+            var log='',target=[4],fake={__ai_target:target,__ai_kind:0};
+            Object.defineProperty(fake,'__ai_index',{
+                get:function(){log+='I';return 0;},
+                set:function(value){
+                    log+='S'+value;
+                    Object.defineProperty(target,'0',{get:function(){log+='G';$262.gc();return 8;}});
+                }
+            });
+            assert(next.call(fake).value===8&&log==='IS1G');
+            var sentinel={};target={length:1,get 0(){throw sentinel;}};
+            fake={__ai_target:target,__ai_kind:1,__ai_index:0};
+            var threw=false;try{next.call(fake);}catch(e){threw=e===sentinel;}
+            assert(threw&&fake.__ai_index===1);
+        "#,
+            (1, 1, 1),
+        );
+    }
+
+    #[test]
+    fn large_array_like_indices_use_the_generic_property_read() {
+        check(
+            r#"
+            var payload={},target={'4294967295':payload,length:4294967296};
+            var fake={__ai_target:target,__ai_kind:0,__ai_index:4294967295};
+            assert(next.call(fake).value===payload&&fake.__ai_index===4294967296);
+            assert(next.call(fake).done);
+        "#,
+            (2, 1, 0),
         );
     }
 

@@ -197,6 +197,8 @@ const posix = makePath("/", false);
 Object.assign(posix, {
   normalize(p) { return __node.pathNormalizePosix(p); },
   join(...paths) { return __node.pathJoinPosix(...paths); },
+  resolve(...paths) { return __node.pathResolvePosix(...paths); },
+  dirname(p) { return __node.pathDirnamePosix(p); },
 });
 const win32 = makePath("\\", true);
 posix.posix = posix;

@@ -179,20 +179,6 @@ function hashSeed(args) {
   return 0n;
 }
 const hashU64 = (v) => BigInt.asUintN(64, v);
-const CRC_TABLE = (() => {
-  const t = new Uint32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    t[n] = c >>> 0;
-  }
-  return t;
-})();
-function crc32Core(b) {
-  let c = 0xffffffff;
-  for (let i = 0; i < b.length; i++) c = CRC_TABLE[(c ^ b[i]) & 0xff] ^ (c >>> 8);
-  return (c ^ 0xffffffff) >>> 0;
-}
 function adler32Core(b) {
   let a = 1, s = 0;
   for (let i = 0; i < b.length; i++) { a = (a + b[i]) % 65521; s = (s + a) % 65521; }
@@ -212,7 +198,7 @@ hash.cityHash32 = function cityHash32(...args) { return __bunhash.cityHash32(has
 hash.xxHash32 = function xxHash32(...args) { return __bunhash.xxHash32(hashBytes(args), hashSeed(args)); };
 hash.murmur32v3 = function murmur32v3(...args) { return __bunhash.murmur32v3(hashBytes(args), hashSeed(args)); };
 hash.murmur32v2 = function murmur32v2(...args) { return __bunhash.murmur32v2(hashBytes(args), hashSeed(args)); };
-hash.crc32 = function crc32(...args) { return crc32Core(hashBytes(args)); }; // seed ignored, like Bun
+hash.crc32 = function crc32(...args) { return __zlib.crc32(hashBytes(args), 0); }; // seed ignored, like Bun
 hash.adler32 = function adler32(...args) { return adler32Core(hashBytes(args)); };
 
 // ---- CryptoHasher / MD5 / SHA* ----------------------------------------------------------------

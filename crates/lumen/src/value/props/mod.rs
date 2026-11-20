@@ -6,6 +6,7 @@ pub(in crate::value) use storage::DenseStorage;
 mod access;
 mod array_builder;
 mod elements;
+mod iterator_result;
 mod mirror;
 mod mutation;
 mod shapes;
@@ -15,7 +16,7 @@ pub(in crate::value) use storage::DenseBuffers;
 #[derive(Clone)]
 pub struct Props {
     pub(in crate::value) entries: Vec<(Rc<str>, Property)>,
-    /// This object serves (or once served) as some object's prototype: structural changes to it
+    /// This object serves (or once served) as some object's prototype: structural/descriptor changes
     /// bump the global [`proto_epoch`], invalidating every property-*creation* inline cache
     /// (their fill-time chain walks proved "no hop shadows this name" — see
     /// [`crate::bytecode::IC_CREATE`]). Set by the creation-IC fill walk itself, one-way.
@@ -182,6 +183,13 @@ impl Props {
     #[inline]
     pub(crate) fn mark_proto(&self) {
         self.proto_flag.set(true);
+    }
+
+    /// Descriptor changes can invalidate a creation proof without changing the object's shape.
+    /// Every prototype inspected by such a proof is marked; unrelated objects cannot affect it.
+    #[inline]
+    pub(crate) fn note_descriptor_change(&self) {
+        self.note_structural();
     }
 
     /// Bump the creation-IC epoch if this object is a marked prototype (called by every

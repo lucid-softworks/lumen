@@ -14,6 +14,23 @@ const LIMIT: usize = 16;
 /// retains the logical native-call boundaries for Array.prototype.values and every
 /// Array Iterator `next`, including the final done step.
 pub(super) fn try_dense(i: &mut Interp, input: &Value) -> Result<Option<Vec<Value>>, Abrupt> {
+    try_dense_with_limit(i, input, LIMIT)
+}
+
+/// Literal spread also clones larger ordinary arrays. Keep the engine's array-size bound,
+/// while applying exactly the same observable-iterator guards and logical call boundaries.
+pub(super) fn try_dense_literal(
+    i: &mut Interp,
+    input: &Value,
+) -> Result<Option<Vec<Value>>, Abrupt> {
+    try_dense_with_limit(i, input, crate::interpreter::MAX_ARRAY_OP_LEN)
+}
+
+fn try_dense_with_limit(
+    i: &mut Interp,
+    input: &Value,
+    limit: usize,
+) -> Result<Option<Vec<Value>>, Abrupt> {
     let Some(values) = original_values(i) else {
         return Ok(None);
     };
@@ -26,7 +43,7 @@ pub(super) fn try_dense(i: &mut Interp, input: &Value) -> Result<Option<Vec<Valu
     let Some(len) = array_length(array) else {
         return Ok(None);
     };
-    if len > LIMIT {
+    if len > limit {
         return Ok(None);
     }
 
@@ -137,6 +154,48 @@ thread_local! { static SUCCESSES: std::cell::Cell<usize> = const { std::cell::Ce
 #[cfg(test)]
 mod tests {
     use crate::{bytecode::Tier, interpreter::MAX_EVAL_DEPTH, value::Value, Completion, Engine};
+
+    #[test]
+    fn dense_literals_preserve_boundaries_beyond_call_spread_limit() {
+        let mut engine = Engine::new();
+        let input = engine
+            .interp
+            .make_array((0..128).map(|n| Value::Num(n as f64)).collect());
+        engine.interp.gc_tick = 0;
+        assert!(matches!(
+            super::try_dense(&mut engine.interp, &input),
+            Ok(None)
+        ));
+        assert_eq!(engine.interp.gc_tick, 0);
+        let values = match super::try_dense_literal(&mut engine.interp, &input) {
+            Ok(Some(values)) => values,
+            _ => panic!("ordinary large literal spread should pass guards"),
+        };
+        assert_eq!(values.len(), 128);
+        assert!(matches!(values[127], Value::Num(n) if n == 127.0));
+        assert_eq!(engine.interp.gc_tick, 130);
+        assert_eq!(engine.interp.depth, 0);
+
+        engine.interp.depth = MAX_EVAL_DEPTH;
+        engine.interp.gc_tick = 0;
+        assert!(super::try_dense_literal(&mut engine.interp, &input).is_err());
+        assert_eq!(engine.interp.depth, MAX_EVAL_DEPTH);
+        assert_eq!(engine.interp.gc_tick, 0);
+        if let Value::Obj(array) = &input {
+            array
+                .borrow_mut()
+                .props
+                .get_mut("length")
+                .unwrap()
+                .set_value(Value::Num(
+                    (crate::interpreter::MAX_ARRAY_OP_LEN + 1) as f64,
+                ));
+        }
+        assert!(matches!(
+            super::try_dense_literal(&mut engine.interp, &input),
+            Ok(None)
+        ));
+    }
 
     fn check(source: &str) {
         for tier in [Tier::Interp, Tier::Bytecode, Tier::Jit] {

@@ -110,6 +110,27 @@ pub(crate) fn trim() {
 /// See the module docs.
 pub struct ClassAlloc;
 
+impl ClassAlloc {
+    /// Terminate the process, letting the OS reclaim this thread's cached free blocks.
+    ///
+    /// Like [`std::process::exit`], this does not run stack destructors. Executables must
+    /// finish their event loop and drop runtime resources before calling it. Ordinary
+    /// thread teardown and library users keep the normal cache-draining behavior.
+    ///
+    /// The cache contains raw storage whose Rust values have already been destroyed.
+    /// Discarding its free-list links avoids individually returning those blocks to the
+    /// system allocator immediately before the process address space is reclaimed.
+    pub fn exit(code: i32) -> ! {
+        let _ = CACHE.try_with(|cache| {
+            for (head, count) in cache.heads.iter().zip(&cache.counts) {
+                head.set(std::ptr::null_mut());
+                count.set(0);
+            }
+        });
+        std::process::exit(code);
+    }
+}
+
 unsafe impl GlobalAlloc for ClassAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if let Some(class) = class_of(layout.size(), layout.align()) {

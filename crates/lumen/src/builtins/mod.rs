@@ -729,9 +729,7 @@ pub(crate) fn proxy_gopd_value(
             "proxy 'getOwnPropertyDescriptor' trap is not callable",
         ));
     }
-    let key_val = i
-        .sym_from_key(key)
-        .unwrap_or_else(|| Value::from_string(key.to_string()));
+    let key_val = i.sym_from_key(key).unwrap_or_else(|| Value::str(key));
     let res = ab(i.call(trap, handler.clone(), &[target.clone(), key_val]))?;
     if matches!(res, Value::Undefined) {
         // The trap may report a property absent only if the target permits it.
@@ -874,9 +872,7 @@ fn proxy_key_enumerable(
 ) -> Result<bool, Value> {
     let trap = ab(i.get_member(handler, "getOwnPropertyDescriptor"))?;
     if trap.is_callable() {
-        let kv = i
-            .sym_from_key(key)
-            .unwrap_or_else(|| Value::from_string(key.to_string()));
+        let kv = i.sym_from_key(key).unwrap_or_else(|| Value::str(key));
         let res = ab(i.call(trap, handler.clone(), &[target.clone(), kv]))?;
         if matches!(res, Value::Undefined) {
             return Ok(false);
@@ -904,13 +900,23 @@ fn proxy_define_property(
     key: &str,
     desc: &Value,
 ) -> Result<bool, Abrupt> {
+    proxy_define_property_input(i, target, handler, key, DescriptorInput::Object(desc))
+}
+
+fn proxy_define_property_input(
+    i: &mut Interp,
+    target: &Value,
+    handler: &Value,
+    key: &str,
+    desc: DescriptorInput<'_>,
+) -> Result<bool, Abrupt> {
     let trap = i.get_member(handler, "defineProperty")?;
     if matches!(trap, Value::Undefined | Value::Null) {
         if let Some((t2, h2)) = proxy_pair(i, target) {
-            return proxy_define_property(i, &t2, &h2, key, desc);
+            return proxy_define_property_input(i, &t2, &h2, key, desc);
         }
         return if let Value::Obj(t) = target {
-            define_own_property(i, t, key, desc)
+            define_own_property_input(i, t, key, desc)
         } else {
             Ok(false)
         };
@@ -918,12 +924,10 @@ fn proxy_define_property(
     if !trap.is_callable() {
         return Err(i.throw("TypeError", "proxy 'defineProperty' trap is not callable"));
     }
-    let key_val = i
-        .sym_from_key(key)
-        .unwrap_or_else(|| Value::from_string(key.to_string()));
+    let key_val = i.sym_from_key(key).unwrap_or_else(|| Value::str(key));
     // The trap receives FromPropertyDescriptor(desc): a fresh object holding only the present
     // fields, in the spec's order (value, writable, get, set, enumerable, configurable).
-    let pd = build_partial(i, desc)?;
+    let pd = desc.read(i)?;
     let norm = i.new_object();
     if let Some(v) = &pd.value {
         set_data(&norm, "value", v.clone());
@@ -1235,24 +1239,7 @@ fn json_create_data_prop_or_throw(
     key: &str,
     v: Value,
 ) -> Result<(), Value> {
-    let desc = i.new_object();
-    set_data(&desc, "value", v);
-    set_data(&desc, "writable", Value::Bool(true));
-    set_data(&desc, "enumerable", Value::Bool(true));
-    set_data(&desc, "configurable", Value::Bool(true));
-    let ok = if let Some((target, handler)) = proxy_pair(i, holder) {
-        ab(proxy_define_property(
-            i,
-            &target,
-            &handler,
-            key,
-            &Value::Obj(desc),
-        ))?
-    } else if let Value::Obj(o) = holder {
-        ab(define_own_property(i, o, key, &Value::Obj(desc)))?
-    } else {
-        false
-    };
+    let ok = ab(create_data_property(i, holder, key, v))?;
     if !ok {
         return Err(i.make_error("TypeError", "cannot create data property"));
     }
@@ -4152,6 +4139,46 @@ struct PartialDesc {
     enumerable: Option<bool>,
     configurable: Option<bool>,
 }
+/// Internal abstract operations already have a descriptor record. Only public descriptor
+/// objects run ToPropertyDescriptor; proxy traps still receive a fresh observable object.
+#[derive(Clone, Copy)]
+enum DescriptorInput<'a> {
+    Object(&'a Value),
+    Internal(&'a PartialDesc),
+}
+
+impl<'a> DescriptorInput<'a> {
+    fn read(self, i: &mut Interp) -> Result<std::borrow::Cow<'a, PartialDesc>, Abrupt> {
+        match self {
+            Self::Object(value) => build_partial(i, value).map(std::borrow::Cow::Owned),
+            Self::Internal(desc) => Ok(std::borrow::Cow::Borrowed(desc)),
+        }
+    }
+}
+
+fn create_data_property(
+    i: &mut Interp,
+    holder: &Value,
+    key: &str,
+    value: Value,
+) -> Result<bool, Abrupt> {
+    let desc = PartialDesc {
+        value: Some(value),
+        writable: Some(true),
+        enumerable: Some(true),
+        configurable: Some(true),
+        ..PartialDesc::default()
+    };
+    let input = DescriptorInput::Internal(&desc);
+    if let Some((target, handler)) = proxy_pair(i, holder) {
+        proxy_define_property_input(i, &target, &handler, key, input)
+    } else if let Value::Obj(object) = holder {
+        define_own_property_input(i, object, key, input)
+    } else {
+        Ok(false)
+    }
+}
+
 /// CompletePropertyDescriptor: fill in default attributes for a partial descriptor.
 fn complete_descriptor(pd: PartialDesc) -> Property {
     if pd.is_accessor() {
@@ -4295,8 +4322,17 @@ fn defer_trigger_v(i: &mut Interp, v: &Value, key: Option<&str>) -> Result<(), V
 }
 
 fn define_own_property(i: &mut Interp, o: &Gc, key: &str, desc: &Value) -> Result<bool, Abrupt> {
+    define_own_property_input(i, o, key, DescriptorInput::Object(desc))
+}
+
+fn define_own_property_input(
+    i: &mut Interp,
+    o: &Gc,
+    key: &str,
+    desc: DescriptorInput<'_>,
+) -> Result<bool, Abrupt> {
     i.defer_trigger(o, Some(key))?;
-    let d = build_partial(i, desc)?;
+    let d = desc.read(i)?;
     // ArgumentsExoticObject [[DefineOwnProperty]]: sync the live parameter value into the
     // ordinary property first; after a successful ordinary define, a plain value write goes
     // through the map, and only an accessor or writable:false severs the alias.
@@ -4333,10 +4369,6 @@ fn define_own_property_ordinary(
     key: &str,
     d: &PartialDesc,
 ) -> Result<bool, Abrupt> {
-    // A defineProperty can rewrite attributes (data → accessor, writable → false) without a
-    // structural change: conservatively invalidate the property-creation inline caches, whose
-    // fill-time chain walks assumed no such shadow could appear (the op is rare).
-    crate::value::bump_proto_epoch();
     let d = d.clone();
     // Module namespace [[DefineOwnProperty]]: a String key is only redefinable to a descriptor that
     // matches the export's fixed shape (writable, enumerable, non-configurable, same value); adding
@@ -4381,7 +4413,14 @@ fn define_own_property_ordinary(
             crate::value::TaIndex::Ordinary => {}
         }
     }
-    let is_array = matches!(o.borrow().exotic, crate::value::Exotic::Array);
+    let is_array = {
+        let object = o.borrow();
+        // Descriptor changes can invalidate a chain proof without changing its shape. Cache
+        // fills mark every visited prototype; unrelated objects need no invalidation. Exotic
+        // side-table objects handled above cannot participate in those proofs.
+        object.props.note_descriptor_change();
+        matches!(object.exotic, crate::value::Exotic::Array)
+    };
     // Array exotic [[DefineOwnProperty]]: `length` and array indices have special rules.
     if is_array && key == "length" {
         return array_set_length(i, o, &d);
@@ -7074,10 +7113,7 @@ fn iterator_proto_weird_set(
 }
 
 fn iter_result(i: &mut Interp, value: Value, done: bool) -> Value {
-    let o = i.new_object();
-    set_data(&o, "value", value);
-    set_data(&o, "done", Value::Bool(done));
-    Value::Obj(o)
+    i.iter_result_obj(value, done)
 }
 
 /// `Iterator.zip` / `Iterator.zipKeyed`: validate options, open every input iterator eagerly
@@ -7867,19 +7903,13 @@ fn string_iter_next(i: &mut Interp, this: Value, _a: &[Value]) -> Result<Value, 
     // A smuggled surrogate pair is one code point: yield both scalars together.
     if let Some(next) = rest.next() {
         if crate::jstr::paired_char(ch, next).is_some() {
-            set_internal(
-                &o,
-                "__si_index",
-                Value::Num((idx + ch.len_utf8() + next.len_utf8()) as f64),
-            );
-            let mut both = String::new();
-            both.push(ch);
-            both.push(next);
-            return Ok(i.iter_result_obj(Value::from_string(both), false));
+            let end = idx + ch.len_utf8() + next.len_utf8();
+            set_internal(&o, "__si_index", Value::Num(end as f64));
+            return Ok(i.iter_result_obj(Value::str(&s[idx..end]), false));
         }
     }
     set_internal(&o, "__si_index", Value::Num((idx + ch.len_utf8()) as f64));
-    Ok(i.iter_result_obj(Value::from_string(ch.to_string()), false))
+    Ok(i.iter_result_obj(Value::str(ch), false))
 }
 
 /// `next()` for a generator object built by `make_generator`: walk the buffered values, then throw
@@ -8429,11 +8459,11 @@ pub(crate) fn nf_string_replace(
             }
         }
     }
-    let s = this_string(i, &this)?.to_string();
+    let s = this_string(i, &this)?;
     let pat = ab(i.to_string(&arg(args, 0)))?;
     let repl = prep_repl(i, &arg(args, 1))?;
     match s.find(pat.as_ref()) {
-        None => Ok(Value::from_string(s)),
+        None => Ok(Value::Str(s)),
         Some(pos) => {
             let matched = &s[pos..pos + pat.len()];
             let rep = string_replacement(i, &repl, matched, &s, pos)?;
@@ -8569,9 +8599,7 @@ pub(crate) fn nf_string_split(i: &mut Interp, this: Value, args: &[Value]) -> Re
                     .map(|u| Value::Str(crate::jstr::unit_lstr(u)))
                     .collect()
             } else {
-                s.split(sep.as_ref())
-                    .map(|p| Value::from_string(p.to_string()))
-                    .collect()
+                s.split(sep.as_ref()).map(Value::str).collect()
             };
             parts.truncate(limit);
             Ok(i.make_array(parts))
@@ -9035,7 +9063,7 @@ fn install_string(it: &mut Interp) {
                 }
             }
         }
-        let s = this_string(i, &this)?.to_string();
+        let s = this_string(i, &this)?;
         let pat = ab(i.to_string(&arg(args, 0)))?;
         // ToString(replaceValue) happens exactly once, before any matching.
         let repl = prep_repl(i, &arg(args, 1))?;
@@ -9053,13 +9081,20 @@ fn install_string(it: &mut Interp) {
         }
         let mut out = String::new();
         let mut rest = s.as_str();
+        let Some(mut pos) = rest.find(pat.as_ref()) else {
+            return Ok(Value::Str(s));
+        };
         let mut base = 0usize;
-        while let Some(pos) = rest.find(pat.as_ref()) {
+        loop {
             out.push_str(&rest[..pos]);
             let rep = string_replacement(i, &repl, pat.as_ref(), &s, base + pos)?;
             out.push_str(&rep);
             rest = &rest[pos + pat.len()..];
             base += pos + pat.len();
+            match rest.find(pat.as_ref()) {
+                Some(next) => pos = next,
+                None => break,
+            }
         }
         out.push_str(rest);
         Ok(Value::from_string(out))
@@ -9300,7 +9335,7 @@ fn string_replacement(
     i: &mut Interp,
     repl: &Repl,
     matched: &str,
-    whole: &str,
+    whole: &crate::lstr::LStr,
     pos: usize,
 ) -> Result<String, Value> {
     if let Repl::Fn(f) = repl {
@@ -9310,9 +9345,9 @@ fn string_replacement(
             f.clone(),
             Value::Undefined,
             &[
-                Value::from_string(matched.to_string()),
+                Value::str(matched),
                 Value::Num(unit_pos as f64),
-                Value::from_string(whole.to_string()),
+                Value::Str(whole.clone()),
             ],
         ))?;
         return Ok(ab(i.to_string(&r))?.to_string());
