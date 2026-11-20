@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5](https://github.com/lucid-softworks/lumen/compare/v0.1.4...v0.1.5) - 2026-11-20
+
+### Fixed
+
+- *(lumen)* suspend while closing for-await iterators ([#51](https://github.com/lucid-softworks/lumen/pull/51))
+- tail-call side effects, non-extensible array push, and nested async arrows ([#50](https://github.com/lucid-softworks/lumen/pull/50))
+- *(bytecode)* preserve arguments captured by arrow functions ([#49](https://github.com/lucid-softworks/lumen/pull/49))
+
+### Other
+
+- speed up Vite builds and add a profiled Linux CLI build ([#55](https://github.com/lucid-softworks/lumen/pull/55))
+- reduce Vite startup overhead and add x64 JIT fast paths ([#54](https://github.com/lucid-softworks/lumen/pull/54))
+
 ## [0.1.4](https://github.com/lucid-softworks/lumen/compare/v0.1.3...v0.1.4) - 2026-11-18
 
 ### Added
